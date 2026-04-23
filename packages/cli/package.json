@@ -1,0 +1,26 @@
+{
+  "name": "@networkselfmd/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "networkselfmd": "dist/bin.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@networkselfmd/node": "workspace:*",
+    "ink": "^5.1.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.0",
+    "commander": "^13.1.0",
+    "chalk": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0"
+  }
+}
