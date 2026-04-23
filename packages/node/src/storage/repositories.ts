@@ -292,6 +292,12 @@ export class SenderKeyRepository {
       .run(Buffer.from(groupId), Buffer.from(publicKey));
   }
 
+  listForGroup(groupId: Uint8Array): StoredSenderKey[] {
+    return this.db
+      .prepare('SELECT * FROM sender_keys WHERE group_id = ?')
+      .all(Buffer.from(groupId)) as StoredSenderKey[];
+  }
+
   deleteForGroup(groupId: Uint8Array): void {
     this.db
       .prepare('DELETE FROM sender_keys WHERE group_id = ?')

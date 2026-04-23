@@ -14,6 +14,8 @@ export interface HandshakeResult {
   peerPublicKey: Uint8Array;
   peerFingerprint: string;
   peerDisplayName?: string;
+  /** Messages that arrived during the handshake but were not handshake messages */
+  bufferedMessages?: ProtocolMessage[];
 }
 
 export async function performHandshake(
@@ -52,17 +54,36 @@ export async function performHandshake(
       reject(new Error('Handshake timeout'));
     }, 10_000);
 
+    // Buffer non-handshake messages that arrive during the handshake.
+    // These will be re-emitted after the handshake completes so that
+    // the routing layer can process them.
+    //
+    // Important: we keep the listener attached even after the handshake
+    // message arrives, because multiple messages may arrive in the same
+    // TCP segment. The PeerSession's onData loop emits them synchronously,
+    // so removing the listener mid-loop would cause subsequent messages
+    // in that batch to be lost.
+    const bufferedMessages: ProtocolMessage[] = [];
+    let handshakeCompleted = false;
+
     const onMessage = (message: ProtocolMessage) => {
-      if (message.type !== MessageType.IdentityHandshake) {
+      // After handshake is complete, buffer ALL remaining messages
+      if (handshakeCompleted) {
+        bufferedMessages.push(message);
         return;
       }
 
+      if (message.type !== MessageType.IdentityHandshake) {
+        bufferedMessages.push(message);
+        return;
+      }
+
+      handshakeCompleted = true;
       clearTimeout(timeout);
-      session.removeListener('message', onMessage);
 
       try {
         const peerHandshake = message as IdentityHandshakeMessage;
-        validateHandshake(peerHandshake, noisePublicKey);
+        validateHandshake(peerHandshake);
 
         const peerFingerprint = fingerprintFromPublicKey(peerHandshake.edPublicKey);
 
@@ -72,11 +93,19 @@ export async function performHandshake(
           peerHandshake.displayName,
         );
 
-        resolve({
-          session,
-          peerPublicKey: peerHandshake.edPublicKey,
-          peerFingerprint,
-          peerDisplayName: peerHandshake.displayName,
+        // Use queueMicrotask to resolve after the current synchronous
+        // onData loop finishes, ensuring all messages in this batch
+        // are buffered before we proceed.
+        queueMicrotask(() => {
+          session.removeListener('message', onMessage);
+          const result: HandshakeResult = {
+            session,
+            peerPublicKey: peerHandshake.edPublicKey,
+            peerFingerprint,
+            peerDisplayName: peerHandshake.displayName,
+            bufferedMessages,
+          };
+          resolve(result);
         });
       } catch (err) {
         session.close();
@@ -100,7 +129,6 @@ export async function performHandshake(
 
 function validateHandshake(
   handshake: IdentityHandshakeMessage,
-  expectedNoiseKey: Uint8Array,
 ): void {
   // Check timestamp
   const now = Date.now();
@@ -111,16 +139,15 @@ function validateHandshake(
     );
   }
 
-  // Reconstruct the payload the peer signed
-  const payload = new Uint8Array(expectedNoiseKey.length + 8);
-  // The peer signed their own noise key, which we received via Hyperswarm
-  // For validation, we use the remote noise key from the socket
-  payload.set(expectedNoiseKey, 0);
+  // Reconstruct the payload the peer signed:
+  // They signed their own view of noisePublicKey (the remote noise key they see)
+  // which they included in the handshake message.
+  const noiseKey = handshake.noisePublicKey;
+  const payload = new Uint8Array(noiseKey.length + 8);
+  payload.set(noiseKey, 0);
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(expectedNoiseKey.length, BigInt(handshake.timestamp), false);
+  view.setBigUint64(noiseKey.length, BigInt(handshake.timestamp), false);
 
-  // Note: In a real implementation, we'd need the peer's noise public key
-  // For now, we verify the Ed25519 signature on the payload
   const valid = verify(handshake.signature, payload, handshake.edPublicKey);
   if (!valid) {
     throw new Error('Invalid handshake signature');

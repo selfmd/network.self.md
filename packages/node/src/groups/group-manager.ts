@@ -94,6 +94,9 @@ export class GroupManager extends EventEmitter {
     // Join swarm topic
     await this.swarm.join(Buffer.from(topic));
 
+    // Distribute sender keys to already-connected peers
+    await this.distributeSenderKeys(groupId);
+
     this.emit('group:created', { groupId, name, topic });
 
     return { groupId, topic: Buffer.from(topic) };
@@ -102,6 +105,9 @@ export class GroupManager extends EventEmitter {
   async joinGroup(groupId: Uint8Array, name: string = 'Unknown Group'): Promise<void> {
     const topic = deriveKey(groupId, 'networkselfmd-topic-v1', '', 32);
     this.groupRepo.join(groupId, name, 'member');
+
+    // Add self as member
+    this.groupRepo.addMember(groupId, this.identity.edPublicKey, 'member');
 
     // Generate our sender key
     const senderKeyState = SenderKeys.generate();
@@ -113,6 +119,19 @@ export class GroupManager extends EventEmitter {
     );
 
     await this.swarm.join(Buffer.from(topic));
+
+    // Register any peers whose sender keys we already received for this group
+    const existingKeys = this.senderKeyRepo.listForGroup(groupId);
+    for (const key of existingKeys) {
+      const pk = new Uint8Array(key.public_key);
+      if (!buffersEqual(pk, this.identity.edPublicKey)) {
+        this.groupRepo.addMember(groupId, pk, 'member');
+      }
+    }
+
+    // Distribute sender keys to already-connected peers
+    await this.distributeSenderKeys(groupId);
+
     this.emit('group:joined', { groupId, name });
   }
 
@@ -205,25 +224,36 @@ export class GroupManager extends EventEmitter {
 
     const message: ProtocolMessage = distribution;
 
-    const members = this.groupRepo.getMembers(groupId);
-    for (const member of members) {
-      const memberKey = new Uint8Array(member.public_key);
-      if (buffersEqual(memberKey, this.identity.edPublicKey)) continue;
-      const fp = fingerprintFromPublicKey(memberKey);
-      const session = this.swarm.getSession(fp);
-      if (session) {
-        session.send(message);
+    // Send to all connected peers (not just known members).
+    // Peers that share this group will store the key; others will ignore it.
+    const allSessions = this.swarm.getAllSessions();
+    for (const session of allSessions) {
+      if (session.peerPublicKey && !buffersEqual(session.peerPublicKey, this.identity.edPublicKey)) {
+        try {
+          session.send(message);
+        } catch {
+          // Ignore send errors (session may have closed)
+        }
       }
     }
   }
 
   handleSenderKeyDistribution(message: SenderKeyDistributionMessage): void {
+    // Store the sender key regardless of group membership.
+    // This handles the case where a peer distributes keys before we join
+    // the group -- we'll have the key ready when we do join.
     this.senderKeyRepo.store(
       message.groupId,
       message.signingPublicKey,
       message.chainKey,
       message.chainIndex,
     );
+
+    // If we are a member of this group, register the sender as a member
+    const group = this.groupRepo.find(message.groupId);
+    if (group) {
+      this.groupRepo.addMember(message.groupId, message.signingPublicKey, 'member');
+    }
   }
 
   async handleGroupMessage(

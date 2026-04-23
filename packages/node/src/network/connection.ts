@@ -36,7 +36,16 @@ export class PeerSession extends EventEmitter {
     }) as (...args: unknown[]) => void);
 
     this.socket.on('error', ((...args: unknown[]) => {
-      this.emit('error', args[0] as Error);
+      const err = args[0] as Error & { code?: string };
+      // ECONNRESET is expected during teardown — treat as close, not error
+      if (err.code === 'ECONNRESET') {
+        if (this.state !== 'closed') {
+          this.state = 'closed';
+          this.emit('close');
+        }
+        return;
+      }
+      this.emit('error', err);
     }) as (...args: unknown[]) => void);
 
     this.socket.on('close', () => {

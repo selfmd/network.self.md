@@ -59,11 +59,8 @@ export class SwarmManager extends EventEmitter {
       }
       this.sessions.set(peerFingerprint, session);
 
-      session.setReady();
-      this.emit('peer:connected', result);
-      this.emit('peer:verified', result);
-
-      // Route incoming messages
+      // Set up message routing BEFORE emitting events or replaying
+      // buffered messages, to prevent dropping messages.
       session.on('message', (message) => {
         this.router.route(session, message).catch((err) => {
           this.emit('error', err);
@@ -81,6 +78,19 @@ export class SwarmManager extends EventEmitter {
       session.on('error', (err) => {
         this.emit('error', err);
       });
+
+      session.setReady();
+      this.emit('peer:connected', result);
+      this.emit('peer:verified', result);
+
+      // Replay any messages that arrived during the handshake
+      if (result.bufferedMessages) {
+        for (const msg of result.bufferedMessages) {
+          this.router.route(session, msg).catch((err) => {
+            this.emit('error', err);
+          });
+        }
+      }
     } catch (err) {
       this.emit('error', err);
     }
