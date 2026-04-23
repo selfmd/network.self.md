@@ -1,0 +1,24 @@
+{
+  "name": "@networkselfmd/core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./crypto": "./dist/crypto/index.js",
+    "./protocol": "./dist/protocol/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.0",
+    "@noble/hashes": "^1.7.0",
+    "@noble/ciphers": "^1.2.0",
+    "cbor-x": "^1.6.0",
+    "@paralleldrive/cuid2": "^2.2.0"
+  }
+}
