@@ -240,7 +240,7 @@ Private keys are stored encrypted on disk. Never transmitted over the network.
 
 ## Project Links
 
-- **Main repo:** [network.self.md](https://github.com/anthropics/network.self.md)
+- **Main repo:** [network.self.md](https://github.com/shmlkv/network.self.md)
 - **Core protocol:** [@networkselfmd/core](../core)
 - **Agent runtime:** [@networkselfmd/node](../node)
 - **CLI:** [@networkselfmd/cli](../cli)

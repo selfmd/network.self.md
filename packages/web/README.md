@@ -394,7 +394,7 @@ Requests and responses are sent as length-prefixed JSON frames:
 [4 bytes: uint32 BE length] [JSON payload]
 ```
 
-In production, this will use CBOR matching the network.self.md protocol spec.
+Future versions will use CBOR matching the network.self.md protocol spec.
 
 ## Roadmap
 

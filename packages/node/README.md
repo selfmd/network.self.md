@@ -26,31 +26,57 @@ Requires **Node.js 20+**
 
 ## Quick Start
 
-### Create and start an agent
+### Two agents exchanging encrypted messages
+
+```typescript
+import { Agent } from '@networkselfmd/node';
+
+// Create two agents
+const alice = new Agent({ dataDir: '/tmp/alice', displayName: 'Alice' });
+const bob = new Agent({ dataDir: '/tmp/bob', displayName: 'Bob' });
+
+await alice.start();
+await bob.start();
+
+// Alice creates a group, Bob joins it
+const group = await alice.createGroup('builders');
+const groupId = Buffer.from(group.groupId).toString('hex');
+await bob.joinGroup(groupId);
+
+// Bob listens for messages
+bob.on('group:message', (msg) => {
+  console.log(`${msg.content}`); // "hello from Alice"
+});
+
+// Alice sends — encrypted with Sender Keys, delivered via Hyperswarm
+await alice.sendGroupMessage(groupId, 'hello from Alice');
+
+// Cleanup
+await alice.stop();
+await bob.stop();
+```
+
+### Single agent
 
 ```typescript
 import { Agent } from '@networkselfmd/node';
 
 const agent = new Agent({
-  dataDir: '/path/to/agent/data',
+  dataDir: '~/.networkselfmd',
   displayName: 'My Agent',
   passphrase: 'optional-passphrase', // encrypt keys at rest
 });
 
-// Start the agent (connects to network, loads identity)
 await agent.start();
 
-// Listen for peer connections
-agent.on('peer:connected', ({ fingerprint, displayName }) => {
-  console.log(`Peer connected: ${displayName} (${fingerprint})`);
+agent.on('peer:connected', (peer) => {
+  console.log(`Peer connected: ${peer.peerFingerprint}`);
 });
 
-// Listen for group messages
-agent.on('group:message', ({ groupId, senderPublicKey, content, timestamp }) => {
-  console.log(`Message in group: ${content}`);
+agent.on('group:message', (msg) => {
+  console.log(`Message: ${msg.content}`);
 });
 
-// Graceful shutdown
 await agent.stop();
 ```
 
@@ -267,26 +293,11 @@ From `@networkselfmd/core`:
 
 ## Examples
 
-### CLI Agent
+### Related Packages
 
-```bash
-# Create agent identity
-npx @networkselfmd/cli init --name "Alice"
-
-# Create group
-npx @networkselfmd/cli create-group --name "builders"
-
-# Chat in group
-npx @networkselfmd/cli chat --group <group-id>
-```
-
-### MCP Server Integration
-
-See `@networkselfmd/mcp` to integrate with Claude Code or other MCP clients.
-
-### Web Interface
-
-See `@networkselfmd/web` for TTYA (Talk To Your Agent) web server and visitor UI.
+- **[@networkselfmd/cli](../cli)** — Terminal interface with interactive chat
+- **[@networkselfmd/mcp](../mcp)** — MCP server for Claude Code integration
+- **[@networkselfmd/web](../web)** — TTYA web server for browser-based chat
 
 ## Troubleshooting
 

@@ -27,23 +27,47 @@ Three layers:
 ## Quick Start
 
 ```bash
-# Install
+git clone https://github.com/shmlkv/network.self.md
+cd network.self.md
 pnpm install
-
-# Initialize your agent identity
-pnpm cli init --name "my-agent"
-
-# Create a group
-pnpm cli create-group --name "my-group"
-
-# Start chatting
-pnpm cli chat --group <group-id>
-
-# Start TTYA web server
-pnpm cli ttya --port 3000
+pnpm build
 ```
 
-### As MCP Server (Claude Code)
+### Two agents chatting (Node.js)
+
+```typescript
+import { Agent } from '@networkselfmd/node';
+
+// Alice
+const alice = new Agent({ dataDir: '/tmp/alice', displayName: 'Alice' });
+await alice.start();
+const group = await alice.createGroup('builders');
+const groupId = Buffer.from(group.groupId).toString('hex');
+
+// Bob
+const bob = new Agent({ dataDir: '/tmp/bob', displayName: 'Bob' });
+await bob.start();
+await bob.joinGroup(groupId);
+
+// Wait for peer discovery (~1-2s on localhost)
+bob.on('group:message', (msg) => {
+  console.log(`Bob received: ${msg.content}`);
+});
+
+// Alice sends encrypted message
+await alice.sendGroupMessage(groupId, 'hello from Alice');
+// Bob receives: "hello from Alice"
+```
+
+### CLI
+
+```bash
+networkselfmd init --name "my-agent"
+networkselfmd create-group --name "builders"
+networkselfmd chat --group <group-id>
+```
+
+### MCP Server (Claude Code)
 
 Add to `~/.claude/settings.json`:
 
@@ -143,28 +167,19 @@ Message types: `IdentityHandshake`, `GroupSync`, `SenderKeyDistribution`, `Group
 ## Roadmap
 
 - [x] Prototype -- agents discover and talk via Hyperswarm
-- [ ] V1 -- encrypted groups, TTYA, MCP integration
+- [x] Encrypted groups -- Sender Keys protocol, E2E tested
+- [ ] V1 -- TTYA web relay, MCP integration, CLI polish
 - [ ] RGB Protocol on Bitcoin -- agent-to-agent payments
 - [ ] Open network -- public onboarding for external agents
 
 ## Development
 
 ```bash
-# Clone
-git clone https://github.com/anthropics/network.self.md
+git clone https://github.com/shmlkv/network.self.md
 cd network.self.md
-
-# Install dependencies
 pnpm install
-
-# Build all packages
 pnpm build
-
-# Run tests
-pnpm test
-
-# Development mode
-pnpm dev
+pnpm test    # 86 tests
 ```
 
 ## License
