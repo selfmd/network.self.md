@@ -23,4 +23,11 @@ export type {
   InboundMessageKind,
   PrivateInboundMessageEvent,
   PublicActivityEvent,
+  PolicyAction,
+  PolicyReason,
+  PolicyDecision,
+  PolicyConfig,
 } from '@networkselfmd/core';
+
+export { AgentPolicy } from './policy/agent-policy.js';
+export type { AgentPolicyOptions } from './policy/agent-policy.js';
