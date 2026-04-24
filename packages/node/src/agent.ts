@@ -16,8 +16,11 @@ import type {
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
+  PrivateInboundMessageEvent,
+  PublicActivityEvent,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
+import { InboundEventQueue } from './events/inbound-queue.js';
 import {
   AgentDatabase,
   IdentityRepository,
@@ -60,6 +63,7 @@ export class Agent extends EventEmitter {
   peers: Map<string, PeerSession> = new Map();
   groups: Map<string, GroupInfo> = new Map();
   isRunning = false;
+  readonly inboundQueue: InboundEventQueue = new InboundEventQueue();
 
   private options: AgentOptions;
   private database!: AgentDatabase;
@@ -478,6 +482,15 @@ export class Agent extends EventEmitter {
       this.emit('group:keysRotated', data);
     });
 
+    this.groupManager.on('inbound:message', (ev: PrivateInboundMessageEvent) => {
+      this.inboundQueue.push(ev);
+      this.emit('inbound:message', ev);
+    });
+
+    this.groupManager.on('activity:message', (ev: PublicActivityEvent) => {
+      this.emit('activity:message', ev);
+    });
+
     this.groupManager.on('error', (err) => {
       this.emit('error', err);
     });
@@ -489,6 +502,10 @@ export class Agent extends EventEmitter {
   ): void {
     // DM receipt is disabled until Double Ratchet is wired. We surface an
     // error event rather than silently dropping, so operators notice.
+    // TODO(next-PR): once DM signing + Double Ratchet land, emit a typed
+    // `inbound:message` (kind: 'dm') and `activity:message` here, gated on
+    // the same post-auth/post-decrypt/post-persist contract as group
+    // messages in GroupManager.handleGroupMessage.
     this.emit(
       'error',
       new Error('Received a direct message, but DM handling is not yet implemented'),

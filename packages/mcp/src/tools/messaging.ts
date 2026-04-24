@@ -1,6 +1,39 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Agent } from '@networkselfmd/node';
+import type { Agent, PrivateInboundMessageEvent } from '@networkselfmd/node';
+
+export interface InboundEventDTO {
+  kind: 'group' | 'dm';
+  messageId: string;
+  groupIdHex?: string;
+  senderPublicKeyHex: string;
+  senderFingerprint: string;
+  plaintextUtf8?: string;
+  plaintextBase64: string;
+  timestamp: number;
+  receivedAt: number;
+}
+
+export function toInboundEventDTO(ev: PrivateInboundMessageEvent): InboundEventDTO {
+  const dto: InboundEventDTO = {
+    kind: ev.kind,
+    messageId: ev.messageId,
+    groupIdHex: ev.groupId ? Buffer.from(ev.groupId).toString('hex') : undefined,
+    senderPublicKeyHex: Buffer.from(ev.senderPublicKey).toString('hex'),
+    senderFingerprint: ev.senderFingerprint,
+    plaintextBase64: Buffer.from(ev.plaintext).toString('base64'),
+    timestamp: ev.timestamp,
+    receivedAt: ev.receivedAt,
+  };
+  // Strict UTF-8 decode. If plaintext isn't valid UTF-8, omit the field —
+  // consumers fall back to plaintextBase64.
+  try {
+    dto.plaintextUtf8 = new TextDecoder('utf-8', { fatal: true }).decode(ev.plaintext);
+  } catch {
+    // non-UTF-8 payload — plaintextUtf8 stays undefined
+  }
+  return dto;
+}
 
 export function registerMessagingTools(server: McpServer, agent: Agent): void {
   server.tool(
@@ -34,6 +67,23 @@ export function registerMessagingTools(server: McpServer, agent: Agent): void {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({ sent: true }),
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    'get_pending_inbound_events',
+    'Drain pending inbound (authenticated, decrypted) message events for the agent runtime. Each event carries enough context for an agent to decide act | ask | ignore.',
+    {
+      limit: z.number().optional().describe('Maximum number of events to drain (default 50)'),
+    },
+    async ({ limit }) => {
+      const events = agent.inboundQueue.drain(limit ?? 50);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ events: events.map(toInboundEventDTO) }),
         }],
       };
     },

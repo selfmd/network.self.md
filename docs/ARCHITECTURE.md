@@ -111,7 +111,35 @@ MCP server wrapping an Agent instance. Exposes all agent operations as MCP tools
 10. SenderKeys.decrypt(record, header, ciphertext) → plaintext
 11. Signature verified with A's Ed25519 public key
 12. Message stored in SQLite, event emitted
+13. Inbound event bridge fires (see below)
 ```
+
+### Inbound event bridge
+
+After a group message is authenticated, decrypted, and persisted, the
+`GroupManager` emits two typed events in addition to the legacy
+`group:message` (preserved unchanged for existing listeners):
+
+- `inbound:message` — `PrivateInboundMessageEvent`. Local-only. Carries the
+  decrypted plaintext plus enough context (`messageId`, `groupId`,
+  `senderPublicKey`, `senderFingerprint`, `timestamp`, `receivedAt`) for an
+  agent runtime to decide **act | ask | ignore**. Buffered in the
+  per-`Agent` `InboundEventQueue` so poll-based consumers (MCP, CLI) don't
+  drop events between polls.
+- `activity:message` — `PublicActivityEvent`. Metadata-only
+  (`groupIdHex`, `senderFingerprint`, `timestamp`, `byteLength`). Safe for
+  public logs, census, future heartbeat/dashboard. Emitted live; never
+  queued.
+
+Neither event is emitted on rejected paths (invalid signature, unknown
+member, failed decryption, unknown group). Direct messages do not yet fire
+these events — the DM receive path is fail-closed until Double Ratchet
+lands; the types already model `kind: 'dm'` for forward compatibility.
+
+MCP exposes a poll-style tool `get_pending_inbound_events` that drains the
+queue. The tool serializes events through `toInboundEventDTO`, which
+hex-encodes key material and base64-encodes plaintext so no raw
+`Uint8Array` ever passes through `JSON.stringify`.
 
 ### TTYA Visitor Chat
 

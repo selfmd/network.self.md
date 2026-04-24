@@ -8,3 +8,4 @@ export {
 } from './identity.js';
 export * from './crypto/index.js';
 export * from './protocol/index.js';
+export * from './events/index.js';
