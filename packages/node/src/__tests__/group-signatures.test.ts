@@ -1,12 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import {
   fingerprintFromPublicKey,
-  generateIdentity,
   signMessage,
   MessageType,
   SenderKeys,
@@ -26,52 +24,7 @@ import {
 } from '../storage/index.js';
 import { GroupManager } from '../groups/group-manager.js';
 import { PeerSession } from '../network/connection.js';
-
-function makeIdentity(displayName: string): AgentIdentity {
-  return generateIdentity(displayName);
-}
-
-function makeMockSocket() {
-  const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
-  return {
-    write: () => true,
-    end: () => {},
-    destroy: () => {},
-    on: (event: string, handler: (...args: unknown[]) => void) => {
-      const arr = handlers.get(event) ?? [];
-      arr.push(handler);
-      handlers.set(event, arr);
-    },
-    removeAllListeners: (event?: string) => {
-      if (event) handlers.delete(event);
-      else handlers.clear();
-    },
-    remotePublicKey: randomBytes(32),
-  };
-}
-
-function makeMockSession(peerIdentity: AgentIdentity): PeerSession {
-  const session = new PeerSession(makeMockSocket());
-  session.setVerified(
-    peerIdentity.edPublicKey,
-    peerIdentity.fingerprint,
-    peerIdentity.displayName,
-  );
-  return session;
-}
-
-function makeMockSwarm(options: {
-  sessions?: PeerSession[];
-  sessionByFingerprint?: Map<string, PeerSession>;
-} = {}) {
-  const emitter = new EventEmitter();
-  return Object.assign(emitter, {
-    getSession: (fingerprint: string) => options.sessionByFingerprint?.get(fingerprint),
-    getAllSessions: (): PeerSession[] => options.sessions ?? [],
-    join: async () => undefined,
-    leave: async () => undefined,
-  });
-}
+import { makeIdentity, makeMockSession, makeMockSwarm } from './test-utils/group-harness.js';
 
 describe('GroupManager signature + admin gating', () => {
   let dataDir: string;

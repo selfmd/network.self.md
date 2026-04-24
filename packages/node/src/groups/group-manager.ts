@@ -12,6 +12,8 @@ import type {
   GroupEncryptedMessage,
   SenderKeyDistributionMessage,
   GroupManagementMessage,
+  PrivateInboundMessageEvent,
+  PublicActivityEvent,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { sha256 } from 'hash-wasm';
@@ -310,7 +312,7 @@ export class GroupManager extends EventEmitter {
     session: PeerSession,
     message: GroupEncryptedMessage,
   ): Promise<void> {
-    if (!session.peerPublicKey) return;
+    if (!session.peerPublicKey || !session.peerFingerprint) return;
 
     // Signature must verify against the claimed senderPublicKey *and* match the
     // transport-authenticated peer. Mismatched keys indicate impersonation.
@@ -320,6 +322,18 @@ export class GroupManager extends EventEmitter {
       !verifyMessageSignature(message, message.senderPublicKey)
     ) {
       this.emit('error', new Error('Rejected group message: invalid signature'));
+      return;
+    }
+
+    // Defence-in-depth: explicit membership check. Kicked senders today are
+    // caught because their sender-key row gets deleted in kickFromGroup /
+    // handleGroupManagement, but that's implicit. An explicit gate documents
+    // intent and survives future refactors that touch key lifetimes.
+    if (!this.isMember(message.groupId, session.peerPublicKey)) {
+      this.emit(
+        'error',
+        new Error('Rejected group message: sender is not a group member'),
+      );
       return;
     }
 
@@ -355,16 +369,19 @@ export class GroupManager extends EventEmitter {
       );
 
       const content = new TextDecoder().decode(plaintext);
+      const messageId = createId();
+      const timestamp = message.timestamp ?? Date.now();
 
       this.messageRepo.insert({
-        id: createId(),
+        id: messageId,
         groupId: message.groupId,
         senderPublicKey: session.peerPublicKey,
         content,
-        timestamp: message.timestamp ?? Date.now(),
+        timestamp,
         type: 'group',
       });
 
+      // Legacy event — preserved unchanged for existing listeners.
       this.emit('group:message', {
         groupId: message.groupId,
         senderPublicKey: session.peerPublicKey,
@@ -372,6 +389,27 @@ export class GroupManager extends EventEmitter {
         content,
         timestamp: message.timestamp,
       });
+
+      const inbound: PrivateInboundMessageEvent = {
+        kind: 'group',
+        messageId,
+        groupId: message.groupId,
+        senderPublicKey: session.peerPublicKey,
+        senderFingerprint: session.peerFingerprint,
+        plaintext,
+        timestamp,
+        receivedAt: Date.now(),
+      };
+      this.emit('inbound:message', inbound);
+
+      const activity: PublicActivityEvent = {
+        kind: 'group',
+        groupIdHex: Buffer.from(message.groupId).toString('hex'),
+        senderFingerprint: session.peerFingerprint,
+        timestamp,
+        byteLength: message.ciphertext.byteLength,
+      };
+      this.emit('activity:message', activity);
     } catch (err) {
       this.emit('error', err);
     }
@@ -558,6 +596,16 @@ export class GroupManager extends EventEmitter {
         break;
       }
     }
+  }
+
+  private isMember(groupId: Uint8Array, publicKey: Uint8Array): boolean {
+    const members = this.groupRepo.getMembers(groupId);
+    for (const m of members) {
+      if (buffersEqual(new Uint8Array(m.public_key), publicKey)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private isAdminMember(groupId: Uint8Array, publicKey: Uint8Array): boolean {
