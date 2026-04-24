@@ -74,7 +74,7 @@ export function registerMessagingTools(server: McpServer, agent: Agent): void {
 
   server.tool(
     'get_pending_inbound_events',
-    'Drain pending inbound (authenticated, decrypted) message events for the agent runtime. Each event carries enough context for an agent to decide act | ask | ignore.',
+    'Owner-private, local-only. Drains pending inbound (authenticated, decrypted) message events for the owner\'s agent runtime so it can decide act | ask | ignore. Results may contain plaintext — do NOT forward them to public dashboards, census, heartbeat, shared logs, or any non-owner surface.',
     {
       limit: z.number().optional().describe('Maximum number of events to drain (default 50)'),
     },

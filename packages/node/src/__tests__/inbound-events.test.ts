@@ -270,9 +270,15 @@ describe('Inbound event bridge', () => {
   });
 
   it('does not leak plaintext into the public logger (canary)', async () => {
-    const originalLog = console.log;
-    const originalInfo = console.info;
-    const originalWarn = console.warn;
+    const orig = {
+      log: console.log,
+      info: console.info,
+      warn: console.warn,
+      error: console.error,
+      debug: console.debug,
+      stdoutWrite: process.stdout.write.bind(process.stdout),
+      stderrWrite: process.stderr.write.bind(process.stderr),
+    };
     const captured: string[] = [];
     const record = (...args: unknown[]) => {
       captured.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
@@ -280,6 +286,20 @@ describe('Inbound event bridge', () => {
     console.log = record;
     console.info = record;
     console.warn = record;
+    console.error = record;
+    console.debug = record;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.stdout.write = ((chunk: any) => {
+      captured.push(typeof chunk === 'string' ? chunk : chunk.toString('utf-8'));
+      return true;
+    }) as typeof process.stdout.write;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.stderr.write = ((chunk: any) => {
+      captured.push(typeof chunk === 'string' ? chunk : chunk.toString('utf-8'));
+      return true;
+    }) as typeof process.stderr.write;
+
+    const activity = captureActivity();
 
     try {
       const canary = 'secret-canary-xyz';
@@ -291,11 +311,58 @@ describe('Inbound event bridge', () => {
       for (const line of captured) {
         expect(line).not.toContain(canary);
       }
+      // Public activity event must also be canary-free when serialized.
+      for (const ev of activity) {
+        expect(JSON.stringify(ev)).not.toContain(canary);
+      }
     } finally {
-      console.log = originalLog;
-      console.info = originalInfo;
-      console.warn = originalWarn;
+      console.log = orig.log;
+      console.info = orig.info;
+      console.warn = orig.warn;
+      console.error = orig.error;
+      console.debug = orig.debug;
+      process.stdout.write = orig.stdoutWrite;
+      process.stderr.write = orig.stderrWrite;
     }
+  });
+
+  it('rejects group messages from a signed sender who is not a group member', async () => {
+    const inbound = captureInbound();
+    const activity = captureActivity();
+    const errs: Error[] = [];
+    manager.on('error', (e: Error) => errs.push(e));
+
+    // Group where only Bob and Alice are members — Mallory is not.
+    const soloGroup = new Uint8Array(32).fill(0x99);
+    groupRepo.create(soloGroup, 'solo', 'member');
+    groupRepo.addMember(soloGroup, bob.edPublicKey, 'member');
+    groupRepo.addMember(soloGroup, alice.edPublicKey, 'admin');
+
+    // Mallory signs a properly-structured, signature-valid message. The sig
+    // verifies against Mallory's own key (which matches the transport peer)
+    // so the signature gate passes — membership gate must catch this.
+    const malloryState = SenderKeys.generate();
+    const enc = SenderKeys.encrypt(malloryState, new TextEncoder().encode('i am in'));
+    const message = signMessage<GroupEncryptedMessage>(
+      {
+        type: MessageType.GroupMessage,
+        groupId: soloGroup,
+        senderFingerprint: mallory.fingerprint,
+        senderPublicKey: mallory.edPublicKey,
+        chainIndex: enc.chainIndex,
+        ciphertext: enc.ciphertext,
+        nonce: enc.nonce,
+        timestamp: Date.now(),
+      },
+      mallory.edPrivateKey,
+    );
+
+    await manager.handleGroupMessage(makeMockSession(mallory), message);
+
+    expect(inbound).toHaveLength(0);
+    expect(activity).toHaveLength(0);
+    expect(errs.length).toBeGreaterThanOrEqual(1);
+    expect(errs[0].message).toMatch(/not a group member/i);
   });
 
   it('provides enough context for an agent handler to decide act | ask | ignore', async () => {

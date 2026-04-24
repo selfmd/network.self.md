@@ -325,6 +325,18 @@ export class GroupManager extends EventEmitter {
       return;
     }
 
+    // Defence-in-depth: explicit membership check. Kicked senders today are
+    // caught because their sender-key row gets deleted in kickFromGroup /
+    // handleGroupManagement, but that's implicit. An explicit gate documents
+    // intent and survives future refactors that touch key lifetimes.
+    if (!this.isMember(message.groupId, session.peerPublicKey)) {
+      this.emit(
+        'error',
+        new Error('Rejected group message: sender is not a group member'),
+      );
+      return;
+    }
+
     const senderKey = this.senderKeyRepo.load(
       message.groupId,
       session.peerPublicKey,
@@ -584,6 +596,16 @@ export class GroupManager extends EventEmitter {
         break;
       }
     }
+  }
+
+  private isMember(groupId: Uint8Array, publicKey: Uint8Array): boolean {
+    const members = this.groupRepo.getMembers(groupId);
+    for (const m of members) {
+      if (buffersEqual(new Uint8Array(m.public_key), publicKey)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private isAdminMember(groupId: Uint8Array, publicKey: Uint8Array): boolean {

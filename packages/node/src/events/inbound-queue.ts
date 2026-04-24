@@ -26,15 +26,20 @@ export class InboundEventQueue {
     for (const h of this.handlers) {
       try {
         h(ev);
-      } catch {
-        // Handler errors must not stop delivery to other handlers.
+      } catch (err) {
+        // Handler errors must not stop delivery to other handlers, but must
+        // not be silently swallowed either. Rethrow on a microtask so the
+        // process 'uncaughtException' / test runner sees it.
+        queueMicrotask(() => {
+          throw err;
+        });
       }
     }
   }
 
   drain(limit?: number): PrivateInboundMessageEvent[] {
     if (limit === undefined || limit >= this.buf.length) {
-      const out = this.buf;
+      const out = this.buf.slice();
       this.buf = [];
       return out;
     }
