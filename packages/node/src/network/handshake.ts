@@ -25,7 +25,13 @@ export async function performHandshake(
   const session = new PeerSession(socket);
   session.state = 'handshaking';
 
-  const noisePublicKey = session.noisePublicKey ?? new Uint8Array(32);
+  // Fail-closed: the Ed25519 signature must bind to the actual Noise key.
+  // An all-zero placeholder would make the binding forgeable across sessions.
+  if (!session.noisePublicKey || session.noisePublicKey.length === 0 || isAllZero(session.noisePublicKey)) {
+    session.close();
+    throw new Error('Handshake aborted: transport did not expose a Noise public key');
+  }
+  const noisePublicKey = session.noisePublicKey;
   const timestamp = Date.now();
 
   // Build signing payload: noisePublicKey || timestamp as uint64 BE
@@ -143,6 +149,9 @@ function validateHandshake(
   // They signed their own view of noisePublicKey (the remote noise key they see)
   // which they included in the handshake message.
   const noiseKey = handshake.noisePublicKey;
+  if (!noiseKey || noiseKey.length === 0 || isAllZero(noiseKey)) {
+    throw new Error('Invalid handshake: missing or zero Noise public key');
+  }
   const payload = new Uint8Array(noiseKey.length + 8);
   payload.set(noiseKey, 0);
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
@@ -152,4 +161,11 @@ function validateHandshake(
   if (!valid) {
     throw new Error('Invalid handshake signature');
   }
+}
+
+function isAllZero(bytes: Uint8Array): boolean {
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] !== 0) return false;
+  }
+  return true;
 }

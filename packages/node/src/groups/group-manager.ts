@@ -1,15 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { createId } from '@paralleldrive/cuid2';
 import {
-  sign,
-  verify,
   deriveKey,
   SenderKeys,
+  signMessage,
+  verifyMessageSignature,
   fingerprintFromPublicKey,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
-  ProtocolMessage,
   GroupEncryptedMessage,
   SenderKeyDistributionMessage,
   GroupManagementMessage,
@@ -44,6 +43,7 @@ export class GroupManager extends EventEmitter {
   private senderKeyRepo: SenderKeyRepository;
   private peerRepo: PeerRepository;
   private messageCounters = new Map<string, number>();
+  private pendingGroupInviters = new Map<string, Uint8Array>();
 
   constructor(options: GroupManagerOptions) {
     super();
@@ -109,6 +109,16 @@ export class GroupManager extends EventEmitter {
     // Add self as member
     this.groupRepo.addMember(groupId, this.identity.edPublicKey, 'member');
 
+    // If this join was triggered by a signed invite, preserve the inviter as
+    // the group's admin in our local view. Without this, future signed kicks
+    // from the real creator/admin fail the admin gate on fresh invitees.
+    const groupHex = Buffer.from(groupId).toString('hex');
+    const inviter = this.pendingGroupInviters.get(groupHex);
+    if (inviter && !buffersEqual(inviter, this.identity.edPublicKey)) {
+      this.groupRepo.addMember(groupId, inviter, 'admin');
+      this.pendingGroupInviters.delete(groupHex);
+    }
+
     // Generate our sender key
     const senderKeyState = SenderKeys.generate();
     this.senderKeyRepo.store(
@@ -120,11 +130,16 @@ export class GroupManager extends EventEmitter {
 
     await this.swarm.join(Buffer.from(topic));
 
-    // Register any peers whose sender keys we already received for this group
+    // Register any peers whose sender keys we already received for this group,
+    // but never overwrite an existing role (especially admin -> member).
     const existingKeys = this.senderKeyRepo.listForGroup(groupId);
     for (const key of existingKeys) {
       const pk = new Uint8Array(key.public_key);
-      if (!buffersEqual(pk, this.identity.edPublicKey)) {
+      if (buffersEqual(pk, this.identity.edPublicKey)) continue;
+      const alreadyMember = this.groupRepo
+        .getMembers(groupId)
+        .some((m) => buffersEqual(new Uint8Array(m.public_key), pk));
+      if (!alreadyMember) {
         this.groupRepo.addMember(groupId, pk, 'member');
       }
     }
@@ -152,6 +167,9 @@ export class GroupManager extends EventEmitter {
     if (!group) {
       throw new Error('Group not found');
     }
+    if (group.role !== 'admin') {
+      throw new Error('Not authorized to invite to this group');
+    }
 
     const peerFingerprint = fingerprintFromPublicKey(peerPublicKey);
     const session = this.swarm.getSession(peerFingerprint);
@@ -159,17 +177,27 @@ export class GroupManager extends EventEmitter {
       throw new Error('Peer not connected');
     }
 
-    const message: ProtocolMessage = {
-      type: MessageType.GroupManagement,
-      action: 'invite',
-      groupId,
-      targetFingerprint: peerFingerprint,
-      groupName: group.name,
-      timestamp: Date.now(),
-    };
+    const message = signMessage<GroupManagementMessage>(
+      {
+        type: MessageType.GroupManagement,
+        action: 'invite',
+        groupId,
+        targetFingerprint: peerFingerprint,
+        groupName: group.name,
+        timestamp: Date.now(),
+        senderPublicKey: this.identity.edPublicKey,
+      },
+      this.identity.edPrivateKey,
+    );
 
     session.send(message);
-    this.groupRepo.addMember(groupId, peerPublicKey, 'member');
+    const alreadyMember = this.groupRepo
+      .getMembers(groupId)
+      .some((m) => buffersEqual(new Uint8Array(m.public_key), peerPublicKey));
+    if (!alreadyMember) {
+      this.groupRepo.addMember(groupId, peerPublicKey, 'member');
+    }
+    await this.distributeSenderKeys(groupId);
     this.emit('group:invited', { groupId, peerPublicKey });
   }
 
@@ -185,13 +213,17 @@ export class GroupManager extends EventEmitter {
     // Send kick message to all members
     const members = this.groupRepo.getMembers(groupId);
     const memberFingerprint = fingerprintFromPublicKey(memberPublicKey);
-    const kickMessage: ProtocolMessage = {
-      type: MessageType.GroupManagement,
-      action: 'kick',
-      groupId,
-      targetFingerprint: memberFingerprint,
-      timestamp: Date.now(),
-    };
+    const kickMessage = signMessage<GroupManagementMessage>(
+      {
+        type: MessageType.GroupManagement,
+        action: 'kick',
+        groupId,
+        targetFingerprint: memberFingerprint,
+        timestamp: Date.now(),
+        senderPublicKey: this.identity.edPublicKey,
+      },
+      this.identity.edPrivateKey,
+    );
 
     for (const member of members) {
       const fp = fingerprintFromPublicKey(new Uint8Array(member.public_key));
@@ -213,7 +245,7 @@ export class GroupManager extends EventEmitter {
     const senderKey = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
     if (!senderKey) return;
 
-    const distribution = SenderKeys.createDistribution(
+    const unsigned = SenderKeys.createDistribution(
       groupId,
       {
         chainKey: new Uint8Array(senderKey.chain_key),
@@ -221,14 +253,20 @@ export class GroupManager extends EventEmitter {
       },
       this.identity.edPublicKey,
     );
+    const message = signMessage<SenderKeyDistributionMessage>(
+      unsigned,
+      this.identity.edPrivateKey,
+    );
 
-    const message: ProtocolMessage = distribution;
-
-    // Send to all connected peers (not just known members).
-    // Peers that share this group will store the key; others will ignore it.
-    const allSessions = this.swarm.getAllSessions();
-    for (const session of allSessions) {
-      if (session.peerPublicKey && !buffersEqual(session.peerPublicKey, this.identity.edPublicKey)) {
+    // Send only to known members of this group. Never spray group chain keys to
+    // unrelated connected peers.
+    const members = this.groupRepo.getMembers(groupId);
+    for (const member of members) {
+      const memberKey = new Uint8Array(member.public_key);
+      if (buffersEqual(memberKey, this.identity.edPublicKey)) continue;
+      const fp = fingerprintFromPublicKey(memberKey);
+      const session = this.swarm.getSession(fp);
+      if (session) {
         try {
           session.send(message);
         } catch {
@@ -239,21 +277,33 @@ export class GroupManager extends EventEmitter {
   }
 
   handleSenderKeyDistribution(message: SenderKeyDistributionMessage): void {
-    // Store the sender key regardless of group membership.
-    // This handles the case where a peer distributes keys before we join
-    // the group -- we'll have the key ready when we do join.
+    // Verify Ed25519 signature over canonical bytes (sans signature).
+    // Rejects tampered / replayed distributions that don't match signingPublicKey.
+    if (!verifyMessageSignature(message, message.signingPublicKey)) {
+      this.emit('error', new Error('Rejected sender key distribution: invalid signature'));
+      return;
+    }
+
+    const group = this.groupRepo.find(message.groupId);
+    if (!group) {
+      this.emit('error', new Error('Rejected sender key distribution: unknown group'));
+      return;
+    }
+
+    const existing = this.groupRepo
+      .getMembers(message.groupId)
+      .find((m) => buffersEqual(new Uint8Array(m.public_key), message.signingPublicKey));
+    if (!existing) {
+      this.emit('error', new Error('Rejected sender key distribution: unknown group member'));
+      return;
+    }
+
     this.senderKeyRepo.store(
       message.groupId,
       message.signingPublicKey,
       message.chainKey,
       message.chainIndex,
     );
-
-    // If we are a member of this group, register the sender as a member
-    const group = this.groupRepo.find(message.groupId);
-    if (group) {
-      this.groupRepo.addMember(message.groupId, message.signingPublicKey, 'member');
-    }
   }
 
   async handleGroupMessage(
@@ -261,6 +311,17 @@ export class GroupManager extends EventEmitter {
     message: GroupEncryptedMessage,
   ): Promise<void> {
     if (!session.peerPublicKey) return;
+
+    // Signature must verify against the claimed senderPublicKey *and* match the
+    // transport-authenticated peer. Mismatched keys indicate impersonation.
+    if (
+      !message.senderPublicKey ||
+      !buffersEqual(message.senderPublicKey, session.peerPublicKey) ||
+      !verifyMessageSignature(message, message.senderPublicKey)
+    ) {
+      this.emit('error', new Error('Rejected group message: invalid signature'));
+      return;
+    }
 
     const senderKey = this.senderKeyRepo.load(
       message.groupId,
@@ -344,15 +405,19 @@ export class GroupManager extends EventEmitter {
 
     const messageId = createId();
 
-    const message: ProtocolMessage = {
-      type: MessageType.GroupMessage,
-      groupId,
-      senderFingerprint: this.identity.fingerprint,
-      chainIndex: encChainIndex,
-      ciphertext,
-      nonce,
-      timestamp: Date.now(),
-    };
+    const message = signMessage<GroupEncryptedMessage>(
+      {
+        type: MessageType.GroupMessage,
+        groupId,
+        senderFingerprint: this.identity.fingerprint,
+        senderPublicKey: this.identity.edPublicKey,
+        chainIndex: encChainIndex,
+        ciphertext,
+        nonce,
+        timestamp: Date.now(),
+      },
+      this.identity.edPrivateKey,
+    );
 
     // Send to all connected members
     const members = this.groupRepo.getMembers(groupId);
@@ -406,16 +471,64 @@ export class GroupManager extends EventEmitter {
   ): void {
     if (!session.peerPublicKey) return;
 
+    // Signed management actions only. The signing key must match the transport
+    // peer; otherwise a peer could relay someone else's signed kick (not a huge
+    // risk given replay surface is tiny, but the constraint is cheap) or — more
+    // importantly — forge unsigned frames with no accountability.
+    if (
+      !message.senderPublicKey ||
+      !buffersEqual(message.senderPublicKey, session.peerPublicKey) ||
+      !verifyMessageSignature(message, message.senderPublicKey)
+    ) {
+      this.emit('error', new Error(`Rejected group management: invalid signature (action=${message.action})`));
+      return;
+    }
+
     switch (message.action) {
-      case 'invite':
+      case 'invite': {
+        // Only admins of the referenced group may invite. If we already know
+        // the group, the sender must be an admin member; otherwise we TOFU the
+        // notification (we can only verify once we have group state).
+        const existing = this.groupRepo.find(message.groupId);
+        if (existing) {
+          const hasKnownAdmin = this.groupRepo
+            .getMembers(message.groupId)
+            .some((m) => m.role === 'admin');
+          if (hasKnownAdmin && !this.isAdminMember(message.groupId, session.peerPublicKey)) {
+            this.emit('error', new Error('Rejected invite: sender is not an admin of this group'));
+            return;
+          }
+        }
+        const inviteTargetsUs =
+          !message.targetFingerprint ||
+          message.targetFingerprint === this.identity.fingerprint;
+        if (inviteTargetsUs) {
+          if (existing && !buffersEqual(session.peerPublicKey, this.identity.edPublicKey)) {
+            this.groupRepo.addMember(message.groupId, session.peerPublicKey, 'admin');
+            this.distributeSenderKeys(message.groupId).catch((err) => {
+              this.emit('error', err);
+            });
+          } else {
+            this.pendingGroupInviters.set(
+              Buffer.from(message.groupId).toString('hex'),
+              new Uint8Array(session.peerPublicKey),
+            );
+          }
+        }
         this.emit('group:invited', {
           groupId: message.groupId,
           invitedBy: session.peerPublicKey,
           groupName: message.groupName,
         });
         break;
+      }
 
-      case 'kick':
+      case 'kick': {
+        if (!this.isAdminMember(message.groupId, session.peerPublicKey)) {
+          this.emit('error', new Error('Rejected kick: sender is not an admin of this group'));
+          return;
+        }
+
         if (
           message.targetFingerprint &&
           message.targetFingerprint === this.identity.fingerprint
@@ -443,7 +556,19 @@ export class GroupManager extends EventEmitter {
           });
         }
         break;
+      }
     }
+  }
+
+  private isAdminMember(groupId: Uint8Array, publicKey: Uint8Array): boolean {
+    const members = this.groupRepo.getMembers(groupId);
+    for (const m of members) {
+      const mk = new Uint8Array(m.public_key);
+      if (buffersEqual(mk, publicKey) && m.role === 'admin') {
+        return true;
+      }
+    }
+    return false;
   }
 
   async rejoinAllGroups(): Promise<void> {

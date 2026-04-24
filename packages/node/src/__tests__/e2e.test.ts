@@ -92,6 +92,18 @@ describe('Agent E2E', () => {
       // Wait for peers to discover each other and complete handshake
       await waitForPeers(agent1, agent2, 15000);
 
+      // Alice sends a signed invite over the authenticated peer session. Bob
+      // had already joined the group topic for discovery, but the invite is
+      // what installs Alice as admin and authorizes sender-key exchange.
+      const invited = new Promise<void>((resolve) => {
+        agent2.once('group:invited', () => resolve());
+      });
+      await agent1.inviteToGroup(
+        groupIdHex,
+        Buffer.from(agent2.identity.edPublicKey).toString('hex'),
+      );
+      await invited;
+
       // Wait for sender key distribution to complete
       await waitForSenderKeys(1000);
 

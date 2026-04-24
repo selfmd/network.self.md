@@ -38,3 +38,5 @@ export {
   DoubleRatchet,
   type DoubleRatchetState,
 } from './double-ratchet.js';
+
+export { signMessage, verifyMessageSignature } from './signing.js';

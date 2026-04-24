@@ -4,6 +4,18 @@ import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
 import type { AgentIdentity } from './protocol/types.js';
 
+export { edwardsToMontgomery, edwardsToMontgomeryPriv };
+
+export function deriveX25519FromEd25519(edPrivateKey: Uint8Array, edPublicKey: Uint8Array): {
+  xPrivateKey: Uint8Array;
+  xPublicKey: Uint8Array;
+} {
+  return {
+    xPrivateKey: edwardsToMontgomeryPriv(edPrivateKey),
+    xPublicKey: edwardsToMontgomery(edPublicKey),
+  };
+}
+
 const Z_BASE_32_ALPHABET = 'ybndrfg8ejkmcpqxot1uwisza345h769';
 
 export function zBase32Encode(data: Uint8Array): string {

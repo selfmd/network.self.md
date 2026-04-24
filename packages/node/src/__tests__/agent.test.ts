@@ -164,4 +164,67 @@ describe('Agent', () => {
 
     await agent.stop();
   });
+
+  describe('passphrase-protected identity', () => {
+    it('round-trips identity and derives matching X25519 keys', async () => {
+      const passphrase = 'correct horse battery staple';
+
+      const a1 = new Agent({ dataDir, passphrase, displayName: 'Vault' });
+      await a1.start();
+      const fp1 = a1.identity.fingerprint;
+      const edPriv1 = Buffer.from(a1.identity.edPrivateKey).toString('hex');
+      const xPriv1 = Buffer.from(a1.identity.xPrivateKey).toString('hex');
+      const xPub1 = Buffer.from(a1.identity.xPublicKey).toString('hex');
+      await a1.stop();
+
+      // Reload with the same passphrase — identity must match bit-for-bit.
+      const a2 = new Agent({ dataDir, passphrase });
+      await a2.start();
+      expect(a2.identity.fingerprint).toBe(fp1);
+      expect(Buffer.from(a2.identity.edPrivateKey).toString('hex')).toBe(edPriv1);
+      // X25519 keys must be recomputed via edwardsToMontgomery, not a
+      // placeholder HKDF — so the hex must match the first run exactly.
+      expect(Buffer.from(a2.identity.xPrivateKey).toString('hex')).toBe(xPriv1);
+      expect(Buffer.from(a2.identity.xPublicKey).toString('hex')).toBe(xPub1);
+      await a2.stop();
+    });
+
+    it('does not persist the raw Ed25519 private key in the identity table when a passphrase is set', async () => {
+      const agent = new Agent({ dataDir, passphrase: 'test-passphrase' });
+      await agent.start();
+      await agent.stop();
+
+      // Re-open the SQLite file directly (not through the repository) to
+      // verify the ed_private_key column is empty when passphrase-protected.
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(join(dataDir, 'agent.db'));
+      try {
+        const row = db
+          .prepare('SELECT ed_private_key, LENGTH(ed_private_key) AS len FROM identity WHERE id = 1')
+          .get() as { ed_private_key: Buffer; len: number };
+        expect(row).toBeDefined();
+        expect(row.len).toBe(0);
+        // The encrypted copy must be present.
+        const encrypted = db
+          .prepare('SELECT LENGTH(ciphertext) AS len FROM key_storage WHERE id = 1')
+          .get() as { len: number };
+        expect(encrypted.len).toBeGreaterThan(0);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  describe('direct messages', () => {
+    it('explicitly fails with a NotImplemented-style error', async () => {
+      const agent = new Agent({ dataDir });
+      await agent.start();
+
+      await expect(
+        agent.sendDirectMessage('00'.repeat(32), 'hello'),
+      ).rejects.toThrow(/not yet implemented/i);
+
+      await agent.stop();
+    });
+  });
 });
