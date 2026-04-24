@@ -109,6 +109,11 @@ export const SenderKeys = {
     };
   },
 
+  /**
+   * Builds an unsigned distribution envelope. The caller MUST pass the result
+   * through `signMessage` before sending it on the wire; peers verify the
+   * signature against `signingPublicKey` before trusting the chain key.
+   */
   createDistribution(
     groupId: Uint8Array,
     state: SenderKeyState,
@@ -121,6 +126,7 @@ export const SenderKeys = {
       chainIndex: state.chainIndex,
       signingPublicKey,
       timestamp: Date.now(),
+      signature: new Uint8Array(0),
     };
   },
 };

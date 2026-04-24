@@ -65,17 +65,27 @@ export interface MessageQueryOptions {
 export class IdentityRepository {
   constructor(private db: Database.Database) {}
 
+  /**
+   * Persist the identity row. When `passphraseProtected` is true we store a
+   * zero-length placeholder in place of the raw private key; the encrypted
+   * copy lives in `key_storage` and is the authoritative source. This closes
+   * the "plaintext private key on disk alongside the encrypted copy" leak.
+   */
   save(
     edPrivateKey: Uint8Array,
     edPublicKey: Uint8Array,
     displayName?: string,
+    passphraseProtected: boolean = false,
   ): void {
     const stmt = this.db.prepare(
       `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
        VALUES (1, ?, ?, ?, ?)`,
     );
+    const storedPrivate = passphraseProtected
+      ? Buffer.alloc(0)
+      : Buffer.from(edPrivateKey);
     stmt.run(
-      Buffer.from(edPrivateKey),
+      storedPrivate,
       Buffer.from(edPublicKey),
       displayName ?? null,
       Date.now(),

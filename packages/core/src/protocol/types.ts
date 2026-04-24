@@ -37,16 +37,21 @@ export interface SenderKeyDistributionMessage {
   chainIndex: number;
   signingPublicKey: Uint8Array;
   timestamp: number;
+  /** Ed25519 signature by signingPublicKey over canonical bytes (excluding this field). */
+  signature: Uint8Array;
 }
 
 export interface GroupEncryptedMessage {
   type: typeof MessageType.GroupMessage;
   groupId: Uint8Array;
   senderFingerprint: string;
+  senderPublicKey: Uint8Array;
   chainIndex: number;
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  /** Ed25519 signature by senderPublicKey over canonical bytes (excluding this field). */
+  signature: Uint8Array;
 }
 
 export interface DirectEncryptedMessage {
@@ -68,6 +73,10 @@ export interface GroupManagementMessage {
   targetFingerprint?: string;
   groupName?: string;
   timestamp: number;
+  /** Ed25519 public key of the peer producing this management action. */
+  senderPublicKey: Uint8Array;
+  /** Ed25519 signature by senderPublicKey over canonical bytes (excluding this field). */
+  signature: Uint8Array;
 }
 
 export interface TTYARequestMessage {

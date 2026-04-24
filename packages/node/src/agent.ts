@@ -6,21 +6,18 @@ import {
   encrypt,
   decrypt,
   deriveKey,
-  sign,
-  verify,
+  deriveX25519FromEd25519,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
   PeerInfo,
   GroupInfo,
-  ProtocolMessage,
   DirectEncryptedMessage,
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
-import { createId } from '@paralleldrive/cuid2';
 import {
   AgentDatabase,
   IdentityRepository,
@@ -239,50 +236,17 @@ export class Agent extends EventEmitter {
   }
 
   async sendDirectMessage(
-    peerPublicKey: string,
-    content: string,
+    _peerPublicKey: string,
+    _content: string,
   ): Promise<void> {
-    const pk = hexToBytes(peerPublicKey);
-    const peerFingerprint = fingerprintFromPublicKey(pk);
-    const session = this.swarm.getSession(peerFingerprint);
-    if (!session) {
-      throw new Error('Peer not connected');
-    }
-
-    const plaintext = new TextEncoder().encode(content);
-
-    // In production, use DoubleRatchet for encryption
-    const encrypted = encrypt(this.identity.edPrivateKey.subarray(0, 32), plaintext);
-
-    const messageId = createId();
-    const message: ProtocolMessage = {
-      type: MessageType.DirectMessage,
-      senderFingerprint: this.identity.fingerprint,
-      recipientFingerprint: peerFingerprint,
-      ratchetPublicKey: this.identity.edPublicKey,
-      previousChainLength: 0,
-      messageNumber: 0,
-      ciphertext: encrypted.ciphertext,
-      nonce: encrypted.nonce,
-      timestamp: Date.now(),
-    };
-
-    session.send(message);
-
-    this.messageRepo.insert({
-      id: messageId,
-      peerPublicKey: pk,
-      senderPublicKey: this.identity.edPublicKey,
-      content,
-      timestamp: Date.now(),
-      type: 'direct',
-    });
-
-    this.emit('dm:sent', {
-      peerPublicKey: pk,
-      content,
-      messageId,
-    });
+    // Intentionally fail-closed. The previous implementation encrypted with
+    // `identity.edPrivateKey.subarray(0,32)` on send and `peerPublicKey.subarray(0,32)`
+    // on receive — those are not the same key, so no recipient could ever
+    // decrypt. Rather than ship a function that looks like it works, we
+    // surface a clear error until Double Ratchet is wired in.
+    throw new Error(
+      'Direct messages are not yet implemented: Double Ratchet session setup pending',
+    );
   }
 
   getMessages(opts: {
@@ -347,26 +311,32 @@ export class Agent extends EventEmitter {
       let edPrivateKey: Uint8Array = new Uint8Array(stored.ed_private_key);
       const edPublicKey: Uint8Array = new Uint8Array(stored.ed_public_key);
 
-      // If passphrase-protected, decrypt
+      // If passphrase-protected, the plaintext private key column is a
+      // zero-length placeholder; the real key lives encrypted in key_storage.
       if (this.options.passphrase) {
         const keyData = this.identityRepo.loadEncryptedKeys();
-        if (keyData) {
-          const wrappingKey = await deriveWrappingKey(
-            this.options.passphrase,
-            new Uint8Array(keyData.salt),
-          );
-          edPrivateKey = decrypt(
-            wrappingKey,
-            new Uint8Array(keyData.nonce),
-            new Uint8Array(keyData.ciphertext),
-          );
+        if (!keyData) {
+          throw new Error('Identity is passphrase-protected but no encrypted key storage found');
         }
+        const wrappingKey = await deriveWrappingKey(
+          this.options.passphrase,
+          new Uint8Array(keyData.salt),
+        );
+        edPrivateKey = decrypt(
+          wrappingKey,
+          new Uint8Array(keyData.nonce),
+          new Uint8Array(keyData.ciphertext),
+        );
       }
 
-      // When loading from storage, we don't have x keys stored,
-      // so derive placeholder values. In a full implementation these would be stored too.
-      const xPrivateKey = deriveKey(edPrivateKey, 'x25519-private', '', 32);
-      const xPublicKey = deriveKey(edPublicKey, 'x25519-public', '', 32);
+      if (edPrivateKey.length !== 32) {
+        throw new Error('Invalid stored identity: expected 32-byte Ed25519 seed');
+      }
+
+      // Derive X25519 keys via the same Edwards-to-Montgomery conversion used
+      // at initial generation. The previous HKDF placeholder produced keys
+      // that no peer could ever reconstruct — a latent footgun for DMs.
+      const { xPrivateKey, xPublicKey } = deriveX25519FromEd25519(edPrivateKey, edPublicKey);
 
       this.identity = {
         edPublicKey,
@@ -381,12 +351,20 @@ export class Agent extends EventEmitter {
 
       this.identity = identity;
 
-      this.identityRepo.save(identity.edPrivateKey, identity.edPublicKey, this.options.displayName);
+      const passphraseProtected = Boolean(this.options.passphrase);
+      this.identityRepo.save(
+        identity.edPrivateKey,
+        identity.edPublicKey,
+        this.options.displayName,
+        passphraseProtected,
+      );
 
-      // Encrypt at rest if passphrase given
-      if (this.options.passphrase) {
+      // Encrypt at rest if passphrase given. Note that save() above already
+      // stored a zero-length placeholder for ed_private_key in that case, so
+      // no plaintext copy remains in the identity table.
+      if (passphraseProtected) {
         const salt = crypto.getRandomValues(new Uint8Array(32));
-        const wrappingKey = await deriveWrappingKey(this.options.passphrase, salt);
+        const wrappingKey = await deriveWrappingKey(this.options.passphrase!, salt);
         const { ciphertext, nonce } = encrypt(wrappingKey, identity.edPrivateKey);
         this.identityRepo.saveEncryptedKeys(salt, nonce, ciphertext);
       }
@@ -506,41 +484,15 @@ export class Agent extends EventEmitter {
   }
 
   private handleDirectMessage(
-    session: PeerSession,
-    message: DirectEncryptedMessage,
+    _session: PeerSession,
+    _message: DirectEncryptedMessage,
   ): void {
-    if (!session.peerPublicKey) return;
-
-    // Decrypt the message (simplified - in production use DoubleRatchet)
-    let plaintext: Uint8Array;
-    try {
-      plaintext = decrypt(
-        session.peerPublicKey.subarray(0, 32),
-        message.nonce,
-        message.ciphertext,
-      );
-    } catch {
-      this.emit('error', new Error('Failed to decrypt direct message'));
-      return;
-    }
-
-    const content = new TextDecoder().decode(plaintext);
-
-    this.messageRepo.insert({
-      id: createId(),
-      senderPublicKey: session.peerPublicKey,
-      peerPublicKey: session.peerPublicKey,
-      content,
-      timestamp: message.timestamp ?? Date.now(),
-      type: 'direct',
-    });
-
-    this.emit('dm:message', {
-      senderPublicKey: session.peerPublicKey,
-      senderFingerprint: session.peerFingerprint,
-      content,
-      timestamp: message.timestamp,
-    });
+    // DM receipt is disabled until Double Ratchet is wired. We surface an
+    // error event rather than silently dropping, so operators notice.
+    this.emit(
+      'error',
+      new Error('Received a direct message, but DM handling is not yet implemented'),
+    );
   }
 }
 
