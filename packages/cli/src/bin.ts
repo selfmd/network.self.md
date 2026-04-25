@@ -7,6 +7,14 @@ import { listPeers } from './commands/peers.js';
 import { showStatus } from './commands/status.js';
 import { startChat } from './commands/chat.js';
 import { startTTYA } from './commands/ttya.js';
+import {
+  policyGet,
+  policySet,
+  policyTrustAdd,
+  policyTrustRemove,
+  policyInterestAdd,
+  policyInterestRemove,
+} from './commands/policy.js';
 
 const program = new Command();
 
@@ -75,6 +83,65 @@ program
   .description('Show agent status')
   .action(async () => {
     await showStatus();
+  });
+
+// ---- Policy operator controls ----
+//
+// Owner-private, local-only controls for the inbound policy gate.
+// See docs/POLICY.md for semantics. None of these tools execute agent
+// actions or send anything over the network — they only read/update
+// the local policy_config table and the live AgentPolicy.
+const policy = program.command('policy').description('Inspect or update the inbound policy gate config (local only)');
+
+policy
+  .command('get')
+  .description('Print the current policy configuration')
+  .action(async () => {
+    await policyGet();
+  });
+
+policy
+  .command('set')
+  .description('Update one or more policy fields (partial merge)')
+  .option('--interests <list>', 'Comma-separated interest keywords')
+  .option('--trusted <list>', 'Comma-separated trusted peer fingerprints')
+  .option('--require-mention <bool>', 'true/false: require @-mention to count as addressed')
+  .option('--mention-prefix-len <n>', 'Integer: chars of fingerprint that count as a mention prefix')
+  .option('--reset', 'Wipe persisted config and revert to AgentOptions / defaults')
+  .action(async (opts) => {
+    await policySet(opts);
+  });
+
+const policyTrust = policy
+  .command('trust')
+  .description('Manage the trusted-fingerprint list');
+policyTrust
+  .command('add <fingerprint>')
+  .description('Add a fingerprint to the trusted list')
+  .action(async (fp: string) => {
+    await policyTrustAdd(fp);
+  });
+policyTrust
+  .command('remove <fingerprint>')
+  .description('Remove a fingerprint from the trusted list')
+  .action(async (fp: string) => {
+    await policyTrustRemove(fp);
+  });
+
+const policyInterest = policy
+  .command('interest')
+  .description('Manage interest keywords');
+policyInterest
+  .command('add <keyword>')
+  .description('Add an interest keyword')
+  .action(async (kw: string) => {
+    await policyInterestAdd(kw);
+  });
+policyInterest
+  .command('remove <keyword>')
+  .description('Remove an interest keyword')
+  .action(async (kw: string) => {
+    await policyInterestRemove(kw);
   });
 
 program.parse();
