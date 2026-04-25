@@ -56,4 +56,14 @@ export type {
   ValidatedConfig,
 } from './policy/validate-config.js';
 
-export { PolicyConfigRepository } from './storage/index.js';
+export {
+  PolicyConfigRepository,
+  PolicyAuditRepository,
+  POLICY_AUDIT_LIMITS,
+} from './storage/index.js';
+export type {
+  StoredPolicyAuditRow,
+  PolicyAuditRepositoryOptions,
+  PolicyAuditRecentOptions,
+  PolicyAuditPruneOptions,
+} from './storage/index.js';

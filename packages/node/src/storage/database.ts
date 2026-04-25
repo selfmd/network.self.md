@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: string[] = [
   // v0 → v1: initial schema
@@ -84,6 +84,36 @@ const MIGRATIONS: string[] = [
   );
 
   UPDATE schema_version SET version = 2;
+  `,
+  // v2 → v3: durable, metadata-only audit trail for policy gate
+  // decisions (PR #6). Schema mirrors PolicyAuditEntry exactly. The
+  // privacy invariant is schema-enforced: there is no column for
+  // plaintext / content / body / payload / tool_args / private_key.
+  // A test in policy-audit-repo.test.ts pins the column set so any
+  // future drift fails loudly. matched_interests is operator-supplied
+  // configuration, persisted as a JSON array.
+  `
+  CREATE TABLE IF NOT EXISTS policy_audit (
+    audit_id           TEXT PRIMARY KEY,
+    received_at        INTEGER NOT NULL,
+    inserted_at        INTEGER NOT NULL,
+    event_kind         TEXT NOT NULL,
+    message_id         TEXT,
+    group_id_hex       TEXT,
+    sender_fingerprint TEXT,
+    byte_length        INTEGER NOT NULL,
+    action             TEXT NOT NULL,
+    reason             TEXT NOT NULL,
+    addressed_to_me    INTEGER NOT NULL,
+    sender_trusted     INTEGER NOT NULL,
+    matched_interests  TEXT NOT NULL,
+    gate_rejected      INTEGER NOT NULL,
+    allowed            INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_policy_audit_inserted_at
+    ON policy_audit(inserted_at DESC);
+
+  UPDATE schema_version SET version = 3;
   `,
 ];
 

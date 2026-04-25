@@ -1,7 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Agent, PolicyAuditEntry, PolicyConfig } from '@networkselfmd/node';
-import { PolicyConfigValidationError, POLICY_LIMITS } from '@networkselfmd/node';
+import {
+  PolicyConfigValidationError,
+  POLICY_LIMITS,
+  POLICY_AUDIT_LIMITS,
+} from '@networkselfmd/node';
 
 // MCP-facing audit DTO. Metadata-only by construction. Every field on
 // PolicyAuditEntry is already privacy-safe (see core/policy/audit.ts),
@@ -83,12 +87,29 @@ const OPERATOR_DISCLAIMER =
 export function registerPolicyTools(server: McpServer, agent: Agent): void {
   server.tool(
     'get_policy_audit_recent',
-    'Owner-private, local-only, read-only, metadata-only. Returns recent policy gate decisions for debugging — never includes plaintext, ciphertext, decrypted body, tool args, raw event payloads, or private key material. Safe to inspect; do NOT forward results to public dashboards, census, or shared logs.',
+    'Owner-private, local-only, read-only, metadata-only. Returns recent policy gate decisions for debugging across restarts. Reads from the durable policy_audit table (PR #6); never includes plaintext, ciphertext, decrypted body, tool args, raw event payloads, or private key material. Safe to inspect; do NOT forward results to public dashboards, census, or shared logs.',
     {
-      limit: z.number().int().positive().max(1000).optional().describe('Maximum number of audit entries to return (default 50, newest last; capped at 1000)'),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(POLICY_AUDIT_LIMITS.maxRecentLimit)
+        .optional()
+        .describe(
+          `Maximum number of audit entries to return (default 50, newest first; capped at ${POLICY_AUDIT_LIMITS.maxRecentLimit})`,
+        ),
     },
     async ({ limit }) => {
-      const entries = agent.policyAudit.recent(limit ?? 50).map(toPolicyAuditDTO);
+      const cap = Math.min(limit ?? 50, POLICY_AUDIT_LIMITS.maxRecentLimit);
+      // Prefer the durable repo (cross-restart visibility). Fall back
+      // to the in-memory log only for Agent instances constructed
+      // without start() — primarily a test ergonomics concern. The
+      // privacy invariant holds either way: both surfaces project
+      // through toPolicyAuditDTO.
+      const sourceEntries = agent.policyAuditRepo
+        ? agent.policyAuditRepo.recent({ limit: cap })
+        : agent.policyAudit.recent(cap);
+      const entries = sourceEntries.map(toPolicyAuditDTO);
       return {
         content: [{
           type: 'text' as const,

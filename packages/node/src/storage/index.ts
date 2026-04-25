@@ -6,6 +6,8 @@ export {
   MessageRepository,
   SenderKeyRepository,
   PolicyConfigRepository,
+  PolicyAuditRepository,
+  POLICY_AUDIT_LIMITS,
 } from './repositories.js';
 export type {
   StoredIdentity,
@@ -16,5 +18,9 @@ export type {
   StoredSenderKey,
   StoredKeyData,
   StoredPolicyConfig,
+  StoredPolicyAuditRow,
   MessageQueryOptions,
+  PolicyAuditRepositoryOptions,
+  PolicyAuditRecentOptions,
+  PolicyAuditPruneOptions,
 } from './repositories.js';
