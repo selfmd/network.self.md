@@ -16,11 +16,17 @@ import type {
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
+  PolicyAuditEntry,
+  PolicyConfig,
+  PolicyDecision,
   PrivateInboundMessageEvent,
   PublicActivityEvent,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { InboundEventQueue } from './events/inbound-queue.js';
+import { AgentPolicy } from './policy/agent-policy.js';
+import { PolicyAuditLog } from './policy/audit-log.js';
+import { PolicyGate } from './policy/policy-gate.js';
 import {
   AgentDatabase,
   IdentityRepository,
@@ -39,6 +45,14 @@ export interface AgentOptions {
   passphrase?: string;
   displayName?: string;
   bootstrap?: Array<{ host: string; port: number }>;
+  // Initial policy gate configuration. When omitted, defaults to {} which
+  // is intentionally restrictive: AgentPolicy.decide returns 'ignore' /
+  // 'not-addressed' for events with no @-mention, no trusted sender, and
+  // no interest hit, so unconfigured agents do not surface noise to the
+  // inbound queue. Tighten/loosen at runtime via agent.setPolicyConfig().
+  policyConfig?: PolicyConfig;
+  // Audit log capacity (entries). Default: 1000.
+  policyAuditMax?: number;
 }
 
 export interface MemberInfo {
@@ -64,6 +78,16 @@ export class Agent extends EventEmitter {
   groups: Map<string, GroupInfo> = new Map();
   isRunning = false;
   readonly inboundQueue: InboundEventQueue = new InboundEventQueue();
+  // Policy machinery — constructed in start() once the database/repos and
+  // identity are ready. The gate is the single chokepoint between
+  // GroupManager's authenticated `inbound:message` events and any
+  // agent-runtime side effect (queue push, public re-emit). See
+  // docs/POLICY.md. Marked readonly to match `inboundQueue` and prevent
+  // callers from swapping the gate or audit log out from under the
+  // wiring set up in start().
+  readonly policy!: AgentPolicy;
+  readonly policyAudit!: PolicyAuditLog;
+  readonly policyGate!: PolicyGate;
 
   private options: AgentOptions;
   private database!: AgentDatabase;
@@ -111,6 +135,34 @@ export class Agent extends EventEmitter {
       messages: this.messageRepo,
       senderKeys: this.senderKeyRepo,
       peers: this.peerRepo,
+    });
+
+    // Init policy machinery. The gate sits between GroupManager events
+    // and any agent-runtime side effect; see setupGroupManagerEvents.
+    // The readonly modifier on policy/policyAudit/policyGate above
+    // documents post-start immutability; we use a typed cast here for
+    // the one-time assignment so callers don't see the seam.
+    const mut = this as {
+      -readonly [K in 'policy' | 'policyAudit' | 'policyGate']: Agent[K];
+    };
+    mut.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax });
+    mut.policy = new AgentPolicy({
+      agent: this,
+      config: this.options.policyConfig ?? {},
+    });
+    mut.policyGate = new PolicyGate({
+      policy: mut.policy,
+      audit: mut.policyAudit,
+      isMember: (groupId, publicKey) => {
+        const members = this.groupRepo.getMembers(groupId);
+        for (const m of members) {
+          if (bytesEqual(new Uint8Array(m.public_key), publicKey)) return true;
+        }
+        return false;
+      },
+    });
+    mut.policyGate.on('decision', (decision: PolicyDecision) => {
+      this.emit('policy:decision', decision);
     });
 
     // Wire up events
@@ -280,6 +332,15 @@ export class Agent extends EventEmitter {
       timestamp: m.timestamp,
       type: m.type,
     }));
+  }
+
+  // ---- Policy ----
+
+  // Update the policy gate's configuration in place. Decisions are pure
+  // over (config, identity, event), so this takes effect on the very
+  // next event without needing to rebuild the gate or reset audit/dedup.
+  setPolicyConfig(config: PolicyConfig): void {
+    this.policy.setConfig(config);
   }
 
   // ---- Peers ----
@@ -482,9 +543,20 @@ export class Agent extends EventEmitter {
       this.emit('group:keysRotated', data);
     });
 
+    // POLICY GATE — every authenticated/decrypted/persisted inbound
+    // event from GroupManager passes through here before any
+    // agent-runtime side effect. The gate runs validation, dedup,
+    // membership recheck, and AgentPolicy.decide(); records a
+    // metadata-only audit entry; and only on `allowed: true` does the
+    // event reach the inbound queue and external listeners. See
+    // docs/POLICY.md for the lifecycle.
     this.groupManager.on('inbound:message', (ev: PrivateInboundMessageEvent) => {
-      this.inboundQueue.push(ev);
-      this.emit('inbound:message', ev);
+      const outcome = this.policyGate.evaluate(ev);
+      this.emit('policy:audit', outcome.entry);
+      if (outcome.allowed) {
+        this.inboundQueue.push(outcome.ev);
+        this.emit('inbound:message', outcome.ev);
+      }
     });
 
     this.groupManager.on('activity:message', (ev: PublicActivityEvent) => {
@@ -535,4 +607,12 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
   }
   return bytes;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

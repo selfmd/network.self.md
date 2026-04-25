@@ -43,6 +43,14 @@ export class AgentPolicy extends EventEmitter {
     this.unsubscribe = undefined;
   }
 
+  // Replace the active configuration. decide() reads `this.config` per
+  // call, so the new config takes effect on the next decision without
+  // reconstructing the policy or resetting any external state (audit,
+  // dedup) owned by the gate.
+  setConfig(config: PolicyConfig): void {
+    this.config = config;
+  }
+
   decide(ev: PrivateInboundMessageEvent): PolicyDecision {
     const text = tryDecodeUtf8(ev.plaintext);
     const fingerprint = this.agent.identity?.fingerprint;

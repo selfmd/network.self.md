@@ -1,7 +1,11 @@
 export type PolicyAction = 'act' | 'ask' | 'ignore';
 
 // Fixed, metadata-safe reason tokens. Never include plaintext content.
-export type PolicyReason =
+//
+// "decision" reasons describe the agent runtime's intent for an event that
+// passed all structural and authorization checks. "fail-closed" reasons
+// describe events that did not — those events MUST NOT proceed downstream.
+export type PolicyDecisionReason =
   | 'not-addressed'
   | 'addressed-and-trusted'
   | 'addressed-unknown-sender'
@@ -9,6 +13,30 @@ export type PolicyReason =
   | 'trusted-interest-hit'
   | 'interest-hit'
   | 'trusted-no-signal';
+
+export type PolicyFailClosedReason =
+  | 'malformed-event'
+  | 'unknown-event-kind'
+  | 'duplicate-event'
+  | 'not-a-member';
+
+export type PolicyReason = PolicyDecisionReason | PolicyFailClosedReason;
+
+// Stable, exhaustive list of every reason token the policy gate may emit.
+// Used by tests to lock the public reason vocabulary.
+export const POLICY_REASONS: readonly PolicyReason[] = [
+  'not-addressed',
+  'addressed-and-trusted',
+  'addressed-unknown-sender',
+  'addressed-matches-interest',
+  'trusted-interest-hit',
+  'interest-hit',
+  'trusted-no-signal',
+  'malformed-event',
+  'unknown-event-kind',
+  'duplicate-event',
+  'not-a-member',
+] as const;
 
 // Output of AgentPolicy.decide — safe to log in full; contains no plaintext.
 export interface PolicyDecision {
