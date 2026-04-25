@@ -256,7 +256,7 @@ body {
 
 .panel-body {
   padding: 6px 0;
-  max-height: 380px;
+  max-height: 600px;
   overflow-y: auto;
 }
 
@@ -376,16 +376,60 @@ body {
   border-color: var(--accent-green);
 }
 
-.state-selfmd {
+/* $self.md manifest block */
+.selfmd-block {
   width: 100%;
   margin-top: 8px;
-  padding: 10px 12px;
   background: rgba(0, 0, 0, 0.3);
-  border-left: 2px solid rgba(65, 233, 141, 0.2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.selfmd-header {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.selfmd-label {
+  font-size: 11px;
+  color: var(--accent-green);
+  opacity: 0.7;
+  font-weight: 500;
+}
+
+.selfmd-content {
+  padding: 10px 12px;
   color: var(--text-muted);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.selfmd-collapsed {
+  max-height: 120px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+}
+
+.selfmd-toggle {
+  display: block;
+  width: 100%;
+  padding: 6px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--accent-green);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.selfmd-toggle:hover {
+  opacity: 1;
 }
 
 /* Activity rows */
@@ -429,6 +473,122 @@ body {
   color: var(--text-muted);
   padding: 28px 20px;
   font-size: 14px;
+}
+
+/* State link */
+.state-link {
+  text-decoration: none;
+  color: var(--text-primary);
+  transition: color 0.15s;
+}
+
+.state-link:hover {
+  color: var(--accent-green);
+}
+
+/* State detail page */
+.state-page {
+  padding: 24px 40px 60px;
+}
+
+.back-link {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.back-link:hover {
+  color: var(--text-primary);
+}
+
+.state-page-header {
+  margin-top: 32px;
+  margin-bottom: 24px;
+}
+
+.state-page-title {
+  font-size: 36px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+.state-page-meta {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.state-page-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.state-page-id-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+}
+
+.state-page-id-value {
+  font-size: 12px;
+  color: var(--accent-green);
+  opacity: 0.7;
+  word-break: break-all;
+}
+
+/* $self.md full content on state page */
+.selfmd-page-content {
+  padding: 16px 20px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+/* Message rows */
+.msg-row {
+  padding: 10px 20px;
+  transition: background 0.1s;
+}
+
+.msg-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.msg-row + .msg-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.msg-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.msg-sender {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-green);
+}
+
+.msg-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.msg-content {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Skeleton loading */

@@ -34,6 +34,32 @@ function JoinButton({ stateId, stateName }: { stateId: string; stateName: string
   );
 }
 
+function SelfMdBlock({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const needsCollapse = content.length > 200;
+
+  return (
+    <div className="selfmd-block" onClick={(e) => e.stopPropagation()}>
+      <div className="selfmd-header">
+        <span className="selfmd-label">$self.md</span>
+      </div>
+      <div
+        className={`selfmd-content ${!expanded && needsCollapse ? 'selfmd-collapsed' : ''}`}
+      >
+        {content}
+      </div>
+      {needsCollapse && (
+        <button
+          className="selfmd-toggle"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? 'collapse' : 'expand'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function StateList({ states }: { states: ApiState[] | null }) {
   if (!states) return <Loading />;
   if (states.length === 0) {
@@ -44,7 +70,7 @@ export function StateList({ states }: { states: ApiState[] | null }) {
     <>
       {states.map((s) => (
         <div className="state-row" key={s.id}>
-          <span className="state-name">{s.name}</span>
+          <a className="state-name state-link" href={`#/state/${s.id}`}>{s.name}</a>
           {s.isPublic && <span className="state-badge">public</span>}
           <span className="state-meta">
             {s.memberCount} members
@@ -53,9 +79,7 @@ export function StateList({ states }: { states: ApiState[] | null }) {
             {timeAgo(s.lastActivity)}
           </span>
           <JoinButton stateId={s.id} stateName={s.name} />
-          {s.selfMd && (
-            <span className="state-selfmd">{s.selfMd}</span>
-          )}
+          {s.selfMd && <SelfMdBlock content={s.selfMd} />}
         </div>
       ))}
     </>

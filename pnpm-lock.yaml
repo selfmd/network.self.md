@@ -69,12 +69,9 @@ importers:
       '@fastify/static':
         specifier: ^8.1.0
         version: 8.3.0
-      '@networkselfmd/core':
+      '@networkselfmd/node':
         specifier: workspace:*
-        version: link:../core
-      better-sqlite3:
-        specifier: ^11.8.0
-        version: 11.10.0
+        version: link:../node
       fastify:
         specifier: ^5.2.0
         version: 5.8.5
@@ -88,9 +85,6 @@ importers:
       '@paper-design/shaders-react':
         specifier: ^0.0.76
         version: 0.0.76(@types/react@18.3.28)(react@18.3.1)
-      '@types/better-sqlite3':
-        specifier: ^7.6.0
-        version: 7.6.13
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.17

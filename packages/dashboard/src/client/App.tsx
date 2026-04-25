@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { usePolling } from './hooks/usePolling';
+import { useRoute } from './hooks/useRoute';
 import { ShaderBackground } from './components/ShaderBackground';
 import { StatusBar } from './components/StatusBar';
 import { PeerList } from './components/PeerList';
 import { StateList } from './components/StateList';
+import { StatePage } from './components/StatePage';
 import { ToastProvider, useToast } from './components/Toast';
 import type { ApiStatus, ApiPeer, ApiState } from './types';
 
@@ -33,29 +35,13 @@ function CopyButton() {
   );
 }
 
-function Dashboard() {
+function HomePage() {
   const { data: status, error } = usePolling<ApiStatus>('/api/status');
   const { data: peers } = usePolling<ApiPeer[]>('/api/peers');
   const { data: states } = usePolling<ApiState[]>('/api/states');
 
   return (
-    <div className="dashboard">
-      <nav className="topnav animate-in">
-        <span className="topnav-brand">
-          <b>network</b> self.md
-        </span>
-        <div className="topnav-right">
-          <a
-            className="topnav-link"
-            href="https://github.com/selfmd/network.self.md"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            github
-          </a>
-        </div>
-      </nav>
-
+    <>
       <div className="animate-in delay-1">
         <StatusBar status={status} />
       </div>
@@ -104,6 +90,33 @@ function Dashboard() {
           </div>
         </div>
       </div>
+    </>
+  );
+}
+
+function Router() {
+  const route = useRoute();
+
+  return (
+    <div className="dashboard">
+      <nav className="topnav animate-in">
+        <a href="#/" className="topnav-brand" style={{ textDecoration: 'none' }}>
+          <b>network</b> self.md
+        </a>
+        <div className="topnav-right">
+          <a
+            className="topnav-link"
+            href="https://github.com/selfmd/network.self.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            github
+          </a>
+        </div>
+      </nav>
+
+      {route.page === 'home' && <HomePage />}
+      {route.page === 'state' && <StatePage stateId={route.stateId} />}
     </div>
   );
 }
@@ -113,7 +126,7 @@ export function App() {
     <>
       <ShaderBackground />
       <ToastProvider>
-        <Dashboard />
+        <Router />
       </ToastProvider>
     </>
   );
