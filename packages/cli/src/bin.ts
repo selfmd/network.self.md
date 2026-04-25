@@ -15,6 +15,11 @@ import {
   policyInterestAdd,
   policyInterestRemove,
 } from './commands/policy.js';
+import {
+  policyAuditRecent,
+  policyAuditPrune,
+  policyAuditClear,
+} from './commands/policy-audit.js';
 
 const program = new Command();
 
@@ -142,6 +147,31 @@ policyInterest
   .description('Remove an interest keyword')
   .action(async (kw: string) => {
     await policyInterestRemove(kw);
+  });
+
+const policyAudit = policy
+  .command('audit')
+  .description('Inspect and manage the durable policy audit trail (local only)');
+policyAudit
+  .command('recent')
+  .description('Print recent policy gate decisions (newest first)')
+  .option('--limit <n>', 'Maximum entries to return (default 50, capped at 1000)')
+  .action(async (opts) => {
+    await policyAuditRecent(opts);
+  });
+policyAudit
+  .command('prune')
+  .description('Trim the audit trail by max-entries or by age')
+  .option('--max-entries <n>', 'Keep at most this many newest rows')
+  .option('--older-than-ms <n>', 'Delete rows older than this many milliseconds')
+  .action(async (opts) => {
+    await policyAuditPrune(opts);
+  });
+policyAudit
+  .command('clear')
+  .description('Remove all rows from policy_audit')
+  .action(async () => {
+    await policyAuditClear();
   });
 
 program.parse();

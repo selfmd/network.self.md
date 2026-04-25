@@ -20,7 +20,7 @@ describe('cli smoke test', () => {
     const path = await import('node:path');
 
     const commandsDir = path.resolve(import.meta.dirname, '..', 'commands');
-    const expectedCommands = ['init.ts', 'groups.ts', 'peers.ts', 'status.ts', 'chat.ts', 'ttya.ts', 'policy.ts'];
+    const expectedCommands = ['init.ts', 'groups.ts', 'peers.ts', 'status.ts', 'chat.ts', 'ttya.ts', 'policy.ts', 'policy-audit.ts'];
 
     for (const cmd of expectedCommands) {
       expect(fs.existsSync(path.join(commandsDir, cmd))).toBe(true);
