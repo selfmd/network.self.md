@@ -225,4 +225,3 @@ describe('Privacy invariant — no plaintext on console/stdout/stderr while pers
     }
   });
 });
-

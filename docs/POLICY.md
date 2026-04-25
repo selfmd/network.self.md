@@ -333,6 +333,129 @@ require the consumer to wire `agent.on('policy:decision', ...)`
 themselves and dispatch out-of-band — and that wiring is an
 owner-side concern, not a policy-tool concern.
 
+## Durable audit trail
+
+PR #6 turns the in-memory `PolicyAuditLog` into a durable, owner-local,
+metadata-only audit trail that survives restart. The in-memory log
+stays as a runtime convenience; the operator-truth surface for "recent
+decisions across restart" is the persisted SQLite table.
+
+### Storage
+
+Schema v3 adds a `policy_audit` table with exactly these columns:
+
+```
+audit_id           TEXT PRIMARY KEY
+received_at        INTEGER NOT NULL
+inserted_at        INTEGER NOT NULL
+event_kind         TEXT NOT NULL    -- 'group' | 'dm' | 'unknown'
+message_id         TEXT             -- nullable
+group_id_hex       TEXT             -- nullable
+sender_fingerprint TEXT             -- nullable
+byte_length        INTEGER NOT NULL
+action             TEXT NOT NULL    -- 'act' | 'ask' | 'ignore'
+reason             TEXT NOT NULL
+addressed_to_me    INTEGER NOT NULL
+sender_trusted     INTEGER NOT NULL
+matched_interests  TEXT NOT NULL    -- JSON array
+gate_rejected      INTEGER NOT NULL
+allowed            INTEGER NOT NULL -- derived: action != 'ignore' && !gate_rejected
+```
+
+This is the entire surface. There is **no column** for plaintext,
+content, body, payload, tool args, private-key bytes, ciphertext,
+secrets, or passwords — by intent, and pinned by a column-set test
+that fails loudly on any future drift.
+
+### Privacy boundary
+
+What persists:
+
+- per-decision metadata listed above
+- operator identifiers already public in protocol (`group_id_hex`,
+  `sender_fingerprint`)
+- the size of the (decrypted) plaintext as `byte_length`, content-free
+- operator-supplied `matched_interests` config tokens (these came from
+  `PolicyConfig`, not from the message)
+
+What never persists, even by accident:
+
+- decoded message plaintext / content / body
+- ciphertext / nonces / chain keys
+- private keys or any encrypted-at-rest material
+- raw event payloads
+- tool args (no tool execution)
+
+Three independent test layers enforce this end-to-end:
+
+1. Repository tests — schema column-set, plaintext canary on insert,
+   polluted-entry projection.
+2. Persistence integration tests — feed canary plaintext through the
+   real gate; raw SQL read of every column never contains the canary;
+   100-iteration intercepted console / stdout / stderr canary.
+3. Cross-restart MCP test — write through the gate, restart the
+   Agent, read via the durable repo + `toPolicyAuditDTO` +
+   `JSON.stringify`; the canary must not appear at any step.
+
+### Retention
+
+- `POLICY_AUDIT_LIMITS.defaultMaxEntries = 5000` rows on disk
+  (overridable via `AgentOptions.policyAuditDbMax`).
+- `POLICY_AUDIT_LIMITS.maxRecentLimit = 1000` per `recent()` /
+  MCP / CLI fetch — clamped at the repo, the MCP zod schema, and the
+  CLI parser.
+- Prune-on-insert: each `insert()` evicts the oldest rows when the
+  count exceeds the configured cap. `Agent.start()` runs one
+  `prune()` to enforce retention after a downgrade.
+- `prune({ olderThanMs })` deletes by age for operator-driven trim.
+
+### Retry-poison invariant
+
+`PolicyAuditLog.record()` runs `persist(entry)` **before** pushing to
+the in-memory ring. A throw from persist propagates with the in-memory
+log unchanged. The gate's `evaluate()` then throws too, and
+`markDedup()` never runs — exactly the contract preserved since PR #4
+polish. A legitimate retry of the same `messageId` is re-evaluated
+rather than silently denied as a duplicate.
+
+### MCP
+
+`get_policy_audit_recent` reads from the durable repo when present
+(production after `Agent.start()`), and falls back to the in-memory
+log only for Agents constructed without `start()` (test ergonomics).
+Both paths project through the same `toPolicyAuditDTO`, so the privacy
+invariant is identical.
+
+### CLI
+
+```
+networkselfmd policy audit recent [--limit N]
+networkselfmd policy audit prune  --max-entries N
+networkselfmd policy audit prune  --older-than-ms N
+networkselfmd policy audit clear
+```
+
+These commands are owner-private and **local-only**. They do not
+instantiate `Agent` or call `agent.start()` — they go straight to
+`AgentDatabase` + `PolicyAuditRepository` over the local SQLite file.
+A source-level guard test fails if a future change reintroduces an
+`Agent` import or `agent.start()` call into `commands/policy-audit.ts`.
+
+CLI output is metadata-only (the columns of `PolicyAuditEntry`); group
+IDs and fingerprints are truncated for screen layout. There is no
+flag or command in this PR that prints raw event payloads, plaintext,
+or any content-bearing field.
+
+### Out of scope (still)
+
+- Tool execution / `act` handlers.
+- Payments / token economics.
+- DM event gating (still fail-closed in `Agent.handleDirectMessage`).
+- Audit fan-out to remote sinks (durable here means owner-local SQLite
+  only, no relays).
+- Touching `messages.content` (the existing owner-private message
+  store is unchanged).
+
 ## Future extension point — tool execution (NOT IMPLEMENTED)
 
 When a `PolicyDecision { action: 'act' }` is produced, this PR does
