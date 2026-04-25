@@ -82,10 +82,12 @@ export class Agent extends EventEmitter {
   // identity are ready. The gate is the single chokepoint between
   // GroupManager's authenticated `inbound:message` events and any
   // agent-runtime side effect (queue push, public re-emit). See
-  // docs/POLICY.md.
-  policy!: AgentPolicy;
-  policyAudit!: PolicyAuditLog;
-  policyGate!: PolicyGate;
+  // docs/POLICY.md. Marked readonly to match `inboundQueue` and prevent
+  // callers from swapping the gate or audit log out from under the
+  // wiring set up in start().
+  readonly policy!: AgentPolicy;
+  readonly policyAudit!: PolicyAuditLog;
+  readonly policyGate!: PolicyGate;
 
   private options: AgentOptions;
   private database!: AgentDatabase;
@@ -137,14 +139,20 @@ export class Agent extends EventEmitter {
 
     // Init policy machinery. The gate sits between GroupManager events
     // and any agent-runtime side effect; see setupGroupManagerEvents.
-    this.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax });
-    this.policy = new AgentPolicy({
+    // The readonly modifier on policy/policyAudit/policyGate above
+    // documents post-start immutability; we use a typed cast here for
+    // the one-time assignment so callers don't see the seam.
+    const mut = this as {
+      -readonly [K in 'policy' | 'policyAudit' | 'policyGate']: Agent[K];
+    };
+    mut.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax });
+    mut.policy = new AgentPolicy({
       agent: this,
       config: this.options.policyConfig ?? {},
     });
-    this.policyGate = new PolicyGate({
-      policy: this.policy,
-      audit: this.policyAudit,
+    mut.policyGate = new PolicyGate({
+      policy: mut.policy,
+      audit: mut.policyAudit,
       isMember: (groupId, publicKey) => {
         const members = this.groupRepo.getMembers(groupId);
         for (const m of members) {
@@ -153,7 +161,7 @@ export class Agent extends EventEmitter {
         return false;
       },
     });
-    this.policyGate.on('decision', (decision: PolicyDecision) => {
+    mut.policyGate.on('decision', (decision: PolicyDecision) => {
       this.emit('policy:decision', decision);
     });
 

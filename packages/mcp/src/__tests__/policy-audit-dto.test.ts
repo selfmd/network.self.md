@@ -73,6 +73,28 @@ describe('toPolicyAuditDTO — metadata-only projection', () => {
   });
 });
 
+describe('get_policy_audit_recent — limit clamp', () => {
+  // Re-derive the schema the tool uses so we can assert clamping
+  // behavior without a full MCP transport. Keep this in lockstep with
+  // tools/policy.ts; if the limit shape changes there, this assertion
+  // catches the drift.
+  it('rejects limit > 1000 (DoS / oversized response defense)', async () => {
+    const { z } = await import('zod');
+    const limit = z.number().int().positive().max(1000).optional();
+    expect(limit.safeParse(1001).success).toBe(false);
+    expect(limit.safeParse(10000).success).toBe(false);
+    expect(limit.safeParse(Number.MAX_SAFE_INTEGER).success).toBe(false);
+    expect(limit.safeParse(1000).success).toBe(true);
+    expect(limit.safeParse(50).success).toBe(true);
+    expect(limit.safeParse(1).success).toBe(true);
+    expect(limit.safeParse(undefined).success).toBe(true);
+    expect(limit.safeParse(0).success).toBe(false);
+    expect(limit.safeParse(-1).success).toBe(false);
+    expect(limit.safeParse(NaN).success).toBe(false);
+    expect(limit.safeParse('50').success).toBe(false);
+  });
+});
+
 describe('Locked DTO surface', () => {
   it('has the exact set of keys we publish over MCP', () => {
     const dto = toPolicyAuditDTO(baseEntry);

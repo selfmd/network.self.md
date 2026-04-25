@@ -46,7 +46,7 @@ export function registerPolicyTools(server: McpServer, agent: Agent): void {
     'get_policy_audit_recent',
     'Owner-private, local-only, read-only, metadata-only. Returns recent policy gate decisions for debugging — never includes plaintext, ciphertext, decrypted body, tool args, raw event payloads, or private key material. Safe to inspect; do NOT forward results to public dashboards, census, or shared logs.',
     {
-      limit: z.number().int().positive().optional().describe('Maximum number of audit entries to return (default 50, newest last)'),
+      limit: z.number().int().positive().max(1000).optional().describe('Maximum number of audit entries to return (default 50, newest last; capped at 1000)'),
     },
     async ({ limit }) => {
       const entries = agent.policyAudit.recent(limit ?? 50).map(toPolicyAuditDTO);

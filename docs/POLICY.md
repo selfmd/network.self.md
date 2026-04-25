@@ -152,6 +152,30 @@ owner's own `getMessages` read API, by design and from the original
 schema. The hardening in this PR does not change the message store and
 does not extend the privacy invariant to it.
 
+### Legacy event compatibility — `'group:message'` is NOT gated
+
+`GroupManager.emit('group:message', { ... content })` is preserved
+unchanged for backward compatibility with consumers that pre-date the
+inbound bridge. Its payload includes the decoded plaintext as `content`.
+
+This event:
+
+- **bypasses** `PolicyGate.evaluate`,
+- is **not** mediated by `AgentPolicy.decide`,
+- does **not** appear in the audit log,
+- does **not** participate in dedup.
+
+A consumer that listens on `'group:message'` and logs the payload — or
+forwards it to a public surface — would leak plaintext past the gate.
+The privacy invariant above applies to gate / audit / decision / MCP
+audit surfaces only; it does **not** automatically apply to legacy
+consumers.
+
+New code should listen on `'inbound:message'` (post-gate) and inspect
+`PolicyDecision` / `PolicyAuditEntry` for context. The legacy event will
+be re-evaluated for deprecation once external consumers have migrated;
+removing it is out of scope for the hardening PR.
+
 ## Dedup retry-poison invariant
 
 The dedup set is updated **only** in step 6 of `PolicyGate.evaluate`,

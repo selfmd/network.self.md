@@ -108,7 +108,19 @@ export class PolicyGate extends EventEmitter {
         const entry = this.recordRejectFromEvent(ev, receivedAt, 'malformed-event');
         return { allowed: false, reason: 'malformed-event', entry };
       }
-      if (!this.isMember(ev.groupId, ev.senderPublicKey)) {
+      // Predicate may be backed by a database call. If it throws (db
+      // hiccup, schema mismatch, etc.) we MUST fail closed: the gate
+      // cannot decide membership, so the event is treated as a
+      // non-member rejection. We still record an audit row so operators
+      // see the failure pattern.
+      let isMember: boolean;
+      try {
+        isMember = this.isMember(ev.groupId, ev.senderPublicKey);
+      } catch {
+        const entry = this.recordRejectFromEvent(ev, receivedAt, 'not-a-member');
+        return { allowed: false, reason: 'not-a-member', entry };
+      }
+      if (!isMember) {
         const entry = this.recordRejectFromEvent(ev, receivedAt, 'not-a-member');
         return { allowed: false, reason: 'not-a-member', entry };
       }
@@ -139,7 +151,18 @@ export class PolicyGate extends EventEmitter {
     this.markDedup(ev.messageId);
 
     // --- Step 7: emit and return ---
-    this.emit('decision', decision);
+    // Listener errors must not desynchronize the gate from its
+    // downstream side effects. A buggy listener on 'decision' would
+    // otherwise abort evaluate() before returning, leaving the audit
+    // recorded but the queue untouched. Surface the bug on the next
+    // microtask without breaking gate flow.
+    try {
+      this.emit('decision', decision);
+    } catch (err) {
+      queueMicrotask(() => {
+        throw err;
+      });
+    }
 
     return decision.action === 'ignore'
       ? { allowed: false, reason: decision.reason, entry }
