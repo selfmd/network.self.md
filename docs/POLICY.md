@@ -367,6 +367,26 @@ content, body, payload, tool args, private-key bytes, ciphertext,
 secrets, or passwords — by intent, and pinned by a column-set test
 that fails loudly on any future drift.
 
+`allowed` is a **DB-only derived convenience** for analytics queries
+(e.g. `SELECT COUNT(*) FROM policy_audit WHERE allowed = 1`). It is
+intentionally NOT part of `PolicyAuditEntry`, the MCP DTO
+(`toPolicyAuditDTO`), or CLI output — the public vocabulary stays
+`action` + `gateRejected`, which together are sufficient to derive
+allowed-ness without expanding the operator-facing surface.
+
+### Reads fail closed on corrupt rows
+
+`PolicyAuditRepository.recent()` validates every enum / boolean /
+numeric field per row. A row whose `event_kind`, `action`, `reason`,
+`addressed_to_me`, `sender_trusted`, `gate_rejected`, or `byte_length`
+is out of spec is mapped to a fail-closed metadata-only stub:
+`eventKind="unknown"`, `action="ignore"`, `reason="malformed-event"`,
+`gateRejected=true`. The original `auditId` and `receivedAt` are
+preserved (best-effort) so operators can correlate, but no other
+field of a corrupt row ever surfaces as if it were a normal decision.
+`matched_interests` JSON corruption already degrades to `[]` via the
+shared `parseStringArray` helper.
+
 ### Privacy boundary
 
 What persists:

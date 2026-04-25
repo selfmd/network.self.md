@@ -1,5 +1,12 @@
 import type Database from 'better-sqlite3';
-import type { PolicyConfig, PolicyAuditEntry } from '@networkselfmd/core';
+import type {
+  PolicyConfig,
+  PolicyAuditEntry,
+  PolicyAction,
+  PolicyReason,
+  InboundMessageKind,
+} from '@networkselfmd/core';
+import { POLICY_REASONS } from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -492,6 +499,13 @@ export class PolicyAuditRepository {
     // Explicit projection — never spread the entry. New fields on
     // PolicyAuditEntry will not auto-flow into the schema; adding a
     // column requires a deliberate migration + change here.
+    //
+    // `allowed` is a DB-only derived column for analytics queries
+    // (e.g. `SELECT COUNT(*) FROM policy_audit WHERE allowed = 1`).
+    // It is intentionally NOT part of PolicyAuditEntry, the MCP DTO,
+    // or CLI output — the public vocabulary stays `action` +
+    // `gateRejected`, which together are sufficient to derive
+    // allowed-ness without expanding the operator-facing surface.
     const insertedAt = Date.now();
     const allowed = entry.action !== 'ignore' && !entry.gateRejected ? 1 : 0;
     this.insertStmt.run(
@@ -575,23 +589,90 @@ function clampLimit(n: number): number {
   return Math.min(Math.floor(n), POLICY_AUDIT_LIMITS.maxRecentLimit);
 }
 
-// Reconstruct a typed entry via explicit field-by-field projection.
-// Defensive against corrupt matched_interests JSON (degrades to []).
-// Action / reason / eventKind values are typed widely (string) at the
-// row layer; the type-narrowing is the caller's responsibility — the
-// values that enter the table came from the typed PolicyAuditEntry, so
-// in practice this is identity-preserving.
+const VALID_KINDS: ReadonlySet<InboundMessageKind | 'unknown'> = new Set([
+  'group',
+  'dm',
+  'unknown',
+]);
+const VALID_ACTIONS: ReadonlySet<PolicyAction> = new Set(['act', 'ask', 'ignore']);
+const VALID_REASONS: ReadonlySet<PolicyReason> = new Set(POLICY_REASONS);
+
+// Fail-closed stub returned for any row whose enum / boolean / numeric
+// fields are out of spec. Preserves auditId + receivedAt so operators
+// can correlate with the underlying corrupt row, and forces every
+// other public field into a safe metadata-only state. The reason token
+// `malformed-event` is the same one the gate uses for structurally
+// invalid inbound events; reusing it here keeps the public vocabulary
+// stable.
+function corruptStub(row: StoredPolicyAuditRow): PolicyAuditEntry {
+  return {
+    auditId:
+      typeof row.audit_id === 'string' && row.audit_id.length > 0
+        ? row.audit_id
+        : 'corrupt',
+    receivedAt: Number.isFinite(row.received_at) ? row.received_at : 0,
+    eventKind: 'unknown',
+    messageId: undefined,
+    groupIdHex: undefined,
+    senderFingerprint: undefined,
+    byteLength: 0,
+    action: 'ignore',
+    reason: 'malformed-event',
+    addressedToMe: false,
+    senderTrusted: false,
+    matchedInterests: [],
+    gateRejected: true,
+  };
+}
+
+function isValidBoolInt(n: unknown): boolean {
+  return n === 0 || n === 1;
+}
+
+function isNonNegativeFiniteInt(n: unknown): n is number {
+  return typeof n === 'number' && Number.isFinite(n) && Number.isInteger(n) && n >= 0;
+}
+
+// Reconstruct a typed entry via explicit field-by-field projection AND
+// validate every enum / boolean / numeric field. Corrupt rows are
+// mapped to a fail-closed metadata-only stub (eventKind=unknown,
+// action=ignore, reason=malformed-event, gateRejected=true) — a
+// corrupt row never surfaces as if it were a normal allowed/blocked
+// decision. matched_interests JSON is already defensively parsed by
+// parseStringArray; corrupt JSON degrades to [] without throwing.
 function rowToEntry(row: StoredPolicyAuditRow): PolicyAuditEntry {
+  const eventKind = VALID_KINDS.has(row.event_kind as InboundMessageKind | 'unknown')
+    ? (row.event_kind as PolicyAuditEntry['eventKind'])
+    : null;
+  const action = VALID_ACTIONS.has(row.action as PolicyAction)
+    ? (row.action as PolicyAction)
+    : null;
+  const reason = VALID_REASONS.has(row.reason as PolicyReason)
+    ? (row.reason as PolicyReason)
+    : null;
+
+  if (
+    eventKind === null ||
+    action === null ||
+    reason === null ||
+    !isValidBoolInt(row.addressed_to_me) ||
+    !isValidBoolInt(row.sender_trusted) ||
+    !isValidBoolInt(row.gate_rejected) ||
+    !isNonNegativeFiniteInt(row.byte_length)
+  ) {
+    return corruptStub(row);
+  }
+
   return {
     auditId: row.audit_id,
     receivedAt: row.received_at,
-    eventKind: row.event_kind as PolicyAuditEntry['eventKind'],
+    eventKind,
     messageId: row.message_id ?? undefined,
     groupIdHex: row.group_id_hex ?? undefined,
     senderFingerprint: row.sender_fingerprint ?? undefined,
     byteLength: row.byte_length,
-    action: row.action as PolicyAuditEntry['action'],
-    reason: row.reason as PolicyAuditEntry['reason'],
+    action,
+    reason,
     addressedToMe: row.addressed_to_me === 1,
     senderTrusted: row.sender_trusted === 1,
     matchedInterests: parseStringArray(row.matched_interests),

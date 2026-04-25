@@ -17,10 +17,13 @@ export interface PolicyAuditLogOptions {
 // PolicyAuditEntry is metadata-only by construction (see audit.ts). The
 // audit log itself adds no content fields.
 //
-// This is intentionally non-persistent. Durability would require a SQLite
-// migration; that lives in a follow-up PR. The in-memory log is enough
-// for live debug, MCP recent-N reads, and post-mortem within a single
-// process lifetime.
+// Persistence: the optional `persist` callback (wired in PR #6 to
+// PolicyAuditRepository.insert) makes this log durable — a throw from
+// persist propagates with the in-memory ring unchanged so the gate's
+// retry-poison invariant holds. Operators that want cross-restart
+// visibility read from the durable repo directly (MCP / CLI); the
+// in-memory log stays as a runtime convenience for fast same-process
+// reads and event emission.
 export class PolicyAuditLog {
   private buf: PolicyAuditEntry[] = [];
   private max: number;

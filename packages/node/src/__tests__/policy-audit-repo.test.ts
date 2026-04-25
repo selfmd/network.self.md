@@ -297,6 +297,158 @@ describe('PolicyAuditRepository — retention and prune', () => {
   });
 });
 
+describe('PolicyAuditRepository — fail-closed reads on corrupt rows', () => {
+  // Helper: insert a row with arbitrary raw values, bypassing the
+  // typed insert() method. Used to simulate on-disk corruption (or a
+  // malicious caller that wrote directly to SQLite).
+  function insertRaw(values: {
+    audit_id: string;
+    received_at: number;
+    inserted_at: number;
+    event_kind: string;
+    message_id: string | null;
+    group_id_hex: string | null;
+    sender_fingerprint: string | null;
+    byte_length: number;
+    action: string;
+    reason: string;
+    addressed_to_me: number;
+    sender_trusted: number;
+    matched_interests: string;
+    gate_rejected: number;
+    allowed: number;
+  }): void {
+    db.getDb()
+      .prepare(
+        `INSERT INTO policy_audit (
+          audit_id, received_at, inserted_at, event_kind, message_id,
+          group_id_hex, sender_fingerprint, byte_length, action, reason,
+          addressed_to_me, sender_trusted, matched_interests, gate_rejected, allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        values.audit_id,
+        values.received_at,
+        values.inserted_at,
+        values.event_kind,
+        values.message_id,
+        values.group_id_hex,
+        values.sender_fingerprint,
+        values.byte_length,
+        values.action,
+        values.reason,
+        values.addressed_to_me,
+        values.sender_trusted,
+        values.matched_interests,
+        values.gate_rejected,
+        values.allowed,
+      );
+  }
+
+  const baseRaw = {
+    audit_id: 'a-corrupt',
+    received_at: 100,
+    inserted_at: Date.now(),
+    event_kind: 'group',
+    message_id: 'm',
+    group_id_hex: 'aa',
+    sender_fingerprint: 'fp',
+    byte_length: 4,
+    action: 'ask',
+    reason: 'addressed-unknown-sender',
+    addressed_to_me: 1,
+    sender_trusted: 0,
+    matched_interests: '[]',
+    gate_rejected: 0,
+    allowed: 1,
+  };
+
+  function expectStub(entry: PolicyAuditEntry, originalAuditId: string): void {
+    // Public fields are forced to the safe fail-closed stub. auditId
+    // and receivedAt are preserved so operators can correlate.
+    expect(entry.auditId).toBe(originalAuditId);
+    expect(entry.eventKind).toBe('unknown');
+    expect(entry.action).toBe('ignore');
+    expect(entry.reason).toBe('malformed-event');
+    expect(entry.gateRejected).toBe(true);
+    expect(entry.addressedToMe).toBe(false);
+    expect(entry.senderTrusted).toBe(false);
+    expect(entry.matchedInterests).toEqual([]);
+    expect(entry.byteLength).toBe(0);
+    expect(entry.messageId).toBeUndefined();
+    expect(entry.groupIdHex).toBeUndefined();
+    expect(entry.senderFingerprint).toBeUndefined();
+  }
+
+  it('corrupt event_kind ⇒ fail-closed stub', () => {
+    insertRaw({ ...baseRaw, audit_id: 'kind-bad', event_kind: 'rumor' });
+    const back = repo.recent({ limit: 5 });
+    expect(back).toHaveLength(1);
+    expectStub(back[0], 'kind-bad');
+  });
+
+  it('corrupt action ⇒ fail-closed stub', () => {
+    insertRaw({ ...baseRaw, audit_id: 'action-bad', action: 'execute' });
+    expectStub(repo.recent({ limit: 5 })[0], 'action-bad');
+  });
+
+  it('corrupt reason ⇒ fail-closed stub (not in POLICY_REASONS)', () => {
+    insertRaw({ ...baseRaw, audit_id: 'reason-bad', reason: 'cosmic-rays' });
+    expectStub(repo.recent({ limit: 5 })[0], 'reason-bad');
+  });
+
+  it('corrupt boolean (addressed_to_me=2) ⇒ fail-closed stub', () => {
+    insertRaw({ ...baseRaw, audit_id: 'bool-bad', addressed_to_me: 2 });
+    expectStub(repo.recent({ limit: 5 })[0], 'bool-bad');
+  });
+
+  it('corrupt boolean (gate_rejected=-1) ⇒ fail-closed stub', () => {
+    insertRaw({ ...baseRaw, audit_id: 'gr-bad', gate_rejected: -1 });
+    expectStub(repo.recent({ limit: 5 })[0], 'gr-bad');
+  });
+
+  it('negative byte_length ⇒ fail-closed stub', () => {
+    insertRaw({ ...baseRaw, audit_id: 'bytes-bad', byte_length: -42 });
+    expectStub(repo.recent({ limit: 5 })[0], 'bytes-bad');
+  });
+
+  it('valid rows alongside corrupt rows are returned normally', () => {
+    insertRaw({ ...baseRaw, audit_id: 'valid-1' });
+    insertRaw({ ...baseRaw, audit_id: 'corrupt-1', action: 'execute' });
+    const back = repo.recent({ limit: 5 });
+    const byId = new Map(back.map((e) => [e.auditId, e]));
+    expect(byId.get('valid-1')?.action).toBe('ask');
+    expect(byId.get('valid-1')?.reason).toBe('addressed-unknown-sender');
+    expect(byId.get('corrupt-1')?.action).toBe('ignore');
+    expect(byId.get('corrupt-1')?.reason).toBe('malformed-event');
+  });
+
+  it('stub never carries plaintext / content / payload / private fields', () => {
+    insertRaw({ ...baseRaw, audit_id: 'shape', event_kind: 'rumor' });
+    const stub = repo.recent({ limit: 1 })[0];
+    expect(JSON.stringify(stub)).not.toMatch(
+      /plaintext|content|body|payload|tool_args|private_key|cipher/i,
+    );
+    // The exact field set is the privacy contract: anything outside this
+    // list would be a leak.
+    expect(Object.keys(stub).sort()).toEqual([
+      'action',
+      'addressedToMe',
+      'auditId',
+      'byteLength',
+      'eventKind',
+      'gateRejected',
+      'groupIdHex',
+      'matchedInterests',
+      'messageId',
+      'reason',
+      'receivedAt',
+      'senderFingerprint',
+      'senderTrusted',
+    ]);
+  });
+});
+
 describe('PolicyAuditRepository — durability', () => {
   it('survives close/reopen on the same dataDir', () => {
     repo.insert({ ...SAMPLE, auditId: 'durable-1' });
