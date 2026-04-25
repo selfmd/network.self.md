@@ -227,6 +227,21 @@ On `Agent.start()`:
 `agent.resetPolicyConfig()` clears the persisted row and reverts the
 runtime to `AgentOptions.policyConfig` (or `{}`).
 
+> **CLI `policy set --reset`** clears the persisted row but reverts to
+> the empty default `{}` — the CLI has no programmatic AgentOptions
+> context to fall back on. Operators who want different defaults
+> should pass `AgentOptions.policyConfig` to their long-running agent
+> process; the next agent restart will then pick those up because the
+> persisted row is empty after reset.
+
+> **`AgentOptions.policyConfig` is validated at `Agent.start()`.**
+> A JS caller that passes an off-spec config (e.g. via JSON.parse, or
+> the TypeScript escape hatch `as never`) will see
+> `PolicyConfigValidationError` thrown synchronously from `start()`.
+> Persisted configs that already exist on disk are not re-validated on
+> load — they were validated at the time they were written, and a
+> corrupt JSON list is degraded to an empty array rather than throwing.
+
 ### Validation and bounds
 
 `Agent.setPolicyConfig` validates input with the pure

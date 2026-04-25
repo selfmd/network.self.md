@@ -159,8 +159,25 @@ export class Agent extends EventEmitter {
     // their last-saved config to apply across restarts. Programmatic
     // AgentOptions.policyConfig is a "first-time default" used only
     // when no row has been persisted yet, and is NOT auto-persisted.
+    //
+    // Both inputs are routed through validatePolicyConfig so that a JS
+    // caller passing an off-spec AgentOptions.policyConfig (which TS
+    // would normally catch at compile time but can be smuggled past via
+    // `as never`/JSON parses/etc.) fails loudly at start() rather than
+    // silently producing bad runtime decisions.
     const persisted = this.policyConfigRepo.load();
-    const initialConfig = persisted ?? this.options.policyConfig ?? {};
+    let initialConfig: PolicyConfig;
+    if (persisted !== undefined) {
+      initialConfig = persisted;
+    } else if (this.options.policyConfig !== undefined) {
+      const result = validatePolicyConfig(this.options.policyConfig);
+      if (!result.ok) {
+        throw new PolicyConfigValidationError(result.errors);
+      }
+      initialConfig = result.config;
+    } else {
+      initialConfig = {};
+    }
     mut.policy = new AgentPolicy({
       agent: this,
       config: initialConfig,

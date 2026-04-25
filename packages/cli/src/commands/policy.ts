@@ -1,24 +1,42 @@
 import os from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
-import { Agent, PolicyConfigValidationError } from '@networkselfmd/node';
+import {
+  AgentDatabase,
+  PolicyConfigRepository,
+  validatePolicyConfig,
+  PolicyConfigValidationError,
+  formatValidationErrors,
+} from '@networkselfmd/node';
 import type { PolicyConfig } from '@networkselfmd/node';
+
+// ---------------------------------------------------------------------------
+// CLI policy commands are owner-private, local-only operator controls.
+//
+// They MUST NOT instantiate Agent / start the swarm / rejoin groups / join the
+// TTYA topic. The promise to the operator is "this just edits a row in your
+// local SQLite", and that's what these commands do — they go straight to
+// AgentDatabase + PolicyConfigRepository + validatePolicyConfig with no
+// network in sight.
+// ---------------------------------------------------------------------------
 
 function getDataDir(): string {
   return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
 }
 
-async function withAgent<T>(fn: (agent: Agent) => Promise<T> | T): Promise<T> {
-  const agent = new Agent({ dataDir: getDataDir() });
-  await agent.start();
+// Open the local DB, run a synchronous transform with a PolicyConfigRepository,
+// then close. Migrations are idempotent so this is safe to call repeatedly.
+function withRepo<T>(fn: (repo: PolicyConfigRepository) => T): T {
+  const db = new AgentDatabase(getDataDir());
+  db.migrate();
   try {
-    return await fn(agent);
+    return fn(new PolicyConfigRepository(db.getDb()));
   } finally {
-    await agent.stop();
+    db.close();
   }
 }
 
-function describeValidationError(err: unknown): string {
+function describeError(err: unknown): string {
   if (err instanceof PolicyConfigValidationError) return err.message;
   if (err instanceof Error) return err.message;
   return 'unknown error';
@@ -46,10 +64,21 @@ function printConfig(c: PolicyConfig): void {
   console.log();
 }
 
-export async function policyGet(): Promise<void> {
-  await withAgent(async (agent) => {
-    printConfig(agent.getPolicyConfig());
+// Validate + persist in a single repo-open. Throws on bad input — caller
+// turns that into a CLI failure. Used by every mutation command below so
+// validation is defined once.
+function persistConfig(merged: PolicyConfig): PolicyConfig {
+  return withRepo((repo) => {
+    const result = validatePolicyConfig(merged);
+    if (!result.ok) throw new PolicyConfigValidationError(result.errors);
+    repo.save(result.config);
+    return result.config;
   });
+}
+
+export async function policyGet(): Promise<void> {
+  const config = withRepo((repo) => repo.load() ?? {});
+  printConfig(config);
 }
 
 export interface PolicySetOpts {
@@ -60,7 +89,6 @@ export interface PolicySetOpts {
   reset?: boolean;
 }
 
-// Parse a comma-separated string into a trimmed, non-empty list.
 function parseList(raw: string | undefined): string[] | undefined {
   if (raw === undefined) return undefined;
   return raw
@@ -85,85 +113,93 @@ function parseInteger(raw: string | undefined, field: string): number | undefine
 }
 
 export async function policySet(opts: PolicySetOpts): Promise<void> {
-  await withAgent(async (agent) => {
-    if (opts.reset) {
-      agent.resetPolicyConfig();
-      console.log(chalk.green('\nPolicy reset to defaults.\n'));
-      printConfig(agent.getPolicyConfig());
-      return;
-    }
-    const partial: Record<string, unknown> = {};
-    const trusted = parseList(opts.trusted);
-    const interests = parseList(opts.interests);
-    const requireMention = parseBool(opts.requireMention, 'require-mention');
-    const mentionPrefixLen = parseInteger(opts.mentionPrefixLen, 'mention-prefix-len');
-    if (trusted !== undefined) partial.trustedFingerprints = trusted;
-    if (interests !== undefined) partial.interests = interests;
-    if (requireMention !== undefined) partial.requireMention = requireMention;
-    if (mentionPrefixLen !== undefined) partial.mentionPrefixLen = mentionPrefixLen;
-    if (Object.keys(partial).length === 0) {
-      fail('Nothing to set. Pass at least one of --interests, --trusted, --require-mention, --mention-prefix-len, or --reset.');
-    }
-    try {
-      agent.updatePolicyConfig(partial);
-    } catch (err) {
-      fail(describeValidationError(err));
-    }
-    console.log(chalk.green('\nPolicy updated.\n'));
-    printConfig(agent.getPolicyConfig());
+  // CLI `reset` clears the persisted row. The CLI has no programmatic
+  // AgentOptions context, so reset reverts to the empty default {} — not
+  // to a previously-passed AgentOptions.policyConfig. Operators that
+  // want different defaults should restart their agent with a desired
+  // AgentOptions.policyConfig and then `policy set --reset` from the
+  // CLI will defer to that on the next agent start.
+  if (opts.reset) {
+    withRepo((repo) => repo.clear());
+    console.log(chalk.green('\nPolicy reset (persisted row cleared).\n'));
+    printConfig({});
+    return;
+  }
+
+  const partial: Partial<PolicyConfig> = {};
+  const trusted = parseList(opts.trusted);
+  const interests = parseList(opts.interests);
+  const requireMention = parseBool(opts.requireMention, 'require-mention');
+  const mentionPrefixLen = parseInteger(opts.mentionPrefixLen, 'mention-prefix-len');
+  if (trusted !== undefined) partial.trustedFingerprints = trusted;
+  if (interests !== undefined) partial.interests = interests;
+  if (requireMention !== undefined) partial.requireMention = requireMention;
+  if (mentionPrefixLen !== undefined) partial.mentionPrefixLen = mentionPrefixLen;
+  if (Object.keys(partial).length === 0) {
+    fail('Nothing to set. Pass at least one of --interests, --trusted, --require-mention, --mention-prefix-len, or --reset.');
+  }
+
+  let updated: PolicyConfig;
+  try {
+    const merged = withRepo((repo) => ({ ...(repo.load() ?? {}), ...partial }));
+    updated = persistConfig(merged);
+  } catch (err) {
+    fail(describeError(err));
+  }
+  console.log(chalk.green('\nPolicy updated.\n'));
+  printConfig(updated);
+}
+
+function mutateList(
+  field: 'trustedFingerprints' | 'interests',
+  transform: (current: string[]) => string[],
+): PolicyConfig {
+  const merged = withRepo((repo) => {
+    const cur = repo.load() ?? {};
+    const list = cur[field] ?? [];
+    const next = transform(list);
+    return { ...cur, [field]: next };
   });
+  return persistConfig(merged);
 }
 
 export async function policyTrustAdd(fingerprint: string): Promise<void> {
-  await withAgent(async (agent) => {
-    const cur = agent.getPolicyConfig();
-    const set = new Set(cur.trustedFingerprints ?? []);
-    set.add(fingerprint);
-    try {
-      agent.updatePolicyConfig({ trustedFingerprints: Array.from(set) });
-    } catch (err) {
-      fail(describeValidationError(err));
-    }
-    console.log(chalk.green(`\nTrusted: ${fingerprint}\n`));
-  });
+  try {
+    mutateList('trustedFingerprints', (list) => Array.from(new Set([...list, fingerprint])));
+  } catch (err) {
+    fail(describeError(err));
+  }
+  console.log(chalk.green(`\nTrusted: ${fingerprint}\n`));
 }
 
 export async function policyTrustRemove(fingerprint: string): Promise<void> {
-  await withAgent(async (agent) => {
-    const cur = agent.getPolicyConfig();
-    const next = (cur.trustedFingerprints ?? []).filter((fp) => fp !== fingerprint.toLowerCase());
-    try {
-      agent.updatePolicyConfig({ trustedFingerprints: next });
-    } catch (err) {
-      fail(describeValidationError(err));
-    }
-    console.log(chalk.green(`\nUntrusted: ${fingerprint}\n`));
-  });
+  const target = fingerprint.toLowerCase();
+  try {
+    mutateList('trustedFingerprints', (list) => list.filter((fp) => fp !== target));
+  } catch (err) {
+    fail(describeError(err));
+  }
+  console.log(chalk.green(`\nUntrusted: ${fingerprint}\n`));
 }
 
 export async function policyInterestAdd(keyword: string): Promise<void> {
-  await withAgent(async (agent) => {
-    const cur = agent.getPolicyConfig();
-    const set = new Set(cur.interests ?? []);
-    set.add(keyword);
-    try {
-      agent.updatePolicyConfig({ interests: Array.from(set) });
-    } catch (err) {
-      fail(describeValidationError(err));
-    }
-    console.log(chalk.green(`\nInterest added: ${keyword}\n`));
-  });
+  try {
+    mutateList('interests', (list) => Array.from(new Set([...list, keyword])));
+  } catch (err) {
+    fail(describeError(err));
+  }
+  console.log(chalk.green(`\nInterest added: ${keyword}\n`));
 }
 
 export async function policyInterestRemove(keyword: string): Promise<void> {
-  await withAgent(async (agent) => {
-    const cur = agent.getPolicyConfig();
-    const next = (cur.interests ?? []).filter((k) => k !== keyword);
-    try {
-      agent.updatePolicyConfig({ interests: next });
-    } catch (err) {
-      fail(describeValidationError(err));
-    }
-    console.log(chalk.green(`\nInterest removed: ${keyword}\n`));
-  });
+  try {
+    mutateList('interests', (list) => list.filter((k) => k !== keyword));
+  } catch (err) {
+    fail(describeError(err));
+  }
+  console.log(chalk.green(`\nInterest removed: ${keyword}\n`));
 }
+
+// Re-exported for unit tests so they can verify validator messages
+// without re-importing from the node package.
+export { formatValidationErrors };

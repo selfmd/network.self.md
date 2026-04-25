@@ -210,6 +210,40 @@ describe('Agent.resetPolicyConfig', () => {
   });
 });
 
+describe('Agent.start — validates AgentOptions.policyConfig', () => {
+  it('rejects malformed AgentOptions.policyConfig with PolicyConfigValidationError', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nsmd-bad-options-'));
+    const agent = new Agent({
+      dataDir: dir,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      policyConfig: { requireMention: 'no' as any },
+    });
+    await expect(agent.start()).rejects.toBeInstanceOf(PolicyConfigValidationError);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('persisted bypasses AgentOptions validation (persisted wins, even if AgentOptions is malformed)', async () => {
+    // First run: write a valid persisted config.
+    const dir = mkdtempSync(join(tmpdir(), 'nsmd-persisted-wins-'));
+    const a1 = new Agent({ dataDir: dir, policyConfig: { interests: ['ok'] } });
+    await a1.start();
+    a1.setPolicyConfig({ interests: ['persisted'] });
+    await a1.stop();
+
+    // Second run: malformed AgentOptions.policyConfig. Because persisted
+    // exists, AgentOptions is ignored — start() must NOT throw.
+    const a2 = new Agent({
+      dataDir: dir,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      policyConfig: { requireMention: 'no' as any },
+    });
+    await expect(a2.start()).resolves.toBeUndefined();
+    expect(a2.getPolicyConfig()).toEqual({ interests: ['persisted'] });
+    await a2.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('Privacy invariant — operator config never carries plaintext', () => {
   let h: Harness;
   beforeEach(async () => { h = await startAgent(); });
