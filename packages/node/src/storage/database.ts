@@ -2,9 +2,10 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: string[] = [
+  // v0 → v1: initial schema
   `
   CREATE TABLE IF NOT EXISTS identity (
     id INTEGER PRIMARY KEY,
@@ -67,6 +68,22 @@ const MIGRATIONS: string[] = [
   );
 
   INSERT INTO schema_version (version) VALUES (1);
+  `,
+  // v1 → v2: owner-local policy config persistence (PR #5).
+  // Single-row table (id=1) so we can use INSERT OR REPLACE without
+  // touching the schema_version row layout. Lists stored as JSON arrays
+  // since SQLite has no array type. NULL columns mean "field unset".
+  `
+  CREATE TABLE IF NOT EXISTS policy_config (
+    id INTEGER PRIMARY KEY,
+    trusted_fingerprints TEXT,
+    interests TEXT,
+    require_mention INTEGER,
+    mention_prefix_len INTEGER,
+    updated_at INTEGER NOT NULL
+  );
+
+  UPDATE schema_version SET version = 2;
   `,
 ];
 

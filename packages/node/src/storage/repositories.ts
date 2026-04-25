@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import type { PolicyConfig } from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -312,5 +313,88 @@ export class SenderKeyRepository {
     this.db
       .prepare('DELETE FROM sender_keys WHERE group_id = ?')
       .run(Buffer.from(groupId));
+  }
+}
+
+export interface StoredPolicyConfig {
+  id: number;
+  trusted_fingerprints: string | null;
+  interests: string | null;
+  require_mention: number | null;
+  mention_prefix_len: number | null;
+  updated_at: number;
+}
+
+// Owner-local policy configuration. Single-row table (id=1). NULL
+// columns mean "field unset" — load() returns undefined for those so
+// AgentPolicy's existing defaults apply unchanged.
+//
+// Privacy: this repo persists ONLY operator-supplied policy
+// configuration (trusted fingerprints, interest keywords, mention
+// behavior). It does NOT store message plaintext, decrypted bodies,
+// raw event payloads, or any private key material — by design and by
+// schema (no such columns exist on policy_config).
+export class PolicyConfigRepository {
+  constructor(private db: Database.Database) {}
+
+  load(): PolicyConfig | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM policy_config WHERE id = 1')
+      .get() as StoredPolicyConfig | undefined;
+    if (!row) return undefined;
+    const config: PolicyConfig = {};
+    if (row.trusted_fingerprints !== null) {
+      config.trustedFingerprints = parseStringArray(row.trusted_fingerprints);
+    }
+    if (row.interests !== null) {
+      config.interests = parseStringArray(row.interests);
+    }
+    if (row.require_mention !== null) {
+      config.requireMention = row.require_mention === 1;
+    }
+    if (row.mention_prefix_len !== null) {
+      config.mentionPrefixLen = row.mention_prefix_len;
+    }
+    return config;
+  }
+
+  save(config: PolicyConfig): void {
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO policy_config
+       (id, trusted_fingerprints, interests, require_mention, mention_prefix_len, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?)`,
+    );
+    stmt.run(
+      config.trustedFingerprints !== undefined
+        ? JSON.stringify(config.trustedFingerprints)
+        : null,
+      config.interests !== undefined ? JSON.stringify(config.interests) : null,
+      config.requireMention === undefined ? null : config.requireMention ? 1 : 0,
+      config.mentionPrefixLen ?? null,
+      Date.now(),
+    );
+  }
+
+  exists(): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS x FROM policy_config WHERE id = 1')
+      .get() as { x: number } | undefined;
+    return row !== undefined;
+  }
+
+  clear(): void {
+    this.db.prepare('DELETE FROM policy_config WHERE id = 1').run();
+  }
+}
+
+function parseStringArray(json: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === 'string');
+  } catch {
+    // Corrupt row — return empty rather than throwing during load.
+    // setPolicyConfig will overwrite on next operator action.
+    return [];
   }
 }

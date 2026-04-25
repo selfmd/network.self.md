@@ -5,6 +5,7 @@ export {
   GroupRepository,
   MessageRepository,
   SenderKeyRepository,
+  PolicyConfigRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,
@@ -14,5 +15,6 @@ export type {
   StoredMessage,
   StoredSenderKey,
   StoredKeyData,
+  StoredPolicyConfig,
   MessageQueryOptions,
 } from './repositories.js';
