@@ -51,6 +51,14 @@ export class AgentPolicy extends EventEmitter {
     this.config = config;
   }
 
+  // Read access for callers that want to introspect the live config.
+  // Note: returns the internal reference. Agent.getPolicyConfig clones
+  // arrays before exposing this externally; internal callers like the
+  // gate read it directly for cost.
+  getConfig(): PolicyConfig {
+    return this.config;
+  }
+
   decide(ev: PrivateInboundMessageEvent): PolicyDecision {
     const text = tryDecodeUtf8(ev.plaintext);
     const fingerprint = this.agent.identity?.fingerprint;

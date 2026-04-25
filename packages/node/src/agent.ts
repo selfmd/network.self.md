@@ -28,12 +28,17 @@ import { AgentPolicy } from './policy/agent-policy.js';
 import { PolicyAuditLog } from './policy/audit-log.js';
 import { PolicyGate } from './policy/policy-gate.js';
 import {
+  validatePolicyConfig,
+  PolicyConfigValidationError,
+} from './policy/validate-config.js';
+import {
   AgentDatabase,
   IdentityRepository,
   PeerRepository,
   GroupRepository,
   MessageRepository,
   SenderKeyRepository,
+  PolicyConfigRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -96,6 +101,7 @@ export class Agent extends EventEmitter {
   private groupRepo!: GroupRepository;
   private messageRepo!: MessageRepository;
   private senderKeyRepo!: SenderKeyRepository;
+  private policyConfigRepo!: PolicyConfigRepository;
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
 
@@ -117,6 +123,7 @@ export class Agent extends EventEmitter {
     this.groupRepo = new GroupRepository(db);
     this.messageRepo = new MessageRepository(db);
     this.senderKeyRepo = new SenderKeyRepository(db);
+    this.policyConfigRepo = new PolicyConfigRepository(db);
 
     // Load or generate identity
     await this.loadOrGenerateIdentity();
@@ -146,9 +153,17 @@ export class Agent extends EventEmitter {
       -readonly [K in 'policy' | 'policyAudit' | 'policyGate']: Agent[K];
     };
     mut.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax });
+
+    // Precedence: persisted operator config wins. Operators that have
+    // ever called agent.setPolicyConfig (via CLI, MCP, or code) expect
+    // their last-saved config to apply across restarts. Programmatic
+    // AgentOptions.policyConfig is a "first-time default" used only
+    // when no row has been persisted yet, and is NOT auto-persisted.
+    const persisted = this.policyConfigRepo.load();
+    const initialConfig = persisted ?? this.options.policyConfig ?? {};
     mut.policy = new AgentPolicy({
       agent: this,
-      config: this.options.policyConfig ?? {},
+      config: initialConfig,
     });
     mut.policyGate = new PolicyGate({
       policy: mut.policy,
@@ -336,11 +351,60 @@ export class Agent extends EventEmitter {
 
   // ---- Policy ----
 
-  // Update the policy gate's configuration in place. Decisions are pure
-  // over (config, identity, event), so this takes effect on the very
-  // next event without needing to rebuild the gate or reset audit/dedup.
-  setPolicyConfig(config: PolicyConfig): void {
-    this.policy.setConfig(config);
+  // Returns a defensive copy of the current runtime policy configuration.
+  // Lists are sliced so callers cannot mutate the live config; mutating
+  // the returned arrays does not affect AgentPolicy.decide.
+  getPolicyConfig(): PolicyConfig {
+    const c = this.policy.getConfig();
+    const out: PolicyConfig = {};
+    if (c.trustedFingerprints !== undefined) {
+      out.trustedFingerprints = c.trustedFingerprints.slice();
+    }
+    if (c.interests !== undefined) out.interests = c.interests.slice();
+    if (c.requireMention !== undefined) out.requireMention = c.requireMention;
+    if (c.mentionPrefixLen !== undefined) out.mentionPrefixLen = c.mentionPrefixLen;
+    return out;
+  }
+
+  // Replace the policy configuration. Validates first; on bad input
+  // throws PolicyConfigValidationError without mutating anything. On
+  // success, persists to SQLite (so the change survives restart) and
+  // updates the live AgentPolicy.config in place. Decisions are pure
+  // over (config, identity, event), so the new config takes effect on
+  // the very next inbound event.
+  setPolicyConfig(config: unknown): void {
+    const result = validatePolicyConfig(config);
+    if (!result.ok) {
+      throw new PolicyConfigValidationError(result.errors);
+    }
+    this.policyConfigRepo.save(result.config);
+    this.policy.setConfig(result.config);
+  }
+
+  // Merge `partial` over the current configuration. Use this for
+  // single-field updates (e.g. flipping requireMention) without
+  // re-supplying the whole config. Validation runs on the merged
+  // result; persistence and live update follow the same rules as
+  // setPolicyConfig.
+  updatePolicyConfig(partial: unknown): void {
+    if (partial === null || typeof partial !== 'object' || Array.isArray(partial)) {
+      throw new PolicyConfigValidationError([
+        { field: 'config', message: 'must be an object' },
+      ]);
+    }
+    const merged: PolicyConfig = {
+      ...this.getPolicyConfig(),
+      ...(partial as Partial<PolicyConfig>),
+    };
+    this.setPolicyConfig(merged);
+  }
+
+  // Wipe persisted config and reset the runtime to AgentOptions.
+  // policyConfig (or {} if none was passed). Useful for tests and for
+  // operators that want to start over without restarting the process.
+  resetPolicyConfig(): void {
+    this.policyConfigRepo.clear();
+    this.policy.setConfig(this.options.policyConfig ?? {});
   }
 
   // ---- Peers ----
