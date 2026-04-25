@@ -92,12 +92,12 @@ describe('PolicyConfigRepository — persistence + migration v2', () => {
     expect(tables).toHaveLength(1);
   });
 
-  it('migration v2 bumped schema_version to 2', () => {
+  it('schema_version is at the current head (>= 2; PR #6 bumps to 3)', () => {
     const row = db
       .getDb()
       .prepare('SELECT version FROM schema_version LIMIT 1')
       .get() as { version: number };
-    expect(row.version).toBe(2);
+    expect(row.version).toBeGreaterThanOrEqual(2);
   });
 
   it('handles a corrupt JSON row gracefully (returns empty array, never throws)', () => {

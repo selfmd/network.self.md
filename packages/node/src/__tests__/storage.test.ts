@@ -52,8 +52,9 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    // Schema version is now 2 (v1 added policy_config table).
-    expect(row.version).toBe(2);
+    // Schema version is now 3: v1 added policy_config (PR #5),
+    // v2 added policy_audit (PR #6).
+    expect(row.version).toBe(3);
   });
 });
 
