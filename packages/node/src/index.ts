@@ -44,3 +44,16 @@ export type { PolicyAuditLogOptions } from './policy/audit-log.js';
 
 export { validateInboundEvent } from './policy/validate.js';
 export type { ValidationResult } from './policy/validate.js';
+
+export {
+  validatePolicyConfig,
+  formatValidationErrors,
+  PolicyConfigValidationError,
+  POLICY_LIMITS,
+} from './policy/validate-config.js';
+export type {
+  ValidationError as PolicyConfigValidationItem,
+  ValidatedConfig,
+} from './policy/validate-config.js';
+
+export { PolicyConfigRepository } from './storage/index.js';

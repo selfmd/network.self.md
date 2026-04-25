@@ -46,13 +46,14 @@ describe('AgentDatabase', () => {
   });
 
   it('should not re-run migrations', () => {
-    // Running migrate again should be safe
+    // Running migrate again should be safe and idempotent.
     database.migrate();
     const db = database.getDb();
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(1);
+    // Schema version is now 2 (v1 added policy_config table).
+    expect(row.version).toBe(2);
   });
 });
 

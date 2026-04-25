@@ -188,6 +188,151 @@ duplicate. Tests in
 poison scenarios (validation fail / membership fail / audit throw) and
 the eviction-at-capacity behavior.
 
+## Configuring the policy gate
+
+Configuration is owner-local. There are three equivalent surfaces:
+
+1. **Programmatic** — pass `policyConfig` to `new Agent({ ... })`.
+2. **MCP tools** (owner-private, local-only): `get_policy_config`,
+   `set_policy_config`, `add_policy_trusted_fingerprint`,
+   `remove_policy_trusted_fingerprint`, `add_policy_interest`,
+   `remove_policy_interest`.
+3. **CLI** (under the `policy` parent command):
+
+   ```
+   networkselfmd policy get
+   networkselfmd policy set --interests=coffee,deploy --require-mention=true
+   networkselfmd policy set --reset
+   networkselfmd policy trust add abcd1234
+   networkselfmd policy trust remove abcd1234
+   networkselfmd policy interest add ship-it
+   networkselfmd policy interest remove ship-it
+   ```
+
+### Precedence
+
+On `Agent.start()`:
+
+- If a row exists in the local `policy_config` table, **the persisted
+  config wins** and `AgentOptions.policyConfig` is ignored. Once an
+  operator has tightened/loosened policy via CLI, MCP, or
+  `agent.setPolicyConfig`, that setting survives restart.
+- Otherwise the `AgentOptions.policyConfig` value is used as a
+  first-time default. **It is NOT auto-persisted.** Programmatic
+  defaults stay programmatic until the operator opts in via
+  `setPolicyConfig`.
+- If neither is present, the runtime default is `{}` — strict,
+  ignore-everything.
+
+`agent.resetPolicyConfig()` clears the persisted row and reverts the
+runtime to `AgentOptions.policyConfig` (or `{}`).
+
+> **CLI `policy set --reset`** clears the persisted row but reverts to
+> the empty default `{}` — the CLI has no programmatic AgentOptions
+> context to fall back on. Operators who want different defaults
+> should pass `AgentOptions.policyConfig` to their long-running agent
+> process; the next agent restart will then pick those up because the
+> persisted row is empty after reset.
+
+> **`AgentOptions.policyConfig` is validated at `Agent.start()`.**
+> A JS caller that passes an off-spec config (e.g. via JSON.parse, or
+> the TypeScript escape hatch `as never`) will see
+> `PolicyConfigValidationError` thrown synchronously from `start()`.
+> Persisted configs that already exist on disk are not re-validated on
+> load — they were validated at the time they were written, and a
+> corrupt JSON list is degraded to an empty array rather than throwing.
+
+### Validation and bounds
+
+`Agent.setPolicyConfig` validates input with the pure
+`validatePolicyConfig` helper before persisting. Bounds (frozen as
+`POLICY_LIMITS`):
+
+- `trustedFingerprints`: ≤256 entries; each 4–64 chars matching
+  `/^[a-z0-9]+$/`. Mixed-case input is trim+lowercased, not rejected.
+- `interests`: ≤256 entries; each non-empty after trim, ≤64 chars.
+- `requireMention`: boolean.
+- `mentionPrefixLen`: integer in `[1, 64]`.
+
+Lists are deduplicated while preserving order. Unknown keys on the
+input (e.g. an attacker-supplied `plaintext` field) are stripped from
+the sanitized output and never reach persistence.
+
+On bad input `setPolicyConfig` throws `PolicyConfigValidationError`
+with a structured `errors` array; the persisted row and live
+configuration are untouched.
+
+### Examples
+
+Trust a peer and react to "deploy" mentions, requiring an explicit
+@-mention:
+
+```ts
+agent.setPolicyConfig({
+  trustedFingerprints: ['abcd1234'],
+  interests: ['deploy'],
+  requireMention: true,
+  mentionPrefixLen: 8,
+});
+```
+
+CLI equivalent:
+
+```
+networkselfmd policy set \
+  --trusted=abcd1234 \
+  --interests=deploy \
+  --require-mention=true \
+  --mention-prefix-len=8
+```
+
+Open the gate to all group messages (no @-mention required), useful
+for a chatbot scenario where every message wants attention:
+
+```
+networkselfmd policy set --require-mention=false
+```
+
+### Privacy boundaries — operator config surface
+
+The privacy invariant on the gate / audit / decision / MCP audit
+surfaces extends here, with one expected exception: operator-supplied
+configuration values **are persisted** because that is the entire
+purpose. What's persisted:
+
+- trusted fingerprints (already public identifiers)
+- interest keywords (operator-chosen literal strings)
+- the two flags (`requireMention`, `mentionPrefixLen`)
+
+What's **never** persisted, even by accident:
+
+- message plaintext / decoded content
+- ciphertext / nonces / chain keys
+- private keys or any encrypted-at-rest material
+- raw event payloads
+- tool args (no tool execution)
+
+The schema enforces this — the `policy_config` table has columns only
+for the four configurable fields plus an `updated_at` timestamp. A
+test asserts the exact column set so future drift fails loudly. The
+existing owner-private message store (`messages.content`) is unrelated
+to the policy surface and unchanged in this PR.
+
+### Local-only warning for MCP/CLI tools
+
+The MCP policy tools and the CLI subcommands are operator controls.
+They modify local state only. They MUST NOT be:
+
+- exposed through a public web UI
+- proxied to remote callers
+- forwarded to dashboards, census, or shared logs
+- used to drive automated decisions on behalf of other accounts
+
+There is **no tool execution** in this PR. `act` decisions still
+require the consumer to wire `agent.on('policy:decision', ...)`
+themselves and dispatch out-of-band — and that wiring is an
+owner-side concern, not a policy-tool concern.
+
 ## Future extension point — tool execution (NOT IMPLEMENTED)
 
 When a `PolicyDecision { action: 'act' }` is produced, this PR does
