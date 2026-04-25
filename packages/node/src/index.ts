@@ -25,9 +25,22 @@ export type {
   PublicActivityEvent,
   PolicyAction,
   PolicyReason,
+  PolicyDecisionReason,
+  PolicyFailClosedReason,
   PolicyDecision,
   PolicyConfig,
+  PolicyAuditEntry,
 } from '@networkselfmd/core';
+export { POLICY_REASONS, redactPlaintext } from '@networkselfmd/core';
 
 export { AgentPolicy } from './policy/agent-policy.js';
 export type { AgentPolicyOptions } from './policy/agent-policy.js';
+
+export { PolicyGate } from './policy/policy-gate.js';
+export type { PolicyGateOptions, GateOutcome, IsMemberFn } from './policy/policy-gate.js';
+
+export { PolicyAuditLog } from './policy/audit-log.js';
+export type { PolicyAuditLogOptions } from './policy/audit-log.js';
+
+export { validateInboundEvent } from './policy/validate.js';
+export type { ValidationResult } from './policy/validate.js';
