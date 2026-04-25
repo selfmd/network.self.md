@@ -39,6 +39,7 @@ import {
   MessageRepository,
   SenderKeyRepository,
   PolicyConfigRepository,
+  PolicyAuditRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -56,8 +57,15 @@ export interface AgentOptions {
   // no interest hit, so unconfigured agents do not surface noise to the
   // inbound queue. Tighten/loosen at runtime via agent.setPolicyConfig().
   policyConfig?: PolicyConfig;
-  // Audit log capacity (entries). Default: 1000.
+  // In-memory audit log capacity (entries). Default: 1000. Used for
+  // fast runtime reads inside the same process; durable cross-restart
+  // visibility is the persisted policy_audit table (policyAuditDbMax).
   policyAuditMax?: number;
+  // Maximum durable audit rows retained on disk. Default: 5000
+  // (POLICY_AUDIT_LIMITS.defaultMaxEntries). Prune-on-insert keeps the
+  // table bounded; lowering this and restarting the agent triggers a
+  // one-time prune at start.
+  policyAuditDbMax?: number;
 }
 
 export interface MemberInfo {
@@ -92,6 +100,7 @@ export class Agent extends EventEmitter {
   // wiring set up in start().
   readonly policy!: AgentPolicy;
   readonly policyAudit!: PolicyAuditLog;
+  readonly policyAuditRepo!: PolicyAuditRepository;
   readonly policyGate!: PolicyGate;
 
   private options: AgentOptions;
@@ -150,9 +159,31 @@ export class Agent extends EventEmitter {
     // documents post-start immutability; we use a typed cast here for
     // the one-time assignment so callers don't see the seam.
     const mut = this as {
-      -readonly [K in 'policy' | 'policyAudit' | 'policyGate']: Agent[K];
+      -readonly [K in 'policy' | 'policyAudit' | 'policyAuditRepo' | 'policyGate']: Agent[K];
     };
-    mut.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax });
+
+    // Durable audit FIRST so the in-memory log can persist through it.
+    // Order of operations inside PolicyAuditLog.record is persist-then-
+    // push, so a DB write failure throws out of record() with the
+    // in-memory log unchanged, the gate's evaluate() throws, and
+    // markDedup() never runs — preserving the retry-poison invariant
+    // from PR #4 polish.
+    mut.policyAuditRepo = new PolicyAuditRepository(db, {
+      maxEntries: this.options.policyAuditDbMax,
+    });
+    // One-shot prune at start in case policyAuditDbMax was lowered
+    // since the last run.
+    mut.policyAuditRepo.prune();
+
+    mut.policyAudit = new PolicyAuditLog({
+      max: this.options.policyAuditMax,
+      persist: (entry) => {
+        // The repo throws on insert failure, which propagates through
+        // record() → evaluate() → the agent listener and surfaces as
+        // an exception. We deliberately do NOT swallow here.
+        mut.policyAuditRepo.insert(entry);
+      },
+    });
 
     // Precedence: persisted operator config wins. Operators that have
     // ever called agent.setPolicyConfig (via CLI, MCP, or code) expect

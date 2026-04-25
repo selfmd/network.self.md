@@ -4,6 +4,13 @@ export interface PolicyAuditLogOptions {
   // Maximum number of entries to retain. Older entries are dropped FIFO.
   // Default: 1000.
   max?: number;
+  // Optional synchronous persistence callback. Called inside record()
+  // BEFORE the in-memory ring is mutated. If it throws, record() throws
+  // and the in-memory log is unchanged — that propagation is the
+  // mechanism that preserves the gate's retry-poison invariant: the
+  // gate's evaluate() will throw, markDedup() never runs, and a
+  // legitimate retry of the same messageId is re-evaluated.
+  persist?: (entry: PolicyAuditEntry) => void;
 }
 
 // Bounded in-memory ring buffer of policy decisions. Privacy: every
@@ -17,17 +24,24 @@ export interface PolicyAuditLogOptions {
 export class PolicyAuditLog {
   private buf: PolicyAuditEntry[] = [];
   private max: number;
+  private persist?: (entry: PolicyAuditEntry) => void;
 
   constructor(options: PolicyAuditLogOptions = {}) {
     this.max = Math.max(1, options.max ?? 1000);
+    this.persist = options.persist;
   }
 
   // Append an entry. The log stores an independent, deeply-frozen copy:
   // mutating the input after record() does not corrupt the stored row,
   // and callers that read entries back via recent() cannot mutate them.
   // Audit integrity must not depend on caller discipline.
+  //
+  // Order of operations: persist FIRST, then push to the in-memory ring.
+  // A throw from persist propagates with the in-memory log unchanged —
+  // exactly the contract the gate's retry-poison invariant relies on.
   record(entry: PolicyAuditEntry): PolicyAuditEntry {
     const stored = freezeAuditEntry(cloneAuditEntry(entry));
+    if (this.persist) this.persist(stored);
     this.buf.push(stored);
     if (this.buf.length > this.max) {
       this.buf.splice(0, this.buf.length - this.max);
