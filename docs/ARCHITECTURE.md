@@ -141,6 +141,21 @@ queue. The tool serializes events through `toInboundEventDTO`, which
 hex-encodes key material and base64-encodes plaintext so no raw
 `Uint8Array` ever passes through `JSON.stringify`.
 
+### Policy gate
+
+Every event reaching `Agent.inboundQueue` or firing `inbound:message` on
+the Agent has passed through `PolicyGate.evaluate(...)`, which validates
+the event structurally, deduplicates by `messageId`, rechecks group
+membership, runs the pure `AgentPolicy.decide`, and writes a
+metadata-only `PolicyAuditEntry` before any side effect. Fail-closed
+reasons (`malformed-event`, `unknown-event-kind`, `duplicate-event`,
+`not-a-member`) prevent the queue push and the public re-emit.
+
+See [POLICY.md](POLICY.md) for the full lifecycle, decision table,
+reason vocabulary, and privacy invariant. The MCP tool
+`get_policy_audit_recent` exposes a read-only, metadata-only view of the
+audit log for owner-side debugging.
+
 ### TTYA Visitor Chat
 
 ```
