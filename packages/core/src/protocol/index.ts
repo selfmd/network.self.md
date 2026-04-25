@@ -9,6 +9,7 @@ export {
   type GroupManagementMessage,
   type TTYARequestMessage,
   type TTYAResponseMessage,
+  type NetworkAnnounceMessage,
   type AckMessage,
   type ProtocolMessage,
   type AgentIdentity,

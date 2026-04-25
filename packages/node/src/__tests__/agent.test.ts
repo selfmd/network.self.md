@@ -88,13 +88,14 @@ describe('Agent', () => {
 
     const group = await agent.createGroup('Test Group');
     expect(group).toBeDefined();
-    expect(group.name).toBe('Test Group');
-    expect(group.role).toBe('admin');
     expect(group.groupId).toBeInstanceOf(Uint8Array);
+    expect(group.topic).toBeInstanceOf(Buffer);
 
     const groups = agent.listGroups();
     expect(groups.length).toBe(1);
     expect(groups[0].name).toBe('Test Group');
+    expect(groups[0].role).toBe('admin');
+    expect(groups[0].isPublic).toBe(false);
 
     await agent.stop();
   });

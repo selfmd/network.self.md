@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: string[] = [
   `
@@ -67,6 +67,21 @@ const MIGRATIONS: string[] = [
   );
 
   INSERT INTO schema_version (version) VALUES (1);
+  `,
+  `
+  ALTER TABLE groups ADD COLUMN is_public INTEGER DEFAULT 0;
+  ALTER TABLE groups ADD COLUMN self_md TEXT;
+
+  CREATE TABLE IF NOT EXISTS discovered_groups (
+    group_id BLOB PRIMARY KEY,
+    name TEXT NOT NULL,
+    self_md TEXT,
+    member_count INTEGER DEFAULT 0,
+    announced_by BLOB NOT NULL,
+    last_announced INTEGER NOT NULL
+  );
+
+  UPDATE schema_version SET version = 2;
   `,
 ];
 

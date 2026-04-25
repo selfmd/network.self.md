@@ -5,6 +5,7 @@ import { registerGroupTools } from './tools/groups.js';
 import { registerMessagingTools } from './tools/messaging.js';
 import { registerTTYATools } from './tools/ttya.js';
 import { registerPeerTools } from './tools/peers.js';
+import { registerDiscoveryTools } from './tools/discovery.js';
 import { registerResources } from './resources.js';
 
 export function createServer(agent: Agent): McpServer {
@@ -18,6 +19,7 @@ export function createServer(agent: Agent): McpServer {
   registerMessagingTools(server, agent);
   registerTTYATools(server, agent);
   registerPeerTools(server, agent);
+  registerDiscoveryTools(server, agent);
   registerResources(server, agent);
 
   return server;

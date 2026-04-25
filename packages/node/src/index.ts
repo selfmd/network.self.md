@@ -8,6 +8,7 @@ export {
   GroupRepository,
   MessageRepository,
   SenderKeyRepository,
+  DiscoveredGroupRepository,
 } from './storage/repositories.js';
 
 export { PeerSession } from './network/connection.js';

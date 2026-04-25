@@ -4,19 +4,19 @@ import type { Agent } from '@networkselfmd/node';
 
 export function registerGroupTools(server: McpServer, agent: Agent): void {
   server.tool(
-    'group_create',
-    'Create a new group',
+    'state_found',
+    'Found a new state',
     {
-      name: z.string().describe('Name for the new group'),
+      name: z.string().describe('Name for the new state'),
     },
     async ({ name }) => {
-      const group = await agent.createGroup(name);
+      const result = await agent.createGroup(name);
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            groupId: Buffer.from(group.groupId).toString('hex'),
-            name: group.name,
+            stateId: Buffer.from(result.groupId).toString('hex'),
+            name,
           }),
         }],
       };
@@ -24,20 +24,22 @@ export function registerGroupTools(server: McpServer, agent: Agent): void {
   );
 
   server.tool(
-    'group_list',
-    'List all groups this agent belongs to',
+    'state_list',
+    'List all states this agent belongs to',
     {},
     async () => {
-      const groups = agent.listGroups();
+      const states = agent.listGroups();
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            groups: groups.map(g => ({
-              id: Buffer.from(g.groupId).toString('hex'),
-              name: g.name,
-              memberCount: g.memberCount,
-              role: g.role,
+            states: states.map(s => ({
+              id: Buffer.from(s.groupId).toString('hex'),
+              name: s.name,
+              memberCount: s.memberCount,
+              role: s.role,
+              selfMd: s.selfMd,
+              isPublic: s.isPublic,
             })),
           }),
         }],
@@ -46,13 +48,13 @@ export function registerGroupTools(server: McpServer, agent: Agent): void {
   );
 
   server.tool(
-    'group_members',
-    'List members of a group',
+    'state_members',
+    'List members of a state',
     {
-      groupId: z.string().describe('Group ID (hex)'),
+      stateId: z.string().describe('State ID (hex)'),
     },
-    async ({ groupId }) => {
-      const members = agent.getGroupMembers(groupId);
+    async ({ stateId }) => {
+      const members = agent.getGroupMembers(stateId);
       return {
         content: [{
           type: 'text' as const,
@@ -70,14 +72,14 @@ export function registerGroupTools(server: McpServer, agent: Agent): void {
   );
 
   server.tool(
-    'group_invite',
-    'Invite a peer to a group',
+    'state_invite',
+    'Invite a peer to a state',
     {
-      groupId: z.string().describe('Group ID (hex)'),
+      stateId: z.string().describe('State ID (hex)'),
       peerPublicKey: z.string().describe('Public key of the peer to invite'),
     },
-    async ({ groupId, peerPublicKey }) => {
-      await agent.inviteToGroup(groupId, peerPublicKey);
+    async ({ stateId, peerPublicKey }) => {
+      await agent.inviteToGroup(stateId, peerPublicKey);
       return {
         content: [{
           type: 'text' as const,
@@ -88,13 +90,13 @@ export function registerGroupTools(server: McpServer, agent: Agent): void {
   );
 
   server.tool(
-    'group_join',
-    'Accept a group invitation',
+    'state_join',
+    'Join a state by ID',
     {
-      groupId: z.string().describe('Group ID (hex) to join'),
+      stateId: z.string().describe('State ID (hex) to join'),
     },
-    async ({ groupId }) => {
-      await agent.joinGroup(groupId);
+    async ({ stateId }) => {
+      await agent.joinGroup(stateId);
       return {
         content: [{
           type: 'text' as const,
@@ -105,13 +107,13 @@ export function registerGroupTools(server: McpServer, agent: Agent): void {
   );
 
   server.tool(
-    'group_leave',
-    'Leave a group',
+    'state_leave',
+    'Leave a state',
     {
-      groupId: z.string().describe('Group ID (hex) to leave'),
+      stateId: z.string().describe('State ID (hex) to leave'),
     },
-    async ({ groupId }) => {
-      await agent.leaveGroup(groupId);
+    async ({ stateId }) => {
+      await agent.leaveGroup(stateId);
       return {
         content: [{
           type: 'text' as const,

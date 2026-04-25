@@ -7,6 +7,7 @@ export const MessageType = {
   GroupManagement: 0x06,
   TTYARequest: 0x07,
   TTYAResponse: 0x08,
+  NetworkAnnounce: 0x09,
   Ack: 0xff,
 } as const;
 
@@ -85,6 +86,17 @@ export interface TTYAResponseMessage {
   timestamp: number;
 }
 
+export interface NetworkAnnounceMessage {
+  type: typeof MessageType.NetworkAnnounce;
+  groups: Array<{
+    groupId: Uint8Array;
+    name: string;
+    selfMd: string;
+    memberCount: number;
+  }>;
+  timestamp: number;
+}
+
 export interface AckMessage {
   type: typeof MessageType.Ack;
   messageId: string;
@@ -100,6 +112,7 @@ export type ProtocolMessage =
   | GroupManagementMessage
   | TTYARequestMessage
   | TTYAResponseMessage
+  | NetworkAnnounceMessage
   | AckMessage;
 
 // Domain types
@@ -129,6 +142,8 @@ export interface GroupInfo {
   role: 'admin' | 'member';
   createdAt: number;
   joinedAt: number;
+  selfMd?: string;
+  isPublic?: boolean;
 }
 
 export interface GroupMessage {

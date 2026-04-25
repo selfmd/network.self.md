@@ -23,9 +23,9 @@ export function registerResources(server: McpServer, agent: Agent): void {
   );
 
   server.resource(
-    'agent-groups',
-    'agent://groups',
-    { description: 'All groups with member counts' },
+    'agent-states',
+    'agent://states',
+    { description: 'All states with member counts' },
     async (uri) => {
       const groups = agent.listGroups();
       return {
@@ -67,9 +67,30 @@ export function registerResources(server: McpServer, agent: Agent): void {
   );
 
   server.resource(
-    'group-messages',
+    'discovered-states',
+    'agent://discovered-states',
+    { description: 'Public states discovered from the network' },
+    async (uri) => {
+      const groups = agent.listDiscoveredGroups();
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify(groups.map(g => ({
+            id: Buffer.from(g.groupId).toString('hex'),
+            name: g.name,
+            selfMd: g.selfMd,
+            memberCount: g.memberCount,
+          }))),
+        }],
+      };
+    },
+  );
+
+  server.resource(
+    'state-messages',
     new ResourceTemplate('agent://messages/{groupId}', { list: undefined }),
-    { description: 'Recent messages in a specific group' },
+    { description: 'Recent messages in a specific state' },
     async (uri, variables) => {
       const groupId = Array.isArray(variables.groupId)
         ? variables.groupId[0]

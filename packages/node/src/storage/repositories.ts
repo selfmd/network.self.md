@@ -23,6 +23,8 @@ export interface StoredGroup {
   role: string;
   created_at: number;
   joined_at: number | null;
+  is_public: number;
+  self_md: string | null;
 }
 
 export interface StoredGroupMember {
@@ -207,6 +209,18 @@ export class GroupRepository {
       .prepare('SELECT * FROM group_members WHERE group_id = ?')
       .all(Buffer.from(groupId)) as StoredGroupMember[];
   }
+
+  setPublic(groupId: Uint8Array, isPublic: boolean, selfMd?: string): void {
+    this.db
+      .prepare('UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?')
+      .run(isPublic ? 1 : 0, selfMd ?? null, Buffer.from(groupId));
+  }
+
+  listPublic(): StoredGroup[] {
+    return this.db
+      .prepare('SELECT * FROM groups WHERE is_public = 1')
+      .all() as StoredGroup[];
+  }
 }
 
 export class MessageRepository {
@@ -261,6 +275,55 @@ export class MessageRepository {
     return this.db
       .prepare(`SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`)
       .all(...params, limit) as StoredMessage[];
+  }
+}
+
+export interface StoredDiscoveredGroup {
+  group_id: Buffer;
+  name: string;
+  self_md: string | null;
+  member_count: number;
+  announced_by: Buffer;
+  last_announced: number;
+}
+
+export class DiscoveredGroupRepository {
+  constructor(private db: Database.Database) {}
+
+  upsert(
+    groupId: Uint8Array,
+    name: string,
+    selfMd: string | undefined,
+    memberCount: number,
+    announcedBy: Uint8Array,
+  ): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO discovered_groups (group_id, name, self_md, member_count, announced_by, last_announced)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET
+         name = excluded.name,
+         self_md = COALESCE(excluded.self_md, discovered_groups.self_md),
+         member_count = excluded.member_count,
+         announced_by = excluded.announced_by,
+         last_announced = excluded.last_announced`,
+    );
+    stmt.run(Buffer.from(groupId), name, selfMd ?? null, memberCount, Buffer.from(announcedBy), Date.now());
+  }
+
+  list(): StoredDiscoveredGroup[] {
+    return this.db
+      .prepare('SELECT * FROM discovered_groups ORDER BY last_announced DESC')
+      .all() as StoredDiscoveredGroup[];
+  }
+
+  find(groupId: Uint8Array): StoredDiscoveredGroup | undefined {
+    return this.db
+      .prepare('SELECT * FROM discovered_groups WHERE group_id = ?')
+      .get(Buffer.from(groupId)) as StoredDiscoveredGroup | undefined;
+  }
+
+  remove(groupId: Uint8Array): void {
+    this.db.prepare('DELETE FROM discovered_groups WHERE group_id = ?').run(Buffer.from(groupId));
   }
 }
 

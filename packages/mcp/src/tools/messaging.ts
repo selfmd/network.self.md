@@ -4,10 +4,10 @@ import type { Agent } from '@networkselfmd/node';
 
 export function registerMessagingTools(server: McpServer, agent: Agent): void {
   server.tool(
-    'send_group_message',
-    'Send an encrypted message to a group',
+    'send_state_message',
+    'Send an encrypted message to a state',
     {
-      groupId: z.string().describe('Group ID (hex)'),
+      groupId: z.string().describe('State ID (hex)'),
       content: z.string().describe('Message content'),
     },
     async ({ groupId, content }) => {
@@ -41,9 +41,9 @@ export function registerMessagingTools(server: McpServer, agent: Agent): void {
 
   server.tool(
     'read_messages',
-    'Read recent messages from a group or direct conversation',
+    'Read recent messages from a state or direct conversation',
     {
-      groupId: z.string().optional().describe('Group ID to read messages from'),
+      groupId: z.string().optional().describe('State ID to read messages from'),
       peerPublicKey: z.string().optional().describe('Peer public key for direct messages'),
       limit: z.number().optional().describe('Maximum number of messages to return'),
       before: z.string().optional().describe('Return messages before this message ID'),

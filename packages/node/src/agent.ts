@@ -18,6 +18,7 @@ import type {
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
+  NetworkAnnounceMessage,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { createId } from '@paralleldrive/cuid2';
@@ -28,6 +29,7 @@ import {
   GroupRepository,
   MessageRepository,
   SenderKeyRepository,
+  DiscoveredGroupRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -71,6 +73,7 @@ export class Agent extends EventEmitter {
   private groupRepo!: GroupRepository;
   private messageRepo!: MessageRepository;
   private senderKeyRepo!: SenderKeyRepository;
+  private discoveredGroupRepo!: DiscoveredGroupRepository;
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
 
@@ -92,6 +95,7 @@ export class Agent extends EventEmitter {
     this.groupRepo = new GroupRepository(db);
     this.messageRepo = new MessageRepository(db);
     this.senderKeyRepo = new SenderKeyRepository(db);
+    this.discoveredGroupRepo = new DiscoveredGroupRepository(db);
 
     // Load or generate identity
     await this.loadOrGenerateIdentity();
@@ -132,6 +136,15 @@ export class Agent extends EventEmitter {
     );
     await this.swarm.join(Buffer.from(ttyaTopic));
 
+    // Join global network discovery topic
+    const networkTopic = deriveKey(
+      new TextEncoder().encode('networkselfmd'),
+      'networkselfmd-discovery-v1',
+      '',
+      32,
+    );
+    await this.swarm.join(Buffer.from(networkTopic));
+
     this.isRunning = true;
     this.emit('started');
   }
@@ -156,20 +169,16 @@ export class Agent extends EventEmitter {
 
   // ---- Groups ----
 
-  async createGroup(name: string): Promise<GroupInfo> {
-    const { groupId } = await this.groupManager.createGroup(name);
-    const fingerprint = Buffer.from(groupId).toString('hex');
-    const now = Date.now();
-    const info: GroupInfo = {
-      groupId,
-      name,
-      role: 'admin',
-      createdAt: now,
-      joinedAt: now,
-      memberCount: 1,
-    };
-    this.groups.set(fingerprint, info);
-    return info;
+  async createGroup(
+    name: string,
+    options?: { public?: boolean; selfMd?: string },
+  ): Promise<{ groupId: Uint8Array; topic: Buffer }> {
+    const result = await this.groupManager.createGroup(name);
+    if (options?.public) {
+      this.groupRepo.setPublic(result.groupId, true, options.selfMd);
+      this.announcePublicGroups();
+    }
+    return result;
   }
 
   async inviteToGroup(
@@ -210,6 +219,8 @@ export class Agent extends EventEmitter {
       createdAt: g.created_at,
       joinedAt: g.joined_at ?? g.created_at,
       memberCount: this.groupRepo.getMembers(new Uint8Array(g.group_id)).length,
+      selfMd: g.self_md ?? undefined,
+      isPublic: g.is_public === 1,
     }));
   }
 
@@ -338,7 +349,59 @@ export class Agent extends EventEmitter {
     this.peerRepo.untrust(pk);
   }
 
+  makeGroupPublic(groupId: string, selfMd: string): void {
+    const gid = hexToBytes(groupId);
+    this.groupRepo.setPublic(gid, true, selfMd);
+    this.announcePublicGroups();
+  }
+
+  listDiscoveredGroups(): Array<{
+    groupId: Uint8Array;
+    name: string;
+    selfMd: string | null;
+    memberCount: number;
+  }> {
+    return this.discoveredGroupRepo.list().map((g) => ({
+      groupId: new Uint8Array(g.group_id),
+      name: g.name,
+      selfMd: g.self_md,
+      memberCount: g.member_count,
+    }));
+  }
+
+  async joinPublicGroup(groupId: string): Promise<void> {
+    const gid = hexToBytes(groupId);
+    const discovered = this.discoveredGroupRepo.find(gid);
+    const name = discovered?.name ?? 'Public Group';
+    await this.groupManager.joinGroup(gid, name);
+    this.discoveredGroupRepo.remove(gid);
+  }
+
   // ---- Private ----
+
+  private announcePublicGroups(): void {
+    const publicGroups = this.groupRepo.listPublic();
+    if (publicGroups.length === 0) return;
+
+    const announce: ProtocolMessage = {
+      type: MessageType.NetworkAnnounce,
+      groups: publicGroups.map((g) => ({
+        groupId: Uint8Array.from(g.group_id),
+        name: g.name,
+        selfMd: g.self_md ?? '',
+        memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
+      })),
+      timestamp: Date.now(),
+    };
+
+    for (const session of this.swarm.getAllSessions()) {
+      try {
+        session.send(announce);
+      } catch {
+        // Ignore send errors on closed sessions
+      }
+    }
+  }
 
   private async loadOrGenerateIdentity(): Promise<void> {
     const stored = this.identityRepo.load();
@@ -422,10 +485,26 @@ export class Agent extends EventEmitter {
       // Distribute sender keys for all groups to new peer
       const groups = this.groupRepo.list();
       for (const group of groups) {
-        const gid = new Uint8Array(group.group_id);
+        const gid = Uint8Array.from(group.group_id);
         this.groupManager.distributeSenderKeys(gid).catch((err) => {
           this.emit('error', err);
         });
+      }
+
+      // Announce our public groups to new peer
+      const publicGroups = this.groupRepo.listPublic();
+      if (publicGroups.length > 0) {
+        const announce: ProtocolMessage = {
+          type: MessageType.NetworkAnnounce,
+          groups: publicGroups.map((g) => ({
+            groupId: Uint8Array.from(g.group_id),
+            name: g.name,
+            selfMd: g.self_md ?? '',
+            memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
+          })),
+          timestamp: Date.now(),
+        };
+        result.session.send(announce);
       }
     });
 
@@ -468,6 +547,26 @@ export class Agent extends EventEmitter {
 
     router.on(MessageType.DirectMessage, (session, message) => {
       this.handleDirectMessage(session, message as DirectEncryptedMessage);
+    });
+
+    router.on(MessageType.NetworkAnnounce, (session, message) => {
+      const announce = message as NetworkAnnounceMessage;
+      if (!session.peerPublicKey) return;
+
+      for (const g of announce.groups) {
+        this.discoveredGroupRepo.upsert(
+          g.groupId,
+          g.name,
+          g.selfMd,
+          g.memberCount,
+          session.peerPublicKey,
+        );
+      }
+
+      this.emit('network:announce', {
+        peerFingerprint: session.peerFingerprint,
+        groups: announce.groups,
+      });
     });
 
     router.on(MessageType.TTYARequest, (session, message) => {

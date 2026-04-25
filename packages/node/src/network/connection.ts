@@ -74,6 +74,10 @@ export class PeerSession extends EventEmitter {
         this.buffer = Buffer.from(this.buffer.subarray(bytesConsumed));
         this.emit('message', message);
       } catch (err) {
+        // Clear the corrupted buffer so future messages can still be parsed.
+        // Without this, the bad data stays in the buffer and every subsequent
+        // onData call fails immediately.
+        this.buffer = Buffer.alloc(0);
         this.emit('error', err);
         return;
       }

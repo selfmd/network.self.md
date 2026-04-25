@@ -19,14 +19,14 @@ async function withAgent<T>(fn: (agent: Agent) => Promise<T>): Promise<T> {
 
 export async function createGroup(name: string): Promise<void> {
   await withAgent(async (agent) => {
-    const group = await agent.createGroup(name);
-    const groupIdHex = Buffer.from(group.groupId).toString('hex');
+    const result = await agent.createGroup(name);
+    const stateId = Buffer.from(result.groupId).toString('hex');
 
-    console.log(chalk.bold('\nGroup created!\n'));
-    console.log(`  ${chalk.dim('Group ID:')}  ${groupIdHex}`);
-    console.log(`  ${chalk.dim('Name:')}      ${group.name}`);
+    console.log(chalk.bold('\nState founded!\n'));
+    console.log(`  ${chalk.dim('State ID:')}  ${stateId}`);
+    console.log(`  ${chalk.dim('Name:')}      ${name}`);
     console.log();
-    console.log(chalk.dim('Share the Group ID with others so they can join.'));
+    console.log(chalk.dim('Share the State ID with others so they can join.'));
     console.log();
   });
 }
@@ -35,22 +35,21 @@ export async function joinGroup(groupId: string): Promise<void> {
   await withAgent(async (agent) => {
     await agent.joinGroup(groupId);
 
-    console.log(chalk.green(`\nJoined group ${groupId}\n`));
+    console.log(chalk.green(`\nJoined state ${groupId}\n`));
   });
 }
 
 export async function listGroups(): Promise<void> {
   await withAgent(async (agent) => {
-    const groups = agent.listGroups();
+    const states = agent.listGroups();
 
-    if (groups.length === 0) {
-      console.log(chalk.dim('\nNo groups yet. Create one with: networkselfmd create-group --name <name>\n'));
+    if (states.length === 0) {
+      console.log(chalk.dim('\nNo states yet. Found one with: networkselfmd create-group --name <name>\n'));
       return;
     }
 
-    console.log(chalk.bold('\nGroups:\n'));
+    console.log(chalk.bold('\nStates:\n'));
 
-    // Table header
     const idWidth = 16;
     const nameWidth = 20;
     const membersWidth = 10;
@@ -66,13 +65,13 @@ export async function listGroups(): Promise<void> {
     );
     console.log(chalk.dim('─'.repeat(idWidth + nameWidth + membersWidth + roleWidth)));
 
-    for (const group of groups) {
-      const groupIdHex = Buffer.from(group.groupId).toString('hex');
+    for (const state of states) {
+      const stateId = Buffer.from(state.groupId).toString('hex');
       console.log(
-        padRight(truncate(groupIdHex, idWidth - 2), idWidth) +
-        padRight(truncate(group.name, nameWidth - 2), nameWidth) +
-        padRight(String(group.memberCount ?? '?'), membersWidth) +
-        padRight(group.role ?? 'member', roleWidth)
+        padRight(truncate(stateId, idWidth - 2), idWidth) +
+        padRight(truncate(state.name, nameWidth - 2), nameWidth) +
+        padRight(String(state.memberCount ?? '?'), membersWidth) +
+        padRight(state.role ?? 'member', roleWidth)
       );
     }
 
