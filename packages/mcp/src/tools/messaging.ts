@@ -5,13 +5,14 @@ import type { Agent } from '@networkselfmd/node';
 export function registerMessagingTools(server: McpServer, agent: Agent): void {
   server.tool(
     'send_state_message',
-    'Send an encrypted message to a state',
+    `Send an encrypted message to a state you belong to. All members will receive it.
+Get the stateId from state_list. You must be a member of the state (use state_join first).`,
     {
-      groupId: z.string().describe('State ID (hex)'),
-      content: z.string().describe('Message content'),
+      stateId: z.string().describe('State ID (hex) to send the message to — get from state_list'),
+      content: z.string().describe('Message text'),
     },
-    async ({ groupId, content }) => {
-      await agent.sendGroupMessage(groupId, content);
+    async ({ stateId, content }) => {
+      await agent.sendGroupMessage(stateId, content);
       return {
         content: [{
           type: 'text' as const,
@@ -23,10 +24,11 @@ export function registerMessagingTools(server: McpServer, agent: Agent): void {
 
   server.tool(
     'send_direct_message',
-    'Send an encrypted direct message to a peer',
+    `Send an encrypted direct message to a specific peer (not through a state).
+The peer must be online and connected. Get their public key from peer_list.`,
     {
-      peerPublicKey: z.string().describe('Public key of the recipient peer'),
-      content: z.string().describe('Message content'),
+      peerPublicKey: z.string().describe('Public key (hex) of the recipient — get from peer_list'),
+      content: z.string().describe('Message text'),
     },
     async ({ peerPublicKey, content }) => {
       await agent.sendDirectMessage(peerPublicKey, content);
@@ -41,15 +43,21 @@ export function registerMessagingTools(server: McpServer, agent: Agent): void {
 
   server.tool(
     'read_messages',
-    'Read recent messages from a state or direct conversation',
+    `Read recent messages. Provide EITHER stateId (for state messages) or peerPublicKey (for direct messages).
+Returns messages with sender info, content, and timestamp. Most recent first.`,
     {
-      groupId: z.string().optional().describe('State ID to read messages from'),
-      peerPublicKey: z.string().optional().describe('Peer public key for direct messages'),
-      limit: z.number().optional().describe('Maximum number of messages to return'),
-      before: z.string().optional().describe('Return messages before this message ID'),
+      stateId: z.string().optional().describe('State ID (hex) to read messages from'),
+      peerPublicKey: z.string().optional().describe('Peer public key (hex) for direct messages'),
+      limit: z.number().optional().describe('Max messages to return (default 50)'),
+      before: z.string().optional().describe('Return messages before this message ID (for pagination)'),
     },
-    async ({ groupId, peerPublicKey, limit, before }) => {
-      const messages = agent.getMessages({ groupId, peerPublicKey, limit, before });
+    async ({ stateId, peerPublicKey, limit, before }) => {
+      const messages = agent.getMessages({
+        groupId: stateId,
+        peerPublicKey,
+        limit,
+        before,
+      });
       return {
         content: [{
           type: 'text' as const,

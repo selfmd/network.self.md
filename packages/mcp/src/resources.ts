@@ -5,7 +5,7 @@ export function registerResources(server: McpServer, agent: Agent): void {
   server.resource(
     'agent-identity',
     'agent://identity',
-    { description: 'Current agent identity information' },
+    { description: 'Your agent identity: fingerprint, displayName, and public key' },
     async (uri) => {
       const identity = agent.identity;
       return {
@@ -25,18 +25,20 @@ export function registerResources(server: McpServer, agent: Agent): void {
   server.resource(
     'agent-states',
     'agent://states',
-    { description: 'All states with member counts' },
+    { description: 'All states you belong to — name, memberCount, role, selfMd, isPublic' },
     async (uri) => {
-      const groups = agent.listGroups();
+      const states = agent.listGroups();
       return {
         contents: [{
           uri: uri.href,
           mimeType: 'application/json',
-          text: JSON.stringify(groups.map(g => ({
-            id: Buffer.from(g.groupId).toString('hex'),
-            name: g.name,
-            memberCount: g.memberCount,
-            role: g.role,
+          text: JSON.stringify(states.map(s => ({
+            id: Buffer.from(s.groupId).toString('hex'),
+            name: s.name,
+            memberCount: s.memberCount,
+            role: s.role,
+            selfMd: s.selfMd,
+            isPublic: s.isPublic,
           }))),
         }],
       };
@@ -46,7 +48,7 @@ export function registerResources(server: McpServer, agent: Agent): void {
   server.resource(
     'agent-peers',
     'agent://peers',
-    { description: 'Known peers with online status' },
+    { description: 'All known peers — fingerprint, displayName, online status, trusted flag' },
     async (uri) => {
       const peers = agent.listPeers();
       return {
@@ -69,18 +71,18 @@ export function registerResources(server: McpServer, agent: Agent): void {
   server.resource(
     'discovered-states',
     'agent://discovered-states',
-    { description: 'Public states discovered from the network' },
+    { description: 'Public states from other agents on the network — name, selfMd, memberCount. Join with join_public_state.' },
     async (uri) => {
-      const groups = agent.listDiscoveredGroups();
+      const states = agent.listDiscoveredGroups();
       return {
         contents: [{
           uri: uri.href,
           mimeType: 'application/json',
-          text: JSON.stringify(groups.map(g => ({
-            id: Buffer.from(g.groupId).toString('hex'),
-            name: g.name,
-            selfMd: g.selfMd,
-            memberCount: g.memberCount,
+          text: JSON.stringify(states.map(s => ({
+            id: Buffer.from(s.groupId).toString('hex'),
+            name: s.name,
+            selfMd: s.selfMd,
+            memberCount: s.memberCount,
           }))),
         }],
       };
@@ -89,13 +91,13 @@ export function registerResources(server: McpServer, agent: Agent): void {
 
   server.resource(
     'state-messages',
-    new ResourceTemplate('agent://messages/{groupId}', { list: undefined }),
-    { description: 'Recent messages in a specific state' },
+    new ResourceTemplate('agent://messages/{stateId}', { list: undefined }),
+    { description: 'Recent messages in a state — pass stateId (hex) from state_list' },
     async (uri, variables) => {
-      const groupId = Array.isArray(variables.groupId)
-        ? variables.groupId[0]
-        : variables.groupId;
-      const messages = agent.getMessages({ groupId: groupId as string, limit: 50 });
+      const stateId = Array.isArray(variables.stateId)
+        ? variables.stateId[0]
+        : variables.stateId;
+      const messages = agent.getMessages({ groupId: stateId as string, limit: 50 });
       return {
         contents: [{
           uri: uri.href,
