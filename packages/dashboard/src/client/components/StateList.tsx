@@ -35,7 +35,8 @@ function JoinButton({ stateId, stateName }: { stateId: string; stateName: string
 }
 
 export function StateList({ states }: { states: ApiState[] | null }) {
-  if (!states || states.length === 0) {
+  if (!states) return <Loading />;
+  if (states.length === 0) {
     return <div className="empty">No states found yet</div>;
   }
 
@@ -58,5 +59,18 @@ export function StateList({ states }: { states: ApiState[] | null }) {
         </div>
       ))}
     </>
+  );
+}
+
+function Loading() {
+  return (
+    <div className="skeleton-list">
+      {[1, 2, 3].map((i) => (
+        <div className="skeleton-row" key={i}>
+          <span className="skeleton-block" style={{ width: '30%' }} />
+          <span className="skeleton-block" style={{ width: '15%', marginLeft: 'auto' }} />
+        </div>
+      ))}
+    </div>
   );
 }

@@ -44,11 +44,16 @@ function Dashboard() {
         <span className="topnav-brand">
           <b>network</b> self.md
         </span>
-        {status && (
-          <span className="topnav-fp">
-            {status.agentDisplayName ?? status.agentFingerprint.slice(0, 12)}
-          </span>
-        )}
+        <div className="topnav-right">
+          <a
+            className="topnav-link"
+            href="https://github.com/selfmd/network.self.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            github
+          </a>
+        </div>
       </nav>
 
       <div className="animate-in delay-1">

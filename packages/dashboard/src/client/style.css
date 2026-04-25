@@ -82,9 +82,30 @@ body {
   font-weight: 600;
 }
 
+.topnav-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
 .topnav-fp {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.topnav-link {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 4px 10px;
+  transition: all 0.15s ease;
+}
+
+.topnav-link:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 /* Stats bar */
@@ -408,6 +429,38 @@ body {
   color: var(--text-muted);
   padding: 28px 20px;
   font-size: 14px;
+}
+
+/* Skeleton loading */
+.skeleton-list {
+  padding: 8px 0;
+}
+
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  gap: 12px;
+}
+
+.skeleton-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-block {
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 /* Toast */

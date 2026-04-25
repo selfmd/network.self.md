@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import type Database from 'better-sqlite3';
-import type { ApiStatus, ApiPeer, ApiState, ApiActivity, ApiDiscoveredState } from './types.js';
+import type { ApiStatus, ApiPeer, ApiState } from './types.js';
 
 function bytesToHex(bytes: Buffer | Uint8Array): string {
   return Buffer.from(bytes).toString('hex');
@@ -9,6 +9,94 @@ function bytesToHex(bytes: Buffer | Uint8Array): string {
 
 export interface DashboardDb {
   db: Database.Database;
+}
+
+interface MergedState {
+  id: string;
+  name: string;
+  memberCount: number;
+  lastActivity: number;
+  selfMd?: string;
+  isPublic: boolean;
+}
+
+function getMergedStates(db: Database.Database): MergedState[] {
+  const byName = new Map<string, MergedState>();
+
+  // Local states (agent is a member — richer data)
+  const locals = db
+    .prepare('SELECT * FROM groups ORDER BY joined_at DESC')
+    .all() as Array<{
+      group_id: Buffer;
+      name: string;
+      created_at: number;
+      is_public: number;
+      self_md: string | null;
+    }>;
+
+  for (const g of locals) {
+    const lastMsg = db
+      .prepare('SELECT timestamp FROM messages WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1')
+      .get(g.group_id) as { timestamp: number } | undefined;
+
+    const memberCount = db
+      .prepare('SELECT COUNT(*) as count FROM group_members WHERE group_id = ?')
+      .get(g.group_id) as { count: number };
+
+    const existing = byName.get(g.name);
+    const entry: MergedState = {
+      id: bytesToHex(g.group_id),
+      name: g.name,
+      memberCount: existing ? Math.max(existing.memberCount, memberCount.count) : memberCount.count,
+      lastActivity: lastMsg?.timestamp ?? g.created_at,
+      selfMd: g.self_md ?? existing?.selfMd ?? undefined,
+      isPublic: g.is_public === 1,
+    };
+
+    if (existing) {
+      entry.lastActivity = Math.max(existing.lastActivity, entry.lastActivity);
+      entry.isPublic = existing.isPublic || entry.isPublic;
+    }
+
+    byName.set(g.name, entry);
+  }
+
+  // Discovered states (from network announcements)
+  const tableExists = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_groups'")
+    .get();
+
+  if (tableExists) {
+    const discovered = db
+      .prepare('SELECT * FROM discovered_groups ORDER BY last_announced DESC')
+      .all() as Array<{
+        group_id: Buffer;
+        name: string;
+        self_md: string | null;
+        member_count: number;
+        last_announced: number;
+      }>;
+
+    for (const g of discovered) {
+      const existing = byName.get(g.name);
+      if (existing) {
+        existing.memberCount = Math.max(existing.memberCount, g.member_count);
+        existing.lastActivity = Math.max(existing.lastActivity, g.last_announced);
+        if (!existing.selfMd && g.self_md) existing.selfMd = g.self_md;
+      } else {
+        byName.set(g.name, {
+          id: bytesToHex(g.group_id),
+          name: g.name,
+          memberCount: g.member_count,
+          lastActivity: g.last_announced,
+          selfMd: g.self_md ?? undefined,
+          isPublic: true,
+        });
+      }
+    }
+  }
+
+  return [...byName.values()];
 }
 
 export async function buildApp({ db }: DashboardDb) {
@@ -20,12 +108,10 @@ export async function buildApp({ db }: DashboardDb) {
     .prepare('SELECT * FROM identity WHERE id = 1')
     .get() as { ed_public_key: Buffer; display_name: string | null } | undefined;
 
-  const fingerprint = identityRow
+  let agentFingerprint = identityRow
     ? bytesToHex(identityRow.ed_public_key).slice(0, 32)
     : 'unknown';
-
-  let agentFingerprint = fingerprint;
-  let agentDisplayName = identityRow?.display_name ?? undefined;
+  const agentDisplayName = identityRow?.display_name ?? undefined;
 
   if (identityRow) {
     const { fingerprintFromPublicKey } = await import('@networkselfmd/core');
@@ -33,12 +119,13 @@ export async function buildApp({ db }: DashboardDb) {
   }
 
   const startedAt = Date.now();
+  const onlineThreshold = () => Date.now() - 3_600_000;
 
   app.get('/api/status', async (): Promise<ApiStatus> => {
     const peers = db.prepare('SELECT * FROM peers').all() as Array<{ last_seen: number | null }>;
-    const states = db.prepare('SELECT * FROM groups').all();
-    const onlineThreshold = Date.now() - 3_600_000;
-    const peersOnline = peers.filter((p) => p.last_seen && p.last_seen > onlineThreshold).length;
+    const states = getMergedStates(db);
+    const threshold = onlineThreshold();
+    const peersOnline = peers.filter((p) => p.last_seen && p.last_seen > threshold).length;
 
     return {
       agentFingerprint,
@@ -61,169 +148,19 @@ export async function buildApp({ db }: DashboardDb) {
         last_seen: number | null;
       }>;
 
-    const onlineThreshold = Date.now() - 3_600_000;
+    const threshold = onlineThreshold();
 
     return peers.map((p) => ({
       fingerprint: p.fingerprint,
       displayName: p.display_name ?? undefined,
-      online: !!(p.last_seen && p.last_seen > onlineThreshold),
+      online: !!(p.last_seen && p.last_seen > threshold),
       lastSeen: p.last_seen ?? 0,
       trusted: p.trusted === 1,
     }));
   });
 
   app.get('/api/states', async (): Promise<ApiState[]> => {
-    const seen = new Map<string, ApiState>();
-
-    // Local states (agent is a member)
-    const locals = db
-      .prepare('SELECT * FROM groups ORDER BY joined_at DESC')
-      .all() as Array<{
-        group_id: Buffer;
-        name: string;
-        role: string;
-        created_at: number;
-        joined_at: number | null;
-        is_public: number;
-        self_md: string | null;
-      }>;
-
-    for (const g of locals) {
-      const lastMsg = db
-        .prepare('SELECT timestamp FROM messages WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1')
-        .get(g.group_id) as { timestamp: number } | undefined;
-
-      const memberCount = db
-        .prepare('SELECT COUNT(*) as count FROM group_members WHERE group_id = ?')
-        .get(g.group_id) as { count: number };
-
-      seen.set(bytesToHex(g.group_id), {
-        id: bytesToHex(g.group_id),
-        name: g.name,
-        memberCount: memberCount.count,
-        role: g.role as 'admin' | 'member',
-        lastActivity: lastMsg?.timestamp ?? g.created_at,
-        selfMd: g.self_md ?? undefined,
-        isPublic: g.is_public === 1,
-      });
-    }
-
-    // Discovered states (from network announcements)
-    const tableExists = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_groups'")
-      .get();
-
-    if (tableExists) {
-      const discovered = db
-        .prepare('SELECT * FROM discovered_groups ORDER BY last_announced DESC')
-        .all() as Array<{
-          group_id: Buffer;
-          name: string;
-          self_md: string | null;
-          member_count: number;
-          last_announced: number;
-        }>;
-
-      for (const g of discovered) {
-        const id = bytesToHex(g.group_id);
-        if (!seen.has(id)) {
-          seen.set(id, {
-            id,
-            name: g.name,
-            memberCount: g.member_count,
-            role: 'member',
-            lastActivity: g.last_announced,
-            selfMd: g.self_md ?? undefined,
-            isPublic: true,
-          });
-        }
-      }
-    }
-
-    return [...seen.values()];
-  });
-
-  app.get('/api/activity', async (): Promise<ApiActivity[]> => {
-    const messages = db
-      .prepare('SELECT id, group_id, sender_public_key, timestamp, type FROM messages ORDER BY timestamp DESC LIMIT 50')
-      .all() as Array<{
-        id: string;
-        group_id: Buffer | null;
-        sender_public_key: Buffer | null;
-        timestamp: number;
-        type: string;
-      }>;
-
-    const peers = db
-      .prepare('SELECT public_key, fingerprint, display_name FROM peers')
-      .all() as Array<{
-        public_key: Buffer;
-        fingerprint: string;
-        display_name: string | null;
-      }>;
-
-    const peerMap = new Map<string, { fingerprint: string; displayName?: string }>();
-    for (const p of peers) {
-      peerMap.set(bytesToHex(p.public_key), {
-        fingerprint: p.fingerprint,
-        displayName: p.display_name ?? undefined,
-      });
-    }
-
-    const stateRows = db
-      .prepare('SELECT group_id, name FROM groups')
-      .all() as Array<{ group_id: Buffer; name: string }>;
-    const stateMap = new Map<string, string>();
-    for (const g of stateRows) {
-      stateMap.set(bytesToHex(g.group_id), g.name);
-    }
-
-    return messages.map((m): ApiActivity => {
-      let actor: string | undefined;
-      let actorName: string | undefined;
-      if (m.sender_public_key) {
-        const key = bytesToHex(m.sender_public_key);
-        const peer = peerMap.get(key);
-        actor = peer?.fingerprint ?? key.slice(0, 16);
-        actorName = peer?.displayName;
-      }
-
-      const target = m.group_id ? stateMap.get(bytesToHex(m.group_id)) : undefined;
-
-      return {
-        timestamp: m.timestamp,
-        type: (m.type as ApiActivity['type']) || 'message',
-        actor,
-        actorName,
-        target,
-      };
-    });
-  });
-
-  app.get('/api/discovered-states', async (): Promise<ApiDiscoveredState[]> => {
-    const tableExists = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_groups'")
-      .get();
-
-    if (!tableExists) return [];
-
-    const rows = db
-      .prepare('SELECT * FROM discovered_groups ORDER BY last_announced DESC')
-      .all() as Array<{
-        group_id: Buffer;
-        name: string;
-        self_md: string | null;
-        member_count: number;
-        last_announced: number;
-      }>;
-
-    return rows.map((g) => ({
-      id: bytesToHex(g.group_id),
-      name: g.name,
-      selfMd: g.self_md,
-      memberCount: g.member_count,
-      lastAnnounced: g.last_announced,
-    }));
+    return getMergedStates(db);
   });
 
   return app;

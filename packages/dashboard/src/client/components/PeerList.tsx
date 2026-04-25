@@ -11,7 +11,8 @@ function timeAgo(ts: number): string {
 }
 
 export function PeerList({ peers }: { peers: ApiPeer[] | null }) {
-  if (!peers || peers.length === 0) {
+  if (!peers) return <Loading />;
+  if (peers.length === 0) {
     return <div className="empty">No peers discovered yet</div>;
   }
 
@@ -33,5 +34,19 @@ export function PeerList({ peers }: { peers: ApiPeer[] | null }) {
         </div>
       ))}
     </>
+  );
+}
+
+function Loading() {
+  return (
+    <div className="skeleton-list">
+      {[1, 2, 3].map((i) => (
+        <div className="skeleton-row" key={i}>
+          <span className="skeleton-dot" />
+          <span className="skeleton-block" style={{ width: '25%' }} />
+          <span className="skeleton-block" style={{ width: '12%', marginLeft: 'auto' }} />
+        </div>
+      ))}
+    </div>
   );
 }
