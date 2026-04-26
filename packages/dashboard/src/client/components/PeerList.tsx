@@ -1,7 +1,7 @@
 import type { ApiPeer } from '../types';
 
 function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return 'just now';
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -13,7 +13,7 @@ function timeAgo(ts: number): string {
 export function PeerList({ peers }: { peers: ApiPeer[] | null }) {
   if (!peers) return <Loading />;
   if (peers.length === 0) {
-    return <div className="empty">No peers discovered yet</div>;
+    return <div className="empty">No agents discovered yet. The mesh is quiet.</div>;
   }
 
   const sorted = [...peers].sort((a, b) => {
@@ -22,18 +22,17 @@ export function PeerList({ peers }: { peers: ApiPeer[] | null }) {
   });
 
   return (
-    <>
+    <div className="list-stack compact">
       {sorted.map((p) => (
         <div className="row" key={p.fingerprint}>
           <span className={`dot ${p.online ? 'online' : 'offline'}`} />
-          <span className="row-name">{p.displayName ?? 'unnamed'}</span>
-          <span className="row-fp">({p.fingerprint.slice(0, 8)})</span>
-          <span className="row-meta">
-            {p.online ? 'connected' : timeAgo(p.lastSeen)}
-          </span>
+          <span className="row-name">{p.displayName ?? 'unnamed agent'}</span>
+          <code className="row-fp">{p.fingerprint.slice(0, 12)}</code>
+          <span className="row-meta">{p.online ? 'connected' : timeAgo(p.lastSeen)}</span>
+          {p.trusted && <span className="badge purple">trusted</span>}
         </div>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -43,8 +42,8 @@ function Loading() {
       {[1, 2, 3].map((i) => (
         <div className="skeleton-row" key={i}>
           <span className="skeleton-dot" />
-          <span className="skeleton-block" style={{ width: '25%' }} />
-          <span className="skeleton-block" style={{ width: '12%', marginLeft: 'auto' }} />
+          <span className="skeleton-block" style={{ width: '28%' }} />
+          <span className="skeleton-block" style={{ width: '14%', marginLeft: 'auto' }} />
         </div>
       ))}
     </div>

@@ -7,6 +7,7 @@
     "dev": "concurrently \"vite\" \"tsx watch src/server/index.ts\"",
     "build": "vite build && tsc -p tsconfig.json",
     "preview": "tsx src/server/index.ts",
+    "start": "node dist/server/index.js",
     "test": "vitest run"
   },
   "dependencies": {

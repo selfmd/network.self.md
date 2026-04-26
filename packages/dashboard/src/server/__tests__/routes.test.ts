@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 
 function mockAgent() {
   const now = Date.now();
+  let joinedPublic = false;
   return {
     identity: {
       fingerprint: 'abc123',
@@ -40,8 +41,18 @@ function mockAgent() {
         selfMd: 'We build things.',
         isPublic: true,
       },
+      ...(joinedPublic ? [{
+        groupId: new Uint8Array([4, 5, 6]),
+        name: 'research',
+        memberCount: 5,
+        role: 'member' as const,
+        createdAt: now,
+        joinedAt: now,
+        selfMd: 'AI research.',
+        isPublic: true,
+      }] : []),
     ],
-    listDiscoveredGroups: () => [
+    listDiscoveredGroups: () => joinedPublic ? [] : [
       {
         groupId: new Uint8Array([4, 5, 6]),
         name: 'research',
@@ -49,6 +60,9 @@ function mockAgent() {
         memberCount: 5,
       },
     ],
+    joinPublicGroup: async () => { joinedPublic = true; },
+    getGroupMembers: () => [],
+    getMessages: () => [],
   };
 }
 
@@ -59,7 +73,13 @@ describe('Dashboard API routes', () => {
     app = await buildApp({ agent: mockAgent() as any });
   });
 
-  it('GET /api/status returns correct counts', async () => {
+  it('GET /healthz returns process health', async () => {
+    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+  });
+
+  it('GET /api/status returns counts and capability flags', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/status' });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -67,7 +87,9 @@ describe('Dashboard API routes', () => {
     expect(body.agentDisplayName).toBe('TestAgent');
     expect(body.peersOnline).toBe(1);
     expect(body.peersTotal).toBe(2);
-    expect(body.stateCount).toBe(2); // 1 own + 1 discovered
+    expect(body.stateCount).toBe(2);
+    expect(body.capabilities.discovery).toBe(true);
+    expect(body.capabilities.wireTrace).toBe(false);
   });
 
   it('GET /api/peers returns peer list without publicKey', async () => {
@@ -97,7 +119,44 @@ describe('Dashboard API routes', () => {
     expect(research.memberCount).toBe(5);
   });
 
-  it('does not expose message content in any endpoint', async () => {
+  it('GET /api/discovery/states returns public states only', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/discovery/states' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].name).toBe('research');
+    expect(body[0].isPublic).toBe(true);
+  });
+
+  it('POST /api/discovery/states/:id/join rejects malformed ids', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/discovery/states/not-hex/join' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().reason).toBe('invalid');
+  });
+
+  it('POST /api/discovery/states/:id/join blocks non-local browser origins', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/discovery/states/040506/join',
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('forbidden-origin');
+  });
+
+  it('POST /api/discovery/states/:id/join joins a public state', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/discovery/states/040506/join',
+      headers: { origin: 'http://127.0.0.1:3001' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.state.name).toBe('research');
+  });
+
+  it('does not expose message content in list endpoints', async () => {
     const statesRes = await app.inject({ method: 'GET', url: '/api/states' });
     expect(statesRes.payload).not.toContain('secret');
   });

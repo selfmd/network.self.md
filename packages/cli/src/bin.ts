@@ -32,11 +32,27 @@ program
   });
 
 program
+  .command('create-state')
+  .description('Create a new state (alias for create-group)')
+  .requiredOption('--name <name>', 'State name')
+  .action(async (opts) => {
+    await createGroup(opts.name);
+  });
+
+program
   .command('join-group')
   .description('Join an existing group')
   .argument('<groupId>', 'Group ID to join')
   .action(async (groupId: string) => {
     await joinGroup(groupId);
+  });
+
+program
+  .command('join-state')
+  .description('Join an existing state (alias for join-group)')
+  .argument('<stateId>', 'State ID to join')
+  .action(async (stateId: string) => {
+    await joinGroup(stateId);
   });
 
 program
@@ -50,6 +66,13 @@ program
 program
   .command('groups')
   .description('List groups')
+  .action(async () => {
+    await listGroups();
+  });
+
+program
+  .command('states')
+  .description('List states (alias for groups)')
   .action(async () => {
     await listGroups();
   });

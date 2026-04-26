@@ -2,6 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Agent } from '@networkselfmd/node';
+import { attachAgentLogging } from './agentEvents.js';
 import { buildApp } from './routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,21 +16,12 @@ async function main() {
     displayName: process.env.AGENT_NAME,
   });
 
+  attachAgentLogging(agent);
+
   await agent.start();
   console.log(`Agent started: ${agent.identity.fingerprint}`);
   console.log(`Display name: ${agent.identity.displayName ?? '(none)'}`);
   console.log(`Data dir: ${dataDir}`);
-
-  // Log network events
-  agent.on('peer:connected', (info: any) => {
-    console.log(`Peer connected: ${info.displayName ?? info.fingerprint}`);
-  });
-  agent.on('peer:disconnected', (info: any) => {
-    console.log(`Peer disconnected: ${info.fingerprint}`);
-  });
-  agent.on('network:announce', (data: any) => {
-    console.log(`Received announce from ${data.peerFingerprint}: ${data.groups.length} states`);
-  });
 
   const app = await buildApp({ agent });
 
@@ -51,8 +43,9 @@ async function main() {
   }
 
   const port = parseInt(process.env.PORT ?? '3001', 10);
-  await app.listen({ port, host: '0.0.0.0' });
-  console.log(`Dashboard: http://localhost:${port}`);
+  const host = process.env.HOST ?? '127.0.0.1';
+  await app.listen({ port, host });
+  console.log(`Dashboard: http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
 
   // Graceful shutdown
   for (const signal of ['SIGINT', 'SIGTERM']) {

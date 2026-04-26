@@ -1,3 +1,11 @@
+export interface ApiCapabilities {
+  wireTrace: boolean;
+  keyRotation: boolean;
+  keyRevoke: boolean;
+  keyExport: boolean;
+  discovery: boolean;
+}
+
 export interface ApiStatus {
   agentFingerprint: string;
   agentDisplayName?: string;
@@ -5,6 +13,16 @@ export interface ApiStatus {
   peersTotal: number;
   stateCount: number;
   uptime: number;
+  online?: boolean;
+  syncPct?: number;
+  latencyMsP50?: number;
+  latencyMsP95?: number;
+  capabilities?: ApiCapabilities;
+}
+
+export interface ApiIdentity {
+  fingerprint: string;
+  displayName?: string;
 }
 
 export interface ApiPeer {
@@ -22,6 +40,10 @@ export interface ApiState {
   lastActivity: number;
   selfMd?: string;
   isPublic: boolean;
+}
+
+export interface ApiDiscoveredState extends ApiState {
+  discoveredAt?: number;
 }
 
 export interface ApiStateMember {
@@ -47,4 +69,20 @@ export interface ApiStateDetail {
   isPublic: boolean;
   members: ApiStateMember[];
   messages: ApiStateMessage[];
+}
+
+export type ApiJoinResponse =
+  | { ok: true; state: ApiState }
+  | {
+      ok: false;
+      reason: 'unreachable' | 'incompatible' | 'invitation-required' | 'rejected' | 'unknown' | 'invalid';
+      message: string;
+    };
+
+export interface ApiActivity {
+  type: 'message' | 'peer' | 'state' | 'key' | string;
+  timestamp: number;
+  actor?: string;
+  actorName?: string;
+  target?: string;
 }
