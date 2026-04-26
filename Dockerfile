@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN apt-get update   && apt-get install -y --no-install-recommends python3 make g++ ca-certificates   && rm -rf /var/lib/apt/lists/*   && corepack enable
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile   && pnpm -r build   && pnpm prune --prod
