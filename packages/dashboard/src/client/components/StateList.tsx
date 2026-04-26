@@ -3,7 +3,7 @@ import type { ApiState } from '../types';
 import { useToast } from './Toast';
 
 function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return 'just now';
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -12,11 +12,10 @@ function timeAgo(ts: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-function JoinButton({ stateId, stateName }: { stateId: string; stateName: string }) {
+function JoinCommandButton({ stateId, stateName }: { stateId: string; stateName: string }) {
   const toast = useToast();
   const [copied, setCopied] = useState(false);
-
-  const prompt = `Join the "${stateName}" state on network.self.md:\n\nnpx networkselfmd join-group ${stateId}`;
+  const prompt = `Join the "${stateName}" state on network.self.md:\n\nnpx networkselfmd join-state ${stateId}`;
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -28,32 +27,25 @@ function JoinButton({ stateId, stateName }: { stateId: string; stateName: string
   };
 
   return (
-    <button className="btn-join" onClick={handleCopy}>
-      {copied ? 'copied!' : 'join'}
+    <button className="btn btn-small" onClick={handleCopy}>
+      {copied ? 'copied' : 'join cmd'}
     </button>
   );
 }
 
 function SelfMdBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
-  const needsCollapse = content.length > 200;
+  const needsCollapse = content.length > 220;
 
   return (
     <div className="selfmd-block" onClick={(e) => e.stopPropagation()}>
-      <div className="selfmd-header">
-        <span className="selfmd-label">$self.md</span>
-      </div>
-      <div
-        className={`selfmd-content ${!expanded && needsCollapse ? 'selfmd-collapsed' : ''}`}
-      >
+      <div className="selfmd-label">self.md</div>
+      <div className={`selfmd-content ${!expanded && needsCollapse ? 'selfmd-collapsed' : ''}`}>
         {content}
       </div>
       {needsCollapse && (
-        <button
-          className="selfmd-toggle"
-          onClick={() => setExpanded(!expanded)}
-        >
-          {expanded ? 'collapse' : 'expand'}
+        <button className="text-btn" onClick={() => setExpanded(!expanded)}>
+          {expanded ? 'collapse' : 'expand manifesto'}
         </button>
       )}
     </div>
@@ -63,26 +55,22 @@ function SelfMdBlock({ content }: { content: string }) {
 export function StateList({ states }: { states: ApiState[] | null }) {
   if (!states) return <Loading />;
   if (states.length === 0) {
-    return <div className="empty">No states found yet</div>;
+    return <div className="empty">No states joined yet. Discover a public state or create one from the CLI.</div>;
   }
 
   return (
-    <>
+    <div className="list-stack">
       {states.map((s) => (
         <div className="state-row" key={s.id}>
-          <a className="state-name state-link" href={`#/state/${s.id}`}>{s.name}</a>
-          {s.isPublic && <span className="state-badge">public</span>}
-          <span className="state-meta">
-            {s.memberCount} members
-          </span>
-          <span className="state-meta-right">
-            {timeAgo(s.lastActivity)}
-          </span>
-          <JoinButton stateId={s.id} stateName={s.name} />
+          <a className="state-name state-link" href={`#/state/${encodeURIComponent(s.id)}`}>{s.name}</a>
+          {s.isPublic && <span className="badge green">public state</span>}
+          <span className="state-meta">{s.memberCount} agents</span>
+          <span className="state-meta-right">{timeAgo(s.lastActivity)}</span>
+          <JoinCommandButton stateId={s.id} stateName={s.name} />
           {s.selfMd && <SelfMdBlock content={s.selfMd} />}
         </div>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -91,8 +79,8 @@ function Loading() {
     <div className="skeleton-list">
       {[1, 2, 3].map((i) => (
         <div className="skeleton-row" key={i}>
-          <span className="skeleton-block" style={{ width: '30%' }} />
-          <span className="skeleton-block" style={{ width: '15%', marginLeft: 'auto' }} />
+          <span className="skeleton-block" style={{ width: '34%' }} />
+          <span className="skeleton-block" style={{ width: '18%', marginLeft: 'auto' }} />
         </div>
       ))}
     </div>

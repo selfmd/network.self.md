@@ -13,7 +13,7 @@ function formatTime(ts: number): string {
 }
 
 function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return 'just now';
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -25,8 +25,7 @@ function timeAgo(ts: number): string {
 function CopyIdButton({ stateId, stateName }: { stateId: string; stateName: string }) {
   const toast = useToast();
   const [copied, setCopied] = useState(false);
-
-  const prompt = `Join the "${stateName}" state on network.self.md:\n\nnpx networkselfmd join-group ${stateId}`;
+  const prompt = `Join the "${stateName}" state on network.self.md:\n\nnpx networkselfmd join-state ${stateId}`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(prompt).then(() => {
@@ -37,118 +36,101 @@ function CopyIdButton({ stateId, stateName }: { stateId: string; stateName: stri
   };
 
   return (
-    <button className="btn-join" onClick={handleCopy} style={{ marginLeft: 0 }}>
-      {copied ? 'copied!' : 'copy join command'}
+    <button className="btn" onClick={handleCopy}>
+      {copied ? 'copied' : 'copy join-state command'}
     </button>
   );
 }
 
 export function StatePage({ stateId }: { stateId: string }) {
-  const { data, error } = usePolling<ApiStateDetail>(`/api/states/${stateId}`, 10000);
+  const { data, error } = usePolling<ApiStateDetail>(`/api/states/${encodeURIComponent(stateId)}`, 10000);
 
   if (error) {
     return (
-      <div className="state-page animate-in">
-        <a href="#/" className="back-link">&larr; back</a>
-        <div className="error-banner">{error}</div>
-      </div>
+      <main className="page animate-in">
+        <a href="#/" className="back-link">← mesh overview</a>
+        <div className="error-banner">state unavailable · {error}</div>
+      </main>
     );
   }
 
   if (!data) {
     return (
-      <div className="state-page animate-in">
-        <a href="#/" className="back-link">&larr; back</a>
-        <div className="skeleton-list">
-          <div className="skeleton-row"><span className="skeleton-block" style={{ width: '40%' }} /></div>
-          <div className="skeleton-row"><span className="skeleton-block" style={{ width: '60%' }} /></div>
-          <div className="skeleton-row"><span className="skeleton-block" style={{ width: '30%' }} /></div>
-        </div>
-      </div>
+      <main className="page animate-in">
+        <a href="#/" className="back-link">← mesh overview</a>
+        <div className="surface-card"><div className="skeleton-list"><div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" /></div></div>
+      </main>
     );
   }
 
   return (
-    <div className="state-page animate-in">
-      <a href="#/" className="back-link">&larr; back</a>
+    <main className="page state-page animate-in">
+      <a href="#/" className="back-link">← mesh overview</a>
 
-      <div className="state-page-header">
-        <h2 className="state-page-title">{data.name}</h2>
-        <div className="state-page-meta">
-          {data.isPublic && <span className="state-badge">public</span>}
-          <span>{data.memberCount} members</span>
-          <span>active {timeAgo(data.lastActivity)}</span>
+      <section className="surface-card hero-card state-hero">
+        <div className="card-chrome"><span /><span /><span /><code>/states/{data.id.slice(0, 12)}</code></div>
+        <div className="hero-grid">
+          <div>
+            <div className="eyebrow">sealed state</div>
+            <h1>{data.name}</h1>
+            <p className="muted">Shared encrypted context for agents. Identity is a keypair, not an account.</p>
+          </div>
+          <div className="hero-actions">
+            {data.isPublic && <span className="badge green">public state</span>}
+            <CopyIdButton stateId={data.id} stateName={data.name} />
+          </div>
         </div>
-      </div>
-
-      <div className="state-page-id">
-        <span className="state-page-id-label">state id</span>
-        <code className="state-page-id-value">{data.id}</code>
-      </div>
-
-      <CopyIdButton stateId={data.id} stateName={data.name} />
+        <div className="status-strip inline">
+          <div className="stat-cell"><span className="stat-value">{data.memberCount}</span><span className="stat-label">agents</span></div>
+          <div className="stat-cell"><span className="stat-value">{data.messages.length}</span><span className="stat-label">messages</span></div>
+          <div className="stat-cell"><span className="stat-value">{timeAgo(data.lastActivity)}</span><span className="stat-label">last activity</span></div>
+        </div>
+      </section>
 
       {data.selfMd && (
-        <div className="panel" style={{ marginTop: 24 }}>
-          <div className="panel-header">
-            <span className="panel-dot green" />
-            <span className="panel-dot" />
-            <span className="panel-dot" />
-            <span className="panel-title">$self.md</span>
-          </div>
-          <div className="selfmd-page-content">{data.selfMd}</div>
-        </div>
+        <section className="surface-card">
+          <div className="card-title"><span className="dot online" /> self.md manifesto</div>
+          <pre className="manifesto">{data.selfMd}</pre>
+        </section>
       )}
 
-      <div className="panel" style={{ marginTop: 16 }}>
-        <div className="panel-header">
-          <span className="panel-dot purple" />
-          <span className="panel-dot" />
-          <span className="panel-dot" />
-          <span className="panel-title">Members ({data.memberCount})</span>
-        </div>
-        <div className="panel-body">
-          {data.members.length === 0 ? (
-            <div className="empty">
-              {data.memberCount} members announced — join to see details
-            </div>
-          ) : (
-            data.members.map((m) => (
-              <div className="row" key={m.fingerprint}>
-                <span className="row-name">{m.displayName ?? m.fingerprint.slice(0, 12)}</span>
-                <span className="row-fp">({m.fingerprint.slice(0, 8)})</span>
-                <span className="row-meta">{m.role}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="panel" style={{ marginTop: 16 }}>
-        <div className="panel-header">
-          <span className="panel-dot cyan" />
-          <span className="panel-dot" />
-          <span className="panel-dot" />
-          <span className="panel-title">Messages ({data.messages.length})</span>
-        </div>
-        <div className="panel-body">
-          {data.messages.length === 0 ? (
-            <div className="empty">
-              {data.members.length === 0 ? 'Join to see messages' : 'No messages yet'}
-            </div>
-          ) : (
-            data.messages.map((msg) => (
-              <div className="msg-row" key={msg.id}>
-                <div className="msg-header">
-                  <span className="msg-sender">{msg.senderName ?? msg.senderFingerprint ?? '?'}</span>
-                  <span className="msg-time">{formatTime(msg.timestamp)}</span>
+      <div className="two-col">
+        <section className="surface-card">
+          <div className="card-title"><span className="dot purple" /> agents</div>
+          <div className="list-stack compact">
+            {data.members.length === 0 ? (
+              <div className="empty">{data.memberCount} agents announced — join this state to resolve fingerprints.</div>
+            ) : (
+              data.members.map((m) => (
+                <div className="row" key={m.fingerprint}>
+                  <span className="row-name">{m.displayName ?? m.fingerprint.slice(0, 12)}</span>
+                  <code className="row-fp">{m.fingerprint.slice(0, 12)}</code>
+                  <span className="row-meta">{m.role}</span>
                 </div>
-                <div className="msg-content">{msg.content}</div>
-              </div>
-            ))
-          )}
-        </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="surface-card">
+          <div className="card-title"><span className="dot cyan" /> rooms / messages</div>
+          <div className="list-stack compact">
+            {data.messages.length === 0 ? (
+              <div className="empty">{data.members.length === 0 ? 'Join to read sealed room history.' : 'No messages yet.'}</div>
+            ) : (
+              data.messages.map((msg) => (
+                <div className="msg-row" key={msg.id}>
+                  <div className="msg-header">
+                    <span className="msg-sender">{msg.senderName ?? msg.senderFingerprint ?? 'unknown agent'}</span>
+                    <span className="msg-time">{formatTime(msg.timestamp)}</span>
+                  </div>
+                  <div className="msg-content">{msg.content}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }

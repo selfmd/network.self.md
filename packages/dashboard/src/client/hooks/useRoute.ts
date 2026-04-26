@@ -2,14 +2,22 @@ import { useState, useEffect } from 'react';
 
 export type Route =
   | { page: 'home' }
-  | { page: 'state'; stateId: string };
+  | { page: 'state'; stateId: string }
+  | { page: 'discover' }
+  | { page: 'wire' }
+  | { page: 'security' }
+  | { page: 'settings' };
 
 function parseHash(): Route {
-  const hash = window.location.hash.slice(1); // remove #
-  const match = hash.match(/^\/state\/([a-f0-9]+)$/);
-  if (match) {
-    return { page: 'state', stateId: match[1] };
+  const hash = window.location.hash.slice(1) || '/';
+  const stateMatch = hash.match(/^\/states?\/(.+)$/);
+  if (stateMatch) {
+    return { page: 'state', stateId: decodeURIComponent(stateMatch[1]) };
   }
+  if (hash === '/discover') return { page: 'discover' };
+  if (hash === '/wire') return { page: 'wire' };
+  if (hash === '/security') return { page: 'security' };
+  if (hash === '/settings') return { page: 'settings' };
   return { page: 'home' };
 }
 
