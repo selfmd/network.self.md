@@ -6,7 +6,6 @@ import { PeerList } from './components/PeerList';
 import { StateList } from './components/StateList';
 import { StatePage } from './components/StatePage';
 import { ToastProvider, useToast } from './components/Toast';
-import { TTYAPanel } from './components/TTYAPanel';
 import type { ApiStatus, ApiPeer, ApiState, ApiDiscoveredState, ApiJoinResponse } from './types';
 
 const SETUP_PROMPT = `git clone https://github.com/selfmd/network.self.md.git
@@ -52,7 +51,6 @@ function Chrome({ children }: { children: React.ReactNode }) {
             <a key={href} href={`#${href}`} className={route.page === routeFor(href) ? 'active' : ''}>{label}</a>
           ))}
         </div>
-        <a className="github-link" href="/docs" target="_blank" rel="noopener noreferrer">docs ↗</a>
         <a className="github-link" href="https://github.com/selfmd/network.self.md" target="_blank" rel="noopener noreferrer">github ↗</a>
       </nav>
       {children}
@@ -135,8 +133,8 @@ function HomePage() {
           )}
         </section>
         <section className="surface-card span-7">
-          <div className="card-title"><span className="dot warn" /> ttya visitors</div>
-          <TTYAPanel />
+          <div className="card-title"><span className="dot warn" /> wire inspector</div>
+          <div className="empty rich">Wire trace is deliberately gated until the backend exposes structured events. No fake packet theatre in prod.</div>
         </section>
       </div>
     </main>
