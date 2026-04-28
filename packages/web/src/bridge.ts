@@ -53,6 +53,24 @@ function encodeFrame(msg: TTYARequest): Uint8Array {
   return new Uint8Array(frame);
 }
 
+const VALID_RESPONSE_ACTIONS = new Set(['approve', 'reject', 'reply']);
+
+/**
+ * Runtime validation for TTYAResponse objects received over the wire.
+ * Rejects messages with missing or wrong-type fields to prevent crashes
+ * from malicious Hyperswarm peers.
+ */
+function isValidTTYAResponse(obj: unknown): obj is TTYAResponse {
+  if (obj === null || typeof obj !== 'object') return false;
+  const o = obj as Record<string, unknown>;
+  if (o.type !== 0x08) return false;
+  if (typeof o.visitorId !== 'string') return false;
+  if (typeof o.action !== 'string' || !VALID_RESPONSE_ACTIONS.has(o.action)) return false;
+  if (o.content !== undefined && typeof o.content !== 'string') return false;
+  if (o.sessionToken !== undefined && typeof o.sessionToken !== 'string') return false;
+  return true;
+}
+
 /**
  * Decode length-prefixed JSON frames from a buffer.
  * Returns parsed TTYAResponse objects and the number of bytes consumed.
@@ -66,8 +84,12 @@ function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: numb
     if (offset + 4 + len > data.length) break;
     const payload = data.subarray(offset + 4, offset + 4 + len);
     try {
-      const msg = JSON.parse(payload.toString('utf-8')) as TTYAResponse;
-      responses.push(msg);
+      const parsed: unknown = JSON.parse(payload.toString('utf-8'));
+      if (isValidTTYAResponse(parsed)) {
+        responses.push(parsed);
+      } else {
+        console.warn('[TTYABridge] Skipping invalid response frame: failed validation');
+      }
     } catch {
       // skip malformed frames
     }
@@ -76,6 +98,8 @@ function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: numb
 
   return { responses, consumed: offset };
 }
+
+const MAX_PENDING_REQUESTS = 1000;
 
 export class TTYABridge {
   private agentEdPublicKey: Uint8Array;
@@ -166,6 +190,10 @@ export class TTYABridge {
     if (this.agentConnection) {
       this.writeRequest(request);
     } else {
+      if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
+        console.warn('[Bridge] Pending request queue full, dropping oldest');
+        this.pendingRequests.shift();
+      }
       this.pendingRequests.push(request);
     }
   }

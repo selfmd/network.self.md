@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
 const SCHEMA_VERSION = 2;
 
@@ -90,10 +90,13 @@ export class AgentDatabase {
 
   constructor(dataDir: string) {
     if (!existsSync(dataDir)) {
-      mkdirSync(dataDir, { recursive: true });
+      mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     }
     const dbPath = join(dataDir, 'agent.db');
     this.db = new Database(dbPath);
+    if (process.platform !== 'win32') {
+      chmodSync(dbPath, 0o600);
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
   }

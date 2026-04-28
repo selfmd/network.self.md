@@ -15,7 +15,7 @@ function errorMessage(err: unknown): string {
 const LOCAL_ORIGIN_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 function isAllowedLocalOrigin(origin: string | undefined): boolean {
-  if (!origin) return true;
+  if (!origin) return false;
   try {
     const url = new URL(origin);
     return (url.protocol === 'http:' || url.protocol === 'https:') && LOCAL_ORIGIN_HOSTS.has(url.hostname);
@@ -29,8 +29,18 @@ function originHeader(request: FastifyRequest): string | undefined {
   return Array.isArray(origin) ? origin[0] : origin;
 }
 
+const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
 async function requireLocalMutationOrigin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  if (!isAllowedLocalOrigin(originHeader(request))) {
+  const origin = originHeader(request);
+  if (origin) {
+    if (!isAllowedLocalOrigin(origin)) {
+      await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost origin' } });
+    }
+    return;
+  }
+  // No Origin header (non-browser client) — verify the request comes from localhost
+  if (!request.ip || !LOCALHOST_IPS.has(request.ip)) {
     await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost origin' } });
   }
 }
@@ -161,12 +171,16 @@ export async function buildApp({ agent }: DashboardAgent) {
     }
 
     try {
-      await agent.joinPublicGroup(id);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Join group timed out')), 30_000)
+      );
+      await Promise.race([agent.joinPublicGroup(id), timeout]);
       const state = getMergedStates().find((s) => s.id === id || s.name === discovered.name) ?? discovered;
       return { ok: true, state };
     } catch (err) {
+      console.error('[API Error]', errorMessage(err));
       reply.status(502);
-      return { ok: false, reason: 'unreachable', message: errorMessage(err) };
+      return { ok: false, reason: 'unreachable', message: 'Failed to join group' };
     }
   });
 

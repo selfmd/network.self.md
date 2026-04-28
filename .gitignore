@@ -4,4 +4,5 @@ dist/
 .env
 .DS_Store
 .diagrams/
+docs/private/
 scripts/gen-tldr.mjs
