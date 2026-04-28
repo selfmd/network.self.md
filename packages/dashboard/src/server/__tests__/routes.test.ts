@@ -61,8 +61,28 @@ function mockAgent() {
       },
     ],
     joinPublicGroup: async () => { joinedPublic = true; },
-    getGroupMembers: () => [],
-    getMessages: () => [],
+    getGroupMembers: (id: string) => {
+      if (id === '010203') {
+        return [
+          { fingerprint: 'member1fp', displayName: 'Alice', role: 'admin' },
+          { fingerprint: 'member2fp', displayName: undefined, role: 'member' },
+        ];
+      }
+      return [];
+    },
+    getMessages: ({ groupId }: { groupId: string; limit: number }) => {
+      if (groupId === '010203') {
+        return [
+          {
+            id: 'msg1',
+            senderPublicKey: new Uint8Array(32).fill(1),
+            content: 'hello builders',
+            timestamp: now,
+          },
+        ];
+      }
+      return [];
+    },
   };
 }
 
@@ -159,5 +179,47 @@ describe('Dashboard API routes', () => {
   it('does not expose message content in list endpoints', async () => {
     const statesRes = await app.inject({ method: 'GET', url: '/api/states' });
     expect(statesRes.payload).not.toContain('secret');
+  });
+
+  // --- Identity endpoints ---
+
+  it('GET /api/identity returns fingerprint and displayName', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/identity' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.fingerprint).toBe('abc123');
+    expect(body.displayName).toBe('TestAgent');
+  });
+
+  // --- State detail endpoint ---
+
+  it('GET /api/states/:id returns detail for an own group', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/states/010203' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.name).toBe('builders');
+    expect(body.members).toHaveLength(2);
+    expect(body.members[0].role).toBe('admin');
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0].content).toBe('hello builders');
+  });
+
+  it('GET /api/states/:id returns 404 for unknown id', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/states/ffffff' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  // --- 501 stub endpoints ---
+
+  it('GET /api/wire/events returns 501', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/wire/events' });
+    expect(res.statusCode).toBe(501);
+    expect(res.json().error.code).toBe('wire-trace-unavailable');
+  });
+
+  it('GET /api/security/keys returns 501', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/security/keys' });
+    expect(res.statusCode).toBe(501);
+    expect(res.json().error.code).toBe('security-keys-unavailable');
   });
 });

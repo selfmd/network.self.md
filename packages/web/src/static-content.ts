@@ -3,76 +3,155 @@
  * Served inline to avoid file-copy issues with TypeScript compilation.
  */
 
+function escapeHTML(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export function getChatHTML(fingerprint: string): string {
   // JSON.stringify + replace </script> to prevent XSS when embedding in <script>
   const safeFingerprint = JSON.stringify(fingerprint).replace(/<\//g, '<\\/');
+  const htmlFingerprint = escapeHTML(fingerprint);
+  const titleFingerprint = escapeHTML(fingerprint.slice(0, 12));
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TTYA</title>
+<title>TTYA — ${titleFingerprint}</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600&display=swap');
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0b0d10;
+  --panel: rgba(15, 15, 18, 0.86);
+  --line: rgba(255, 255, 255, 0.075);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --text: rgba(248, 252, 255, 0.92);
+  --muted: rgba(214, 226, 232, 0.58);
+  --faint: rgba(214, 226, 232, 0.34);
+  --green: #41e98d;
+  --purple: #b4a0ff;
+  --cyan: #00bcd4;
+  --warn: #febc2e;
+  --danger: #ff5f57;
+  --r-lg: 14px;
+  --r-md: 10px;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
 
 html, body {
   height: 100%;
-  background: #0a0a0a;
-  color: #e0e0e0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-size: 14px;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(65, 233, 141, 0.12), transparent 26rem),
+    radial-gradient(circle at 86% 18%, rgba(180, 160, 255, 0.13), transparent 24rem),
+    radial-gradient(circle at 72% 86%, rgba(0, 188, 212, 0.10), transparent 28rem),
+    var(--bg);
+  color: var(--text);
+  font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
 #app {
-  max-width: 640px;
+  max-width: 720px;
   margin: 0 auto;
   height: 100%;
   display: flex;
   flex-direction: column;
-  position: relative;
+  padding: 18px 18px 12px;
+  gap: 14px;
 }
 
-/* Status bar */
-#status-bar {
-  padding: 12px 16px;
-  text-align: center;
-  font-size: 12px;
-  letter-spacing: 0.03em;
-  border-bottom: 1px solid #1a1a1a;
-  flex-shrink: 0;
+/* Header */
+#header {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel), rgba(10, 11, 14, 0.92));
+  border-radius: var(--r-lg);
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
+  gap: 12px;
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+#header::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,.03), transparent 44%);
+}
+
+.brand { display: inline-flex; align-items: center; gap: 7px; text-decoration: none; letter-spacing: -0.04em; color: var(--text); }
+.brand-mark { color: var(--green); border: 1px solid rgba(65,233,141,.35); padding: 2px 6px; border-radius: 999px; font-size: 12px; }
+.brand b { font-weight: 600; }
+.brand .ext { color: var(--muted); }
+
+.header-sep { width: 1px; height: 20px; background: var(--line-strong); }
+
+.agent-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.agent-fp { color: var(--green); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
 #status-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #555;
+  background: var(--faint);
   flex-shrink: 0;
 }
 
-#status-dot.connecting { background: #b08030; }
-#status-dot.pending { background: #b08030; animation: pulse 2s ease-in-out infinite; }
-#status-dot.approved { background: #30a050; }
-#status-dot.rejected { background: #a03030; }
-#status-dot.disconnected { background: #555; }
+#status-dot.connecting { background: var(--warn); }
+#status-dot.pending { background: var(--warn); animation: pulse 2s ease-in-out infinite; }
+#status-dot.approved { background: var(--green); box-shadow: 0 0 12px rgba(65,233,141,.4); }
+#status-dot.rejected { background: var(--danger); }
+#status-dot.disconnected { background: var(--faint); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
 
-#status-text {
-  color: #888;
+/* Chat area */
+#chat-card {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel), rgba(10, 11, 14, 0.92));
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
 }
 
-/* Messages area */
+#chat-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,.03), transparent 44%);
+}
+
 #messages {
   flex: 1;
   overflow-y: auto;
@@ -81,21 +160,23 @@ html, body {
   flex-direction: column;
   gap: 8px;
   scroll-behavior: smooth;
+  position: relative;
+  z-index: 1;
 }
 
 #messages::-webkit-scrollbar { width: 4px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
-#messages::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+#messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 2px; }
 
 .msg {
-  max-width: 85%;
+  max-width: 80%;
   padding: 10px 14px;
-  border-radius: 16px;
+  border-radius: var(--r-md);
   word-wrap: break-word;
   white-space: pre-wrap;
-  font-size: 14px;
-  line-height: 1.45;
-  animation: fadeIn 0.15s ease-out;
+  font-size: 13px;
+  line-height: 1.5;
+  animation: fadeIn 0.2s ease-out;
 }
 
 @keyframes fadeIn {
@@ -105,134 +186,144 @@ html, body {
 
 .msg.visitor {
   align-self: flex-end;
-  background: #1a3a5c;
-  color: #d8e8f8;
-  border-bottom-right-radius: 4px;
+  background: rgba(65, 233, 141, 0.12);
+  border: 1px solid rgba(65, 233, 141, 0.2);
+  color: var(--text);
 }
 
 .msg.agent {
   align-self: flex-start;
-  background: #1a1a2e;
-  color: #d0d0e8;
-  border-bottom-left-radius: 4px;
+  background: rgba(180, 160, 255, 0.1);
+  border: 1px solid rgba(180, 160, 255, 0.18);
+  color: var(--text);
 }
 
 .msg.system {
   align-self: center;
   background: transparent;
-  color: #555;
-  font-size: 12px;
+  border: none;
+  color: var(--faint);
+  font-size: 11px;
   padding: 4px 0;
 }
 
-/* Empty state */
 #empty-state {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #333;
-  font-size: 13px;
+  color: var(--faint);
+  font-size: 12px;
   text-align: center;
   padding: 40px;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 /* Input area */
 #input-area {
   padding: 12px 16px;
-  border-top: 1px solid #1a1a1a;
+  border-top: 1px solid var(--line);
   flex-shrink: 0;
-  background: #0a0a0a;
+  position: relative;
+  z-index: 1;
 }
 
 #input-row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: flex-end;
 }
 
 #msg-input {
   flex: 1;
   padding: 10px 14px;
-  background: #111;
-  border: 1px solid #222;
-  border-radius: 20px;
-  color: #e0e0e0;
+  background: rgba(255,255,255,.035);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  color: var(--text);
   font-family: inherit;
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.45;
   resize: none;
   outline: none;
   max-height: 120px;
   transition: border-color 0.15s;
 }
 
-#msg-input:focus {
-  border-color: #334;
-}
-
-#msg-input::placeholder {
-  color: #444;
-}
+#msg-input:focus { border-color: rgba(65, 233, 141, 0.35); }
+#msg-input::placeholder { color: var(--faint); }
 
 #send-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: none;
-  background: #1a3a5c;
-  color: #d8e8f8;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(65, 233, 141, 0.45);
+  background: var(--green);
+  color: var(--bg);
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
   flex-shrink: 0;
-  transition: background 0.15s, opacity 0.15s;
+  transition: transform 0.16s ease, filter 0.16s ease, opacity 0.16s ease;
 }
 
-#send-btn:hover { background: #244a6c; }
+#send-btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); }
 #send-btn:disabled { opacity: 0.3; cursor: default; }
-
-#send-btn svg {
-  width: 16px;
-  height: 16px;
-}
 
 /* Footer */
 #footer {
-  padding: 8px 16px;
   text-align: center;
   font-size: 10px;
-  color: #282828;
+  color: var(--faint);
   flex-shrink: 0;
+}
+
+#footer a { color: var(--muted); text-decoration: none; }
+#footer a:hover { color: var(--green); }
+
+@media (max-width: 600px) {
+  #app { padding: 10px 10px 8px; gap: 10px; }
+  #header { flex-wrap: wrap; padding: 10px 12px; }
+  .agent-fp { font-size: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="status-bar">
-    <span id="status-dot" class="connecting"></span>
-    <span id="status-text">Connecting...</span>
+  <div id="header">
+    <span class="brand">
+      <span class="brand-mark">self</span><b>network</b><span class="ext">.md</span>
+    </span>
+    <span class="header-sep"></span>
+    <span class="agent-info">
+      <span class="agent-fp" title="${htmlFingerprint}">${htmlFingerprint}</span>
+    </span>
+    <span id="status-pill">
+      <span id="status-dot" class="connecting"></span>
+      <span id="status-text">connecting</span>
+    </span>
   </div>
 
-  <div id="messages">
-    <div id="empty-state">Send a message to start the conversation.</div>
-  </div>
+  <div id="chat-card">
+    <div id="messages">
+      <div id="empty-state">send a message to start the conversation.<br>the agent will be notified.</div>
+    </div>
 
-  <div id="input-area">
-    <div id="input-row">
-      <textarea id="msg-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
-      <button id="send-btn" disabled aria-label="Send">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
-      </button>
+    <div id="input-area">
+      <div id="input-row">
+        <textarea id="msg-input" rows="1" placeholder="type a message..." autocomplete="off"></textarea>
+        <button id="send-btn" disabled>send</button>
+      </div>
     </div>
   </div>
 
-  <div id="footer">ttya</div>
+  <div id="footer">
+    <a href="https://github.com/selfmd/network.self.md" target="_blank" rel="noopener">ttya</a> — encrypted p2p, relay stores nothing
+  </div>
 </div>
 
 <script>
@@ -273,7 +364,7 @@ html, body {
     ws = new WebSocket(proto + '//' + location.host + '/ws/' + fp);
 
     ws.onopen = function() {
-      setStatus('approved', 'Connected');
+      setStatus('approved', 'connected');
       sendBtn.disabled = false;
     };
 
@@ -282,12 +373,12 @@ html, body {
         var msg = JSON.parse(ev.data);
         if (msg.type === 'status') {
           if (msg.status === 'pending') {
-            setStatus('pending', 'Waiting for approval...');
+            setStatus('pending', 'waiting for approval');
           } else if (msg.status === 'approved') {
-            setStatus('approved', 'Connected');
+            setStatus('approved', 'connected');
             sendBtn.disabled = false;
           } else if (msg.status === 'rejected') {
-            setStatus('rejected', 'Request declined');
+            setStatus('rejected', 'declined');
             sendBtn.disabled = true;
           }
         } else if (msg.type === 'message') {
@@ -299,12 +390,11 @@ html, body {
     };
 
     ws.onclose = function() {
-      setStatus('disconnected', 'Disconnected');
+      setStatus('disconnected', 'disconnected');
       sendBtn.disabled = true;
-      // Reconnect after a delay
       setTimeout(function() {
         if (status !== 'rejected') {
-          setStatus('connecting', 'Reconnecting...');
+          setStatus('connecting', 'reconnecting');
           connect();
         }
       }, 3000);
@@ -333,7 +423,6 @@ html, body {
     }
   });
 
-  // Auto-resize textarea
   inputEl.addEventListener('input', function() {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 120) + 'px';
