@@ -165,4 +165,36 @@ describe('Agent', () => {
 
     await agent.stop();
   });
+
+  it('should not crash on emitted error events', () => {
+    const agent = new Agent({ dataDir });
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // This would crash the process without the default error listener
+    expect(() => {
+      agent.emit('error', new Error('peer handshake failed'));
+    }).not.toThrow();
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[Agent error]',
+      'peer handshake failed',
+    );
+
+    consoleSpy.mockRestore();
+  });
+
+  it('should still deliver errors to custom listeners', () => {
+    const agent = new Agent({ dataDir });
+    const errors: Error[] = [];
+
+    agent.on('error', (err: Error) => {
+      errors.push(err);
+    });
+
+    agent.emit('error', new Error('swarm connection lost'));
+
+    // Custom listener received it
+    expect(errors.length).toBe(1);
+    expect(errors[0].message).toBe('swarm connection lost');
+  });
 });

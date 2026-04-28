@@ -85,6 +85,12 @@ export class Agent extends EventEmitter {
   constructor(options: AgentOptions) {
     super();
     this.options = options;
+
+    // Prevent unhandled 'error' events from crashing the process.
+    // Node.js EventEmitter kills the process if 'error' is emitted with no listener.
+    this.on('error', (err: Error) => {
+      console.error('[Agent error]', err.message);
+    });
   }
 
   async start(): Promise<void> {
