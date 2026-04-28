@@ -9,6 +9,7 @@ export {
   MessageRepository,
   SenderKeyRepository,
   DiscoveredGroupRepository,
+  RatchetStateRepository,
 } from './storage/repositories.js';
 
 export { PeerSession } from './network/connection.js';

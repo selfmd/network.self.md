@@ -6,6 +6,7 @@ export {
   MessageRepository,
   SenderKeyRepository,
   DiscoveredGroupRepository,
+  RatchetStateRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,

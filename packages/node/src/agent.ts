@@ -8,6 +8,8 @@ import {
   deriveKey,
   sign,
   verify,
+  computeSharedSecret,
+  DoubleRatchet,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
@@ -19,6 +21,7 @@ import type {
   GroupEncryptedMessage,
   GroupManagementMessage,
   NetworkAnnounceMessage,
+  DoubleRatchetState,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { createId } from '@paralleldrive/cuid2';
@@ -30,6 +33,7 @@ import {
   MessageRepository,
   SenderKeyRepository,
   DiscoveredGroupRepository,
+  RatchetStateRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -74,6 +78,7 @@ export class Agent extends EventEmitter {
   private messageRepo!: MessageRepository;
   private senderKeyRepo!: SenderKeyRepository;
   private discoveredGroupRepo!: DiscoveredGroupRepository;
+  private ratchetStateRepo!: RatchetStateRepository;
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
 
@@ -96,6 +101,7 @@ export class Agent extends EventEmitter {
     this.messageRepo = new MessageRepository(db);
     this.senderKeyRepo = new SenderKeyRepository(db);
     this.discoveredGroupRepo = new DiscoveredGroupRepository(db);
+    this.ratchetStateRepo = new RatchetStateRepository(db);
 
     // Load or generate identity
     await this.loadOrGenerateIdentity();
@@ -262,17 +268,32 @@ export class Agent extends EventEmitter {
 
     const plaintext = new TextEncoder().encode(content);
 
-    // In production, use DoubleRatchet for encryption
-    const encrypted = encrypt(this.identity.edPrivateKey.subarray(0, 32), plaintext);
+    // Load or initialize Double Ratchet state for this peer
+    let ratchetState = this.ratchetStateRepo.load(peerFingerprint);
+
+    if (!ratchetState) {
+      // First message to this peer — initialize as sender
+      if (!session.peerXPublicKey) {
+        throw new Error('Peer X25519 public key not available for DM encryption');
+      }
+      const sharedSecret = computeSharedSecret(this.identity.xPrivateKey, session.peerXPublicKey);
+      ratchetState = DoubleRatchet.initSender(sharedSecret, session.peerXPublicKey);
+    }
+
+    // Encrypt with Double Ratchet
+    const encrypted = DoubleRatchet.encrypt(ratchetState, plaintext);
+
+    // Save updated ratchet state
+    this.ratchetStateRepo.save(peerFingerprint, encrypted.nextState);
 
     const messageId = createId();
     const message: ProtocolMessage = {
       type: MessageType.DirectMessage,
       senderFingerprint: this.identity.fingerprint,
       recipientFingerprint: peerFingerprint,
-      ratchetPublicKey: this.identity.edPublicKey,
-      previousChainLength: 0,
-      messageNumber: 0,
+      ratchetPublicKey: encrypted.ratchetPublicKey,
+      previousChainLength: encrypted.previousChainLength,
+      messageNumber: encrypted.messageNumber,
       ciphertext: encrypted.ciphertext,
       nonce: encrypted.nonce,
       timestamp: Date.now(),
@@ -608,13 +629,34 @@ export class Agent extends EventEmitter {
     session: PeerSession,
     message: DirectEncryptedMessage,
   ): void {
-    if (!session.peerPublicKey) return;
+    if (!session.peerPublicKey || !session.peerFingerprint) return;
 
-    // Decrypt the message (simplified - in production use DoubleRatchet)
-    let plaintext: Uint8Array;
+    const senderFingerprint = session.peerFingerprint;
+
+    // Load or initialize Double Ratchet state for this peer
+    let ratchetState = this.ratchetStateRepo.load(senderFingerprint);
+
+    if (!ratchetState) {
+      // First message from this peer — initialize as receiver
+      if (!session.peerXPublicKey) {
+        this.emit('error', new Error('Peer X25519 public key not available for DM decryption'));
+        return;
+      }
+      const sharedSecret = computeSharedSecret(this.identity.xPrivateKey, session.peerXPublicKey);
+      ratchetState = DoubleRatchet.initReceiver(sharedSecret, {
+        privateKey: this.identity.xPrivateKey,
+        publicKey: this.identity.xPublicKey,
+      });
+    }
+
+    // Decrypt with Double Ratchet
+    let decrypted: { plaintext: Uint8Array; nextState: DoubleRatchetState };
     try {
-      plaintext = decrypt(
-        session.peerPublicKey.subarray(0, 32),
+      decrypted = DoubleRatchet.decrypt(
+        ratchetState,
+        message.ratchetPublicKey,
+        message.previousChainLength,
+        message.messageNumber,
         message.nonce,
         message.ciphertext,
       );
@@ -623,7 +665,10 @@ export class Agent extends EventEmitter {
       return;
     }
 
-    const content = new TextDecoder().decode(plaintext);
+    // Save updated ratchet state
+    this.ratchetStateRepo.save(senderFingerprint, decrypted.nextState);
+
+    const content = new TextDecoder().decode(decrypted.plaintext);
 
     this.messageRepo.insert({
       id: createId(),

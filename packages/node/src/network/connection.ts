@@ -10,6 +10,7 @@ export type ConnectionState = 'connecting' | 'handshaking' | 'verified' | 'ready
 export class PeerSession extends EventEmitter {
   state: ConnectionState = 'connecting';
   peerPublicKey: Uint8Array | null = null;
+  peerXPublicKey: Uint8Array | null = null;
   peerFingerprint: string | null = null;
   peerDisplayName: string | null = null;
   noisePublicKey: Uint8Array | null = null;
@@ -108,8 +109,10 @@ export class PeerSession extends EventEmitter {
     peerPublicKey: Uint8Array,
     peerFingerprint: string,
     peerDisplayName?: string,
+    peerXPublicKey?: Uint8Array,
   ): void {
     this.peerPublicKey = peerPublicKey;
+    this.peerXPublicKey = peerXPublicKey ?? null;
     this.peerFingerprint = peerFingerprint;
     this.peerDisplayName = peerDisplayName ?? null;
     this.state = 'verified';

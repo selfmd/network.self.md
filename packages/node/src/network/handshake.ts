@@ -28,17 +28,19 @@ export async function performHandshake(
   const noisePublicKey = session.noisePublicKey ?? new Uint8Array(32);
   const timestamp = Date.now();
 
-  // Build signing payload: noisePublicKey || timestamp as uint64 BE
-  const payload = new Uint8Array(noisePublicKey.length + 8);
+  // Build signing payload: noisePublicKey || xPublicKey || timestamp as uint64 BE
+  const payload = new Uint8Array(noisePublicKey.length + identity.xPublicKey.length + 8);
   payload.set(noisePublicKey, 0);
+  payload.set(identity.xPublicKey, noisePublicKey.length);
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noisePublicKey.length, BigInt(timestamp), false);
+  view.setBigUint64(noisePublicKey.length + identity.xPublicKey.length, BigInt(timestamp), false);
 
   const signature = sign(payload, identity.edPrivateKey);
 
   const handshakeMessage: ProtocolMessage = {
     type: MessageType.IdentityHandshake,
     edPublicKey: identity.edPublicKey,
+    xPublicKey: identity.xPublicKey,
     noisePublicKey: noisePublicKey,
     signature,
     protocolVersion: 1,
@@ -91,6 +93,7 @@ export async function performHandshake(
           peerHandshake.edPublicKey,
           peerFingerprint,
           peerHandshake.displayName,
+          peerHandshake.xPublicKey,
         );
 
         // Use queueMicrotask to resolve after the current synchronous
@@ -140,13 +143,14 @@ function validateHandshake(
   }
 
   // Reconstruct the payload the peer signed:
-  // They signed their own view of noisePublicKey (the remote noise key they see)
-  // which they included in the handshake message.
+  // noisePublicKey || xPublicKey || timestamp as uint64 BE
   const noiseKey = handshake.noisePublicKey;
-  const payload = new Uint8Array(noiseKey.length + 8);
+  const xKey = handshake.xPublicKey;
+  const payload = new Uint8Array(noiseKey.length + xKey.length + 8);
   payload.set(noiseKey, 0);
+  payload.set(xKey, noiseKey.length);
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noiseKey.length, BigInt(handshake.timestamp), false);
+  view.setBigUint64(noiseKey.length + xKey.length, BigInt(handshake.timestamp), false);
 
   const valid = verify(handshake.signature, payload, handshake.edPublicKey);
   if (!valid) {

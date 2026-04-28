@@ -9,7 +9,11 @@
 import Hyperswarm from 'hyperswarm';
 import b4a from 'b4a';
 import { createHmac } from 'node:crypto';
+import { sign, generateIdentity } from '@networkselfmd/core';
 import type { TTYARequest, TTYAResponse } from './types.js';
+
+/** Maximum allowed TTYA frame payload size (64 KB). Prevents OOM from malicious peers. */
+const MAX_TTYA_FRAME_SIZE = 65536;
 
 /**
  * HKDF-SHA256 implementation using Node.js crypto.
@@ -81,6 +85,9 @@ function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: numb
 
   while (offset + 4 <= data.length) {
     const len = data.readUInt32BE(offset);
+    if (len > MAX_TTYA_FRAME_SIZE) {
+      throw new Error(`TTYA frame too large: ${len} bytes (max ${MAX_TTYA_FRAME_SIZE})`);
+    }
     if (offset + 4 + len > data.length) break;
     const payload = data.subarray(offset + 4, offset + 4 + len);
     try {
@@ -101,6 +108,13 @@ function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: numb
 
 const MAX_PENDING_REQUESTS = 1000;
 
+/** Encode a uint64 as 8-byte big-endian buffer */
+function uint64BE(n: number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64BE(BigInt(n), 0);
+  return buf;
+}
+
 export class TTYABridge {
   private agentEdPublicKey: Uint8Array;
   private swarm: Hyperswarm | null = null;
@@ -108,9 +122,15 @@ export class TTYABridge {
   private responseHandler: ((response: TTYAResponse) => void) | null = null;
   private pendingRequests: TTYARequest[] = [];
   private receiveBuffer = Buffer.alloc(0);
+  private bridgeEdPublicKey: Uint8Array;
+  private bridgeEdPrivateKey: Uint8Array;
 
   constructor(agentEdPublicKey: Uint8Array) {
     this.agentEdPublicKey = agentEdPublicKey;
+    // Generate ephemeral Ed25519 keypair for bridge authentication
+    const identity = generateIdentity();
+    this.bridgeEdPublicKey = identity.edPublicKey;
+    this.bridgeEdPrivateKey = identity.edPrivateKey;
   }
 
   /**
@@ -133,6 +153,9 @@ export class TTYABridge {
     this.swarm.on('connection', (conn: any, _info: any) => {
       this.agentConnection = conn;
 
+      // Send auth frame before any TTYARequests
+      this.sendAuthFrame();
+
       // Flush any requests that queued before the agent connected
       for (const req of this.pendingRequests) {
         this.writeRequest(req);
@@ -141,6 +164,14 @@ export class TTYABridge {
 
       conn.on('data', (chunk: Buffer) => {
         this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);
+
+        if (this.receiveBuffer.length > MAX_TTYA_FRAME_SIZE + 4) {
+          console.warn(`[TTYABridge] Receive buffer exceeded max size (${this.receiveBuffer.length} bytes), destroying connection`);
+          this.receiveBuffer = Buffer.alloc(0);
+          conn.destroy();
+          return;
+        }
+
         this.processReceiveBuffer();
       });
 
@@ -210,6 +241,39 @@ export class TTYABridge {
     return this.agentConnection !== null;
   }
 
+  /**
+   * Send an authentication frame to the agent.
+   * Must be the first message on a new connection.
+   */
+  private sendAuthFrame(): void {
+    if (!this.agentConnection) return;
+    const timestamp = Date.now();
+    const payload = Buffer.concat([
+      Buffer.from(this.agentEdPublicKey),
+      uint64BE(timestamp),
+    ]);
+    const signature = sign(payload, this.bridgeEdPrivateKey);
+
+    const authFrame = {
+      type: 'ttya-auth',
+      bridgePublicKey: Buffer.from(this.bridgeEdPublicKey).toString('hex'),
+      timestamp,
+      signature: Buffer.from(signature).toString('hex'),
+    };
+
+    const json = JSON.stringify(authFrame);
+    const jsonBuf = Buffer.from(json, 'utf-8');
+    const frame = Buffer.alloc(4 + jsonBuf.length);
+    frame.writeUInt32BE(jsonBuf.length, 0);
+    jsonBuf.copy(frame, 4);
+
+    try {
+      this.agentConnection.write(frame);
+    } catch {
+      // connection may have dropped
+    }
+  }
+
   private writeRequest(request: TTYARequest): void {
     if (!this.agentConnection) return;
     try {
@@ -221,7 +285,18 @@ export class TTYABridge {
   }
 
   private processReceiveBuffer(): void {
-    const { responses, consumed } = decodeFrames(this.receiveBuffer);
+    let responses: TTYAResponse[];
+    let consumed: number;
+    try {
+      ({ responses, consumed } = decodeFrames(this.receiveBuffer));
+    } catch (err) {
+      console.warn('[TTYABridge] Frame decode error, clearing buffer:', err);
+      this.receiveBuffer = Buffer.alloc(0);
+      if (this.agentConnection) {
+        this.agentConnection.destroy();
+      }
+      return;
+    }
     if (responses.length === 0) return;
 
     this.receiveBuffer = Buffer.from(this.receiveBuffer.subarray(consumed));

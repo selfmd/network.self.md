@@ -16,6 +16,7 @@ export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType];
 export interface IdentityHandshakeMessage {
   type: typeof MessageType.IdentityHandshake;
   edPublicKey: Uint8Array;
+  xPublicKey: Uint8Array;
   noisePublicKey: Uint8Array;
   signature: Uint8Array;
   displayName?: string;

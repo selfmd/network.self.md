@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import type { DoubleRatchetState } from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -365,5 +366,92 @@ export class SenderKeyRepository {
     this.db
       .prepare('DELETE FROM sender_keys WHERE group_id = ?')
       .run(Buffer.from(groupId));
+  }
+}
+
+// --- Hex encoding helpers for Uint8Array serialization ---
+
+function toHex(arr: Uint8Array): string {
+  return Array.from(arr)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function fromHex(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+interface SerializedRatchetState {
+  rootKey: string;
+  sendChainKey: string | null;
+  receiveChainKey: string | null;
+  sendRatchetPrivate: string;
+  sendRatchetPublic: string;
+  receiveRatchetPublic: string | null;
+  sendMessageNumber: number;
+  receiveMessageNumber: number;
+  previousChainLength: number;
+  skippedKeys: Array<[string, string]>;
+}
+
+function serializeRatchetState(state: DoubleRatchetState): string {
+  const serialized: SerializedRatchetState = {
+    rootKey: toHex(state.rootKey),
+    sendChainKey: state.sendChainKey ? toHex(state.sendChainKey) : null,
+    receiveChainKey: state.receiveChainKey ? toHex(state.receiveChainKey) : null,
+    sendRatchetPrivate: toHex(state.sendRatchetPrivate),
+    sendRatchetPublic: toHex(state.sendRatchetPublic),
+    receiveRatchetPublic: state.receiveRatchetPublic ? toHex(state.receiveRatchetPublic) : null,
+    sendMessageNumber: state.sendMessageNumber,
+    receiveMessageNumber: state.receiveMessageNumber,
+    previousChainLength: state.previousChainLength,
+    skippedKeys: Array.from(state.skippedKeys.entries()).map(([k, v]) => [k, toHex(v)]),
+  };
+  return JSON.stringify(serialized);
+}
+
+function deserializeRatchetState(json: string): DoubleRatchetState {
+  const s: SerializedRatchetState = JSON.parse(json);
+  return {
+    rootKey: fromHex(s.rootKey),
+    sendChainKey: s.sendChainKey ? fromHex(s.sendChainKey) : null,
+    receiveChainKey: s.receiveChainKey ? fromHex(s.receiveChainKey) : null,
+    sendRatchetPrivate: fromHex(s.sendRatchetPrivate),
+    sendRatchetPublic: fromHex(s.sendRatchetPublic),
+    receiveRatchetPublic: s.receiveRatchetPublic ? fromHex(s.receiveRatchetPublic) : null,
+    sendMessageNumber: s.sendMessageNumber,
+    receiveMessageNumber: s.receiveMessageNumber,
+    previousChainLength: s.previousChainLength,
+    skippedKeys: new Map(s.skippedKeys.map(([k, v]) => [k, fromHex(v)])),
+  };
+}
+
+export class RatchetStateRepository {
+  constructor(private db: Database.Database) {}
+
+  save(peerFingerprint: string, state: DoubleRatchetState): void {
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO dm_ratchet_states (peer_fingerprint, state_json, updated_at)
+       VALUES (?, ?, ?)`,
+    );
+    stmt.run(peerFingerprint, serializeRatchetState(state), Date.now());
+  }
+
+  load(peerFingerprint: string): DoubleRatchetState | null {
+    const row = this.db
+      .prepare('SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?')
+      .get(peerFingerprint) as { state_json: string } | undefined;
+    if (!row) return null;
+    return deserializeRatchetState(row.state_json);
+  }
+
+  delete(peerFingerprint: string): void {
+    this.db
+      .prepare('DELETE FROM dm_ratchet_states WHERE peer_fingerprint = ?')
+      .run(peerFingerprint);
   }
 }

@@ -18,6 +18,7 @@ describe('messages (CBOR encoding)', () => {
   const sampleHandshake: ProtocolMessage = {
     type: MessageType.IdentityHandshake,
     edPublicKey: new Uint8Array(32).fill(1),
+    xPublicKey: new Uint8Array(32).fill(4),
     noisePublicKey: new Uint8Array(32).fill(2),
     signature: new Uint8Array(64).fill(3),
     displayName: 'agent-1',

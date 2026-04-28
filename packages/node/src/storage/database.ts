@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: string[] = [
   `
@@ -82,6 +82,15 @@ const MIGRATIONS: string[] = [
   );
 
   UPDATE schema_version SET version = 2;
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS dm_ratchet_states (
+    peer_fingerprint TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  UPDATE schema_version SET version = 3;
   `,
 ];
 
