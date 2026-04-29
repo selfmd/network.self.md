@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
-import type { DoubleRatchetState } from '@networkselfmd/core';
+import type { DoubleRatchetState, SignedGroupEpoch } from '@networkselfmd/core';
+import { serializeEpoch, deserializeEpoch, hashEpoch } from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -212,6 +213,13 @@ export class GroupRepository {
   }
 
   setPublic(groupId: Uint8Array, isPublic: boolean, selfMd?: string): void {
+    const group = this.find(groupId);
+    if (!group) {
+      throw new Error('Group not found');
+    }
+    if (group.role !== 'admin') {
+      throw new Error('Only admin can change group visibility');
+    }
     this.db
       .prepare('UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?')
       .run(isPublic ? 1 : 0, selfMd ?? null, Buffer.from(groupId));
@@ -453,5 +461,71 @@ export class RatchetStateRepository {
     this.db
       .prepare('DELETE FROM dm_ratchet_states WHERE peer_fingerprint = ?')
       .run(peerFingerprint);
+  }
+}
+
+interface StoredGroupEpochRow {
+  id: number;
+  group_id: string;
+  version: number;
+  prev_hash: Buffer;
+  epoch_data: Buffer;
+  signature: Buffer;
+  hash: Buffer;
+  created_by: Buffer;
+  created_at: number;
+}
+
+export class GroupEpochRepository {
+  constructor(private db: Database.Database) {}
+
+  saveEpoch(signed: SignedGroupEpoch): void {
+    const serialized = serializeEpoch(signed.epoch);
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO group_epochs (group_id, version, prev_hash, epoch_data, signature, hash, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    stmt.run(
+      signed.epoch.groupId,
+      signed.epoch.version,
+      Buffer.from(signed.epoch.prevHash),
+      Buffer.from(serialized),
+      Buffer.from(signed.signature),
+      Buffer.from(signed.hash),
+      Buffer.from(signed.epoch.createdBy),
+      signed.epoch.timestamp,
+    );
+  }
+
+  getLatestEpoch(groupId: string): SignedGroupEpoch | null {
+    const row = this.db
+      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version DESC LIMIT 1')
+      .get(groupId) as StoredGroupEpochRow | undefined;
+    if (!row) return null;
+    return this.rowToSignedEpoch(row);
+  }
+
+  getEpochChain(groupId: string): SignedGroupEpoch[] {
+    const rows = this.db
+      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version ASC')
+      .all(groupId) as StoredGroupEpochRow[];
+    return rows.map((r) => this.rowToSignedEpoch(r));
+  }
+
+  getEpochByVersion(groupId: string, version: number): SignedGroupEpoch | null {
+    const row = this.db
+      .prepare('SELECT * FROM group_epochs WHERE group_id = ? AND version = ?')
+      .get(groupId, version) as StoredGroupEpochRow | undefined;
+    if (!row) return null;
+    return this.rowToSignedEpoch(row);
+  }
+
+  private rowToSignedEpoch(row: StoredGroupEpochRow): SignedGroupEpoch {
+    const epoch = deserializeEpoch(new Uint8Array(row.epoch_data));
+    return {
+      epoch,
+      signature: new Uint8Array(row.signature),
+      hash: new Uint8Array(row.hash),
+    };
   }
 }

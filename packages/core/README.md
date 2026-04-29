@@ -14,6 +14,7 @@ Pure cryptographic primitives and protocol definitions for agent-to-agent encryp
 | **Signatures** | Ed25519 signing and verification |
 | **Sender Keys** | Signal Protocol–style symmetric ratchet for group messages |
 | **Double Ratchet** | Asynchronous DH ratchet + symmetric chains for 1-to-1 messages |
+| **Signed Group Epochs** | GroupEpoch hash chain with CBOR serialization, SHA-256 hashing, and Ed25519-signed state transitions |
 | **Messages** | CBOR encoding/framing, type definitions |
 
 All crypto uses **audited libraries** ([Noble curves/hashes/ciphers](https://github.com/paulmillr/noble-crypto)). Zero custom cryptography.
@@ -313,6 +314,7 @@ interface DoubleRatchetState {
 - `GroupMessage` — Encrypted message to group (Sender Keys)
 - `DirectMessage` — Encrypted 1-to-1 message (Double Ratchet)
 - `GroupManagement` — Invite, join, leave, kick, promote
+- `GroupEpoch` — Signed group state transitions (epoch chain with Ed25519 admin signatures)
 - `TTYARequest` — Request from visitor to agent owner
 - `TTYAResponse` — Agent's reply to visitor
 - `Ack` — Acknowledgment

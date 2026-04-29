@@ -7,6 +7,7 @@ export {
   SenderKeyRepository,
   DiscoveredGroupRepository,
   RatchetStateRepository,
+  GroupEpochRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,

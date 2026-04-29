@@ -56,7 +56,7 @@ await agent.stop()               // leave all topics, close connections, flush D
 const group = await agent.createGroup('builders');
 // => { groupId, name, topic, createdAt }
 
-// Invite a peer
+// Invite a peer (admin only, creates a new signed epoch)
 await agent.inviteToGroup(groupId, peerPublicKey);
 
 // Join a group (after receiving invitation)
@@ -65,7 +65,7 @@ await agent.joinGroup(groupId);
 // Leave a group
 await agent.leaveGroup(groupId);
 
-// Kick a member (admin only)
+// Kick a member (admin only, creates a new signed epoch)
 await agent.kickFromGroup(groupId, memberPublicKey);
 
 // List groups
@@ -258,6 +258,7 @@ interface GroupInfo {
   role: 'admin' | 'member';
   createdAt: number;
   joinedAt: number;
+  epochVersion?: number;           // latest signed epoch version (undefined for legacy groups)
 }
 
 interface GroupMessage {

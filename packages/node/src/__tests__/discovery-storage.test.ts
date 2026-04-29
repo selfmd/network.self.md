@@ -87,4 +87,15 @@ describe('GroupRepository.setPublic', () => {
     expect(publics[0].is_public).toBe(1);
     expect(publics[0].self_md).toBe('We build things.');
   });
+
+  it('throws when caller role is member', () => {
+    const gid = new Uint8Array([1, 2, 3]);
+    repo.join(gid, 'builders', 'member');
+    expect(() => repo.setPublic(gid, true, 'Hijacked.')).toThrow(/admin/i);
+  });
+
+  it('throws when group does not exist', () => {
+    const gid = new Uint8Array([9, 9, 9]);
+    expect(() => repo.setPublic(gid, true, 'Ghost.')).toThrow();
+  });
 });

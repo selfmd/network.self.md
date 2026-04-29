@@ -7,6 +7,7 @@ export {
   type GroupEncryptedMessage,
   type DirectEncryptedMessage,
   type GroupManagementMessage,
+  type GroupEpochMessage,
   type TTYARequestMessage,
   type TTYAResponseMessage,
   type NetworkAnnounceMessage,
@@ -30,6 +31,11 @@ export {
 } from './messages.js';
 
 export {
+  signAnnounce,
+  verifyAnnounce,
+} from './announce-signature.js';
+
+export {
   SenderKeys,
   type SenderKeyState,
   type SenderKeyRecord,
@@ -39,3 +45,15 @@ export {
   DoubleRatchet,
   type DoubleRatchetState,
 } from './double-ratchet.js';
+
+export {
+  type GroupMemberEntry,
+  type GroupEpoch,
+  type SignedGroupEpoch,
+  serializeEpoch,
+  deserializeEpoch,
+  hashEpoch,
+  createSignedEpoch,
+  verifyEpoch,
+  createGenesisEpoch,
+} from './group-state.js';

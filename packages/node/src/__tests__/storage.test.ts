@@ -43,6 +43,7 @@ describe('AgentDatabase', () => {
     expect(tableNames).toContain('sender_keys');
     expect(tableNames).toContain('key_storage');
     expect(tableNames).toContain('schema_version');
+    expect(tableNames).toContain('group_epochs');
   });
 
   it('should not re-run migrations', () => {
@@ -52,7 +53,7 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(3);
+    expect(row.version).toBe(4);
   });
 });
 

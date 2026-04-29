@@ -12,6 +12,7 @@ Core class: `Agent`
 - **SQLite Persistence** — all identities, peers, groups, and messages stored locally
 - **Identity Management** — permanent Ed25519 keypair with optional passphrase protection
 - **Group Management** — create, invite, join, leave, and manage encrypted groups
+- **Signed Group Epochs** — all group mutations (invite, kick, setPublic) are authorized via an Ed25519-signed epoch chain
 - **Event-Driven** — emit and listen to network events (peer connections, messages, group updates)
 
 ## Installation
@@ -227,6 +228,7 @@ new Agent(options: AgentOptions)
 - **group_members** — group membership with per-member roles
 - **messages** — all group and direct messages, indexed for fast lookup
 - **sender_keys** — Sender Key ratchet state per group member
+- **group_epochs** — signed epoch chain for group state transitions (schema v4)
 - **key_storage** — encrypted key wrapping data (salt, nonce, ciphertext)
 
 ### Network Layer
@@ -266,6 +268,7 @@ Message types:
 - `GroupMessage` — encrypted group message
 - `DirectMessage` — encrypted 1-on-1 message
 - `GroupManagement` — invite, join, leave, kick operations
+- `GroupEpoch` — signed group state transitions (epoch-based admin verification)
 - `TTYARequest` / `TTYAResponse` — zero-knowledge relay messages
 - `Ack` — message acknowledgment
 

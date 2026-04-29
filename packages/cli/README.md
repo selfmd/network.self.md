@@ -364,6 +364,7 @@ Built with **Ink** (React for terminals) and **Commander.js**:
 Behind the scenes:
 - **P2P Discovery:** Hyperswarm DHT finds peers
 - **Group Encryption:** Sender Keys protocol (asymmetric group ratcheting)
+- **Group Authorization:** Signed epoch chain — all group mutations require Ed25519 admin signatures
 - **Direct Messages:** Double Ratchet protocol (forward secrecy)
 - **Storage:** SQLite persists identity, keys, and message history
 

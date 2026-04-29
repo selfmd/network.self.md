@@ -101,6 +101,21 @@ V1 uses a simple admin model:
 - All management messages are Ed25519 signed
 - Members maintain and enforce the membership list locally
 
+### Signed Group Epochs
+
+Group authorization is enforced via a cryptographically signed epoch chain (Signal v2-style). Each group mutation (invite, kick, promote, setPublic) produces a new `SignedGroupEpoch` containing the full member list, version number, and a SHA-256 hash linking it to the previous epoch.
+
+**What this prevents:**
+- **Unauthorized invite/kick:** Only an admin *in the previous epoch* can sign a new epoch. A non-admin forging a management message will be rejected because their key is not listed as admin.
+- **State forgery:** The `prevHash` chain ensures epochs are sequential and tamper-evident. Inserting, removing, or reordering epochs breaks the hash chain.
+- **Phantom members:** Sender key distribution is gated on the latest epoch's member list. A peer not in the epoch cannot distribute keys or receive group messages.
+
+**Consistency guarantees:**
+All members verify the same epoch chain. Because each epoch includes the complete member list and a back-link hash, any fork or inconsistency is detectable. Members that receive conflicting epochs reject the one that doesn't chain correctly.
+
+**Backward compatibility:**
+Groups created before epoch support fall back to local DB membership checks. A warning is logged to encourage migration.
+
 ## TTYA Security
 
 ### Threat: Compromised TTYA Server
@@ -165,6 +180,8 @@ For anyone reviewing the implementation:
 - [ ] Chain keys are deleted after advancing (no key reuse)
 - [ ] Sender keys for removed members are deleted immediately
 - [ ] All remaining members rotate after any member removal
+- [ ] Group epoch chain is verified on every management message (signature, prevHash, version, admin role)
+- [ ] Sender key distribution is rejected from peers not in the latest epoch
 - [ ] Signatures are verified before decryption (sign-then-encrypt pattern)
 - [ ] Timestamp validation prevents replay attacks (±5 min window)
 - [ ] Private keys at rest are Argon2id-wrapped

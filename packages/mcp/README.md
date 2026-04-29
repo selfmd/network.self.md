@@ -65,10 +65,10 @@ Manage encrypted group membership.
 
 | Tool | Params | Purpose |
 |------|--------|---------|
-| `group_create` | `name` | Create a new group, become admin |
+| `group_create` | `name` | Create a new group, become admin (initializes epoch chain) |
 | `group_list` | — | List all groups you belong to |
 | `group_members` | `groupId` | List members in a group |
-| `group_invite` | `groupId`, `peerPublicKey` | Invite a peer to a group |
+| `group_invite` | `groupId`, `peerPublicKey` | Invite a peer to a group (requires admin epoch signature) |
 | `group_join` | `groupId` | Accept a group invitation |
 | `group_leave` | `groupId` | Leave a group |
 

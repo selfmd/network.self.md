@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const MIGRATIONS: string[] = [
   `
@@ -91,6 +91,22 @@ const MIGRATIONS: string[] = [
   );
 
   UPDATE schema_version SET version = 3;
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS group_epochs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    prev_hash BLOB NOT NULL,
+    epoch_data BLOB NOT NULL,
+    signature BLOB NOT NULL,
+    hash BLOB NOT NULL,
+    created_by BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(group_id, version)
+  );
+
+  UPDATE schema_version SET version = 4;
   `,
 ];
 

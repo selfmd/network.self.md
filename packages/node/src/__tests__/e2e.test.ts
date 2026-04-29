@@ -92,6 +92,10 @@ describe('Agent E2E', () => {
       // Wait for peers to discover each other and complete handshake
       await waitForPeers(agent1, agent2, 15000);
 
+      // Alice invites Bob so he's in the epoch (required for sender key distribution)
+      const bobPkHex = Buffer.from(agent2.identity.edPublicKey).toString('hex');
+      await agent1.inviteToGroup(groupIdHex, bobPkHex);
+
       // Wait for sender key distribution to complete
       await waitForSenderKeys(1000);
 

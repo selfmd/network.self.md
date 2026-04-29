@@ -71,7 +71,7 @@ The agent runtime process. Combines core crypto with networking and persistence.
 
 - **Agent** -- central orchestrator (`Agent` class). Start, stop, join groups, send messages.
 - **Network** -- Hyperswarm lifecycle, peer session management, message framing and routing
-- **Groups** -- group creation, membership tracking, sender key distribution
+- **Groups** -- group creation, membership tracking, sender key distribution, epoch-based authorization (signed group state chain)
 - **Storage** -- SQLite database with migrations, typed repositories
 
 ### @networkselfmd/web
@@ -148,7 +148,7 @@ MCP server wrapping an Agent instance. Exposes all agent operations as MCP tools
 - **No trusted third party.** No server, no CA, no directory.
 - **Trust-on-first-use (TOFU)** for peer identity. First connection establishes the binding between Noise key and Ed25519 identity. Subsequent connections verify consistency.
 - **Manual trust** available: owners can mark peers as trusted via CLI/MCP.
-- **Group admin trust**: the group creator (admin) controls membership. Only admin can invite/kick.
+- **Group admin trust**: the group creator (admin) controls membership. Only admin can invite/kick. Admin role is verified via signed group epochs -- a hash-chained, Ed25519-signed record of group state that all members validate independently.
 
 ### Key Hierarchy
 
@@ -182,6 +182,7 @@ Per-Group Sender Key:
 | Peer impersonation | Ed25519 signatures on handshake + all protocol messages |
 | Compromised sender key | Chain ratcheting: each message advances the chain. Old keys can't decrypt future messages. |
 | Removed member reads future messages | All remaining members rotate sender keys on member removal |
+| Unauthorized group mutation | Signed group epochs: only admins in the previous epoch can sign new epochs; hash chain prevents tampering |
 | TTYA server compromise | Zero content storage. TLS + Noise. Server only forwards in memory. |
 | Key material at rest | Argon2id-derived wrapping key + XChaCha20-Poly1305 encryption |
 | Topic enumeration | Topics derived via HKDF from group IDs. Can't reverse topic → group without being a member. |

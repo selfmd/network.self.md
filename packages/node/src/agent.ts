@@ -10,6 +10,8 @@ import {
   verify,
   computeSharedSecret,
   DoubleRatchet,
+  signAnnounce,
+  verifyAnnounce,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
@@ -20,6 +22,7 @@ import type {
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
+  GroupEpochMessage,
   NetworkAnnounceMessage,
   DoubleRatchetState,
 } from '@networkselfmd/core';
@@ -34,6 +37,7 @@ import {
   SenderKeyRepository,
   DiscoveredGroupRepository,
   RatchetStateRepository,
+  GroupEpochRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -79,6 +83,7 @@ export class Agent extends EventEmitter {
   private senderKeyRepo!: SenderKeyRepository;
   private discoveredGroupRepo!: DiscoveredGroupRepository;
   private ratchetStateRepo!: RatchetStateRepository;
+  private groupEpochRepo!: GroupEpochRepository;
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
 
@@ -108,6 +113,7 @@ export class Agent extends EventEmitter {
     this.senderKeyRepo = new SenderKeyRepository(db);
     this.discoveredGroupRepo = new DiscoveredGroupRepository(db);
     this.ratchetStateRepo = new RatchetStateRepository(db);
+    this.groupEpochRepo = new GroupEpochRepository(db);
 
     // Load or generate identity
     await this.loadOrGenerateIdentity();
@@ -126,6 +132,7 @@ export class Agent extends EventEmitter {
       messages: this.messageRepo,
       senderKeys: this.senderKeyRepo,
       peers: this.peerRepo,
+      epochs: this.groupEpochRepo,
     });
 
     // Wire up events
@@ -378,6 +385,15 @@ export class Agent extends EventEmitter {
 
   makeGroupPublic(groupId: string, selfMd: string): void {
     const gid = hexToBytes(groupId);
+    const latestEpoch = this.groupEpochRepo.getLatestEpoch(groupId);
+    if (latestEpoch) {
+      const isAdmin = latestEpoch.epoch.members.some(
+        (m) => m.role === 'admin' && buffersEqual(m.publicKey, this.identity.edPublicKey),
+      );
+      if (!isAdmin) {
+        throw new Error('Not authorized: not admin in latest epoch');
+      }
+    }
     this.groupRepo.setPublic(gid, true, selfMd);
     this.announcePublicGroups();
   }
@@ -410,15 +426,19 @@ export class Agent extends EventEmitter {
     const publicGroups = this.groupRepo.listPublic();
     if (publicGroups.length === 0) return;
 
+    const groups = publicGroups.map((g) => ({
+      groupId: Uint8Array.from(g.group_id),
+      name: g.name,
+      selfMd: g.self_md ?? '',
+      memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
+    }));
+    const timestamp = Date.now();
+
     const announce: ProtocolMessage = {
       type: MessageType.NetworkAnnounce,
-      groups: publicGroups.map((g) => ({
-        groupId: Uint8Array.from(g.group_id),
-        name: g.name,
-        selfMd: g.self_md ?? '',
-        memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
-      })),
-      timestamp: Date.now(),
+      groups,
+      signature: signAnnounce(groups, timestamp, this.identity.edPrivateKey),
+      timestamp,
     };
 
     for (const session of this.swarm.getAllSessions()) {
@@ -521,15 +541,18 @@ export class Agent extends EventEmitter {
       // Announce our public groups to new peer
       const publicGroups = this.groupRepo.listPublic();
       if (publicGroups.length > 0) {
+        const announceGroups = publicGroups.map((g) => ({
+          groupId: Uint8Array.from(g.group_id),
+          name: g.name,
+          selfMd: g.self_md ?? '',
+          memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
+        }));
+        const announceTimestamp = Date.now();
         const announce: ProtocolMessage = {
           type: MessageType.NetworkAnnounce,
-          groups: publicGroups.map((g) => ({
-            groupId: Uint8Array.from(g.group_id),
-            name: g.name,
-            selfMd: g.self_md ?? '',
-            memberCount: this.groupRepo.getMembers(Uint8Array.from(g.group_id)).length,
-          })),
-          timestamp: Date.now(),
+          groups: announceGroups,
+          signature: signAnnounce(announceGroups, announceTimestamp, this.identity.edPrivateKey),
+          timestamp: announceTimestamp,
         };
         result.session.send(announce);
       }
@@ -572,6 +595,13 @@ export class Agent extends EventEmitter {
       );
     });
 
+    router.on(MessageType.GroupEpoch, (session, message) => {
+      this.groupManager.handleGroupEpoch(
+        session,
+        message as GroupEpochMessage,
+      );
+    });
+
     router.on(MessageType.DirectMessage, (session, message) => {
       this.handleDirectMessage(session, message as DirectEncryptedMessage);
     });
@@ -579,6 +609,15 @@ export class Agent extends EventEmitter {
     router.on(MessageType.NetworkAnnounce, (session, message) => {
       const announce = message as NetworkAnnounceMessage;
       if (!session.peerPublicKey) return;
+
+      // Verify signature — reject unsigned or forged announcements
+      if (
+        !announce.signature ||
+        !verifyAnnounce(announce.groups, announce.timestamp, announce.signature, session.peerPublicKey)
+      ) {
+        this.emit('error', new Error('Rejected NetworkAnnounce: invalid signature'));
+        return;
+      }
 
       for (const g of announce.groups) {
         this.discoveredGroupRepo.upsert(
@@ -624,6 +663,10 @@ export class Agent extends EventEmitter {
 
     this.groupManager.on('group:keysRotated', (data) => {
       this.emit('group:keysRotated', data);
+    });
+
+    this.groupManager.on('group:epochUpdated', (data) => {
+      this.emit('group:epochUpdated', data);
     });
 
     this.groupManager.on('error', (err) => {
@@ -716,4 +759,12 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
   }
   return bytes;
+}
+
+function buffersEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

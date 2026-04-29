@@ -8,6 +8,7 @@ export const MessageType = {
   TTYARequest: 0x07,
   TTYAResponse: 0x08,
   NetworkAnnounce: 0x09,
+  GroupEpoch: 0x0a,
   Ack: 0xff,
 } as const;
 
@@ -95,6 +96,16 @@ export interface NetworkAnnounceMessage {
     selfMd: string;
     memberCount: number;
   }>;
+  signature: Uint8Array;
+  timestamp: number;
+}
+
+export interface GroupEpochMessage {
+  type: typeof MessageType.GroupEpoch;
+  groupId: Uint8Array;
+  epochData: Uint8Array;
+  signature: Uint8Array;
+  hash: Uint8Array;
   timestamp: number;
 }
 
@@ -114,6 +125,7 @@ export type ProtocolMessage =
   | TTYARequestMessage
   | TTYAResponseMessage
   | NetworkAnnounceMessage
+  | GroupEpochMessage
   | AckMessage;
 
 // Domain types

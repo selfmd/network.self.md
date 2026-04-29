@@ -29,6 +29,7 @@ Each CBOR payload is a map with a `type` field (uint8) that determines the messa
 | 0x06 | GroupManagement | Varies | Group admin operations |
 | 0x07 | TTYARequest | TTYA Server → Agent | Visitor message for approval |
 | 0x08 | TTYAResponse | Agent → TTYA Server | Approval decision + reply |
+| 0x0a | GroupEpoch | Admin → Group peers | Signed group state snapshot |
 | 0xFF | Ack | Recipient → Sender | Delivery acknowledgment |
 
 ## Connection Handshake
@@ -177,6 +178,50 @@ groupId = sha256(creator.edPublicKey || uint64(timestamp) || nonce)
 ```
 topic = hkdf(sha256, groupId, "networkselfmd-topic-v1", "", 32)
 ```
+
+### GroupEpoch (0x0a)
+
+A signed snapshot of group state, forming a hash chain. Every group mutation (create, invite, kick, promote, setPublic) produces a new epoch.
+
+```typescript
+{
+  type: 0x0a,
+  groupId: string,
+  version: number,                 // 0 for genesis, increments by 1
+  prevHash: Uint8Array,            // 32 bytes, SHA-256 of previous epoch (zeros for genesis)
+  members: Array<{
+    publicKey: Uint8Array,         // Ed25519 public key
+    role: "admin" | "member"
+  }>,
+  timestamp: number,               // unix ms
+  createdBy: Uint8Array,           // 32 bytes, admin's Ed25519 public key
+  signature: Uint8Array            // Ed25519 over CBOR-serialized epoch data (excluding signature)
+}
+```
+
+**Epoch hash:**
+```
+epochHash = sha256(cbor(groupId || version || prevHash || members || timestamp || createdBy))
+```
+
+**Genesis epoch (version 0):**
+On group creation, the creator produces a genesis epoch with `prevHash = zeros(32)`, a single member entry (the creator as admin), signed with the creator's Ed25519 key.
+
+**Subsequent epochs:**
+Each group mutation creates a new epoch: `version = previous.version + 1`, `prevHash = hash(previous)`, updated member list, signed by the admin performing the action.
+
+**Verification rules:**
+1. Verify `ed25519.verify(signature, cbor(epochData), createdBy)` is true
+2. Verify `createdBy` is an admin in the previous epoch (or is the creator for genesis)
+3. Verify `prevHash` matches `sha256(cbor(previousEpoch))`
+4. Verify `version = previousEpoch.version + 1` (or 0 for genesis)
+5. If any check fails, reject the epoch and the associated management message
+
+**Sender key gating:**
+SenderKeyDistribution messages are rejected from peers not present in the latest epoch's member list.
+
+**Backward compatibility:**
+Groups created before epoch support continue to use local DB membership checks. A warning is logged for groups without an epoch chain.
 
 ## Direct Messages
 

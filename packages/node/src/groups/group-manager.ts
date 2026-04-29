@@ -6,6 +6,12 @@ import {
   deriveKey,
   SenderKeys,
   fingerprintFromPublicKey,
+  createGenesisEpoch,
+  createSignedEpoch,
+  verifyEpoch,
+  serializeEpoch,
+  deserializeEpoch,
+  hashEpoch,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
@@ -13,6 +19,9 @@ import type {
   GroupEncryptedMessage,
   SenderKeyDistributionMessage,
   GroupManagementMessage,
+  GroupEpochMessage,
+  SignedGroupEpoch,
+  GroupMemberEntry,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { sha256 } from 'hash-wasm';
@@ -23,6 +32,7 @@ import type {
   MessageRepository,
   SenderKeyRepository,
   PeerRepository,
+  GroupEpochRepository,
 } from '../storage/repositories.js';
 
 const KEY_ROTATION_INTERVAL = 100;
@@ -34,6 +44,7 @@ export interface GroupManagerOptions {
   messages: MessageRepository;
   senderKeys: SenderKeyRepository;
   peers: PeerRepository;
+  epochs: GroupEpochRepository;
 }
 
 export class GroupManager extends EventEmitter {
@@ -43,6 +54,7 @@ export class GroupManager extends EventEmitter {
   private messageRepo: MessageRepository;
   private senderKeyRepo: SenderKeyRepository;
   private peerRepo: PeerRepository;
+  private epochRepo: GroupEpochRepository;
   private messageCounters = new Map<string, number>();
 
   constructor(options: GroupManagerOptions) {
@@ -53,6 +65,7 @@ export class GroupManager extends EventEmitter {
     this.messageRepo = options.messages;
     this.senderKeyRepo = options.senderKeys;
     this.peerRepo = options.peers;
+    this.epochRepo = options.epochs;
   }
 
   async createGroup(name: string): Promise<{
@@ -81,6 +94,12 @@ export class GroupManager extends EventEmitter {
 
     // Add self as member
     this.groupRepo.addMember(groupId, this.identity.edPublicKey, 'admin');
+
+    // Create and store genesis epoch
+    const groupIdHex = Buffer.from(groupId).toString('hex');
+    const genesisEpoch = createGenesisEpoch(groupIdHex, this.identity.edPublicKey);
+    const signedGenesis = createSignedEpoch(genesisEpoch, this.identity.edPrivateKey);
+    this.epochRepo.saveEpoch(signedGenesis);
 
     // Generate sender key
     const senderKeyState = SenderKeys.generate();
@@ -153,6 +172,18 @@ export class GroupManager extends EventEmitter {
       throw new Error('Group not found');
     }
 
+    const groupIdHex = Buffer.from(groupId).toString('hex');
+    const latestEpoch = this.epochRepo.getLatestEpoch(groupIdHex);
+
+    if (latestEpoch) {
+      if (!this.isAdminInEpoch(latestEpoch, this.identity.edPublicKey)) {
+        throw new Error('Not authorized: not admin in latest epoch');
+      }
+    } else if (group.role !== 'admin') {
+      console.warn('[GroupManager] No epoch chain found for group, falling back to local role check');
+      throw new Error('Not authorized to invite members');
+    }
+
     const peerFingerprint = fingerprintFromPublicKey(peerPublicKey);
     const session = this.swarm.getSession(peerFingerprint);
     if (!session) {
@@ -170,6 +201,26 @@ export class GroupManager extends EventEmitter {
 
     session.send(message);
     this.groupRepo.addMember(groupId, peerPublicKey, 'member');
+
+    // Create new epoch with member added
+    if (latestEpoch) {
+      const newMembers: GroupMemberEntry[] = [
+        ...latestEpoch.epoch.members,
+        { publicKey: peerPublicKey, role: 'member' as const },
+      ];
+      const newEpoch = {
+        version: latestEpoch.epoch.version + 1,
+        prevHash: latestEpoch.hash,
+        groupId: groupIdHex,
+        members: newMembers,
+        timestamp: Date.now(),
+        createdBy: this.identity.edPublicKey,
+      };
+      const signedEpoch = createSignedEpoch(newEpoch, this.identity.edPrivateKey);
+      this.epochRepo.saveEpoch(signedEpoch);
+      this.broadcastEpoch(groupId, signedEpoch);
+    }
+
     this.emit('group:invited', { groupId, peerPublicKey });
   }
 
@@ -178,7 +229,19 @@ export class GroupManager extends EventEmitter {
     memberPublicKey: Uint8Array,
   ): Promise<void> {
     const group = this.groupRepo.find(groupId);
-    if (!group || group.role !== 'admin') {
+    if (!group) {
+      throw new Error('Group not found');
+    }
+
+    const groupIdHex = Buffer.from(groupId).toString('hex');
+    const latestEpoch = this.epochRepo.getLatestEpoch(groupIdHex);
+
+    if (latestEpoch) {
+      if (!this.isAdminInEpoch(latestEpoch, this.identity.edPublicKey)) {
+        throw new Error('Not authorized: not admin in latest epoch');
+      }
+    } else if (group.role !== 'admin') {
+      console.warn('[GroupManager] No epoch chain found for group, falling back to local role check');
       throw new Error('Not authorized to kick members');
     }
 
@@ -203,6 +266,24 @@ export class GroupManager extends EventEmitter {
 
     this.groupRepo.removeMember(groupId, memberPublicKey);
     this.senderKeyRepo.delete(groupId, memberPublicKey);
+
+    // Create new epoch without the kicked member
+    if (latestEpoch) {
+      const newMembers = latestEpoch.epoch.members.filter(
+        (m) => !buffersEqual(m.publicKey, memberPublicKey),
+      );
+      const newEpoch = {
+        version: latestEpoch.epoch.version + 1,
+        prevHash: latestEpoch.hash,
+        groupId: groupIdHex,
+        members: newMembers,
+        timestamp: Date.now(),
+        createdBy: this.identity.edPublicKey,
+      };
+      const signedEpoch = createSignedEpoch(newEpoch, this.identity.edPrivateKey);
+      this.epochRepo.saveEpoch(signedEpoch);
+      this.broadcastEpoch(groupId, signedEpoch);
+    }
 
     // Rotate keys after kick
     await this.rotateKeys(groupId);
@@ -239,9 +320,19 @@ export class GroupManager extends EventEmitter {
   }
 
   handleSenderKeyDistribution(message: SenderKeyDistributionMessage): void {
-    // Store the sender key regardless of group membership.
-    // This handles the case where a peer distributes keys before we join
-    // the group -- we'll have the key ready when we do join.
+    const groupIdHex = Buffer.from(message.groupId).toString('hex');
+    const latestEpoch = this.epochRepo.getLatestEpoch(groupIdHex);
+
+    if (latestEpoch) {
+      const isMember = latestEpoch.epoch.members.some(
+        (m) => buffersEqual(m.publicKey, message.signingPublicKey),
+      );
+      if (!isMember) {
+        console.warn('[GroupManager] Rejecting sender key from non-member in latest epoch');
+        return;
+      }
+    }
+
     this.senderKeyRepo.store(
       message.groupId,
       message.signingPublicKey,
@@ -249,7 +340,6 @@ export class GroupManager extends EventEmitter {
       message.chainIndex,
     );
 
-    // If we are a member of this group, register the sender as a member
     const group = this.groupRepo.find(message.groupId);
     if (group) {
       this.groupRepo.addMember(message.groupId, message.signingPublicKey, 'member');
@@ -406,6 +496,17 @@ export class GroupManager extends EventEmitter {
   ): void {
     if (!session.peerPublicKey) return;
 
+    const groupIdHex = Buffer.from(message.groupId).toString('hex');
+    const latestEpoch = this.epochRepo.getLatestEpoch(groupIdHex);
+
+    // If we have an epoch chain, verify the sender is admin in the latest epoch
+    if (latestEpoch && (message.action === 'kick' || message.action === 'invite')) {
+      if (!this.isAdminInEpoch(latestEpoch, session.peerPublicKey)) {
+        console.warn('[GroupManager] Rejecting group management from non-admin peer');
+        return;
+      }
+    }
+
     switch (message.action) {
       case 'invite':
         this.emit('group:invited', {
@@ -420,13 +521,10 @@ export class GroupManager extends EventEmitter {
           message.targetFingerprint &&
           message.targetFingerprint === this.identity.fingerprint
         ) {
-          // We were kicked
           this.leaveGroup(message.groupId).catch((err) => {
             this.emit('error', err);
           });
         } else if (message.targetFingerprint) {
-          // We don't have the public key from just the fingerprint,
-          // but we can look up members to find and remove the right one
           const members = this.groupRepo.getMembers(message.groupId);
           for (const member of members) {
             const memberKey = new Uint8Array(member.public_key);
@@ -443,6 +541,88 @@ export class GroupManager extends EventEmitter {
           });
         }
         break;
+    }
+  }
+
+  handleGroupEpoch(
+    session: PeerSession,
+    message: GroupEpochMessage,
+  ): void {
+    if (!session.peerPublicKey) return;
+
+    const groupIdHex = Buffer.from(message.groupId).toString('hex');
+    const epochData = new Uint8Array(message.epochData);
+    const epoch = deserializeEpoch(epochData);
+    const computedHash = hashEpoch(epochData);
+
+    const signed: SignedGroupEpoch = {
+      epoch,
+      signature: message.signature,
+      hash: computedHash,
+    };
+
+    const latestEpoch = this.epochRepo.getLatestEpoch(groupIdHex);
+
+    if (latestEpoch) {
+      // Verify against the previous epoch
+      if (epoch.version !== latestEpoch.epoch.version + 1) {
+        console.warn('[GroupManager] Rejecting epoch: version mismatch');
+        return;
+      }
+
+      // createdBy must be admin in the PREVIOUS epoch
+      if (!this.isAdminInEpoch(latestEpoch, epoch.createdBy)) {
+        console.warn('[GroupManager] Rejecting epoch: creator is not admin in previous epoch');
+        return;
+      }
+
+      if (!verifyEpoch(signed, latestEpoch.hash)) {
+        console.warn('[GroupManager] Rejecting epoch: verification failed');
+        return;
+      }
+    } else {
+      // No existing chain -- verify as genesis
+      const zeroHash = new Uint8Array(32);
+      if (!verifyEpoch(signed, zeroHash)) {
+        console.warn('[GroupManager] Rejecting epoch: genesis verification failed');
+        return;
+      }
+    }
+
+    this.epochRepo.saveEpoch(signed);
+    this.emit('group:epochUpdated', { groupId: message.groupId, version: epoch.version });
+  }
+
+  private isAdminInEpoch(signed: SignedGroupEpoch, publicKey: Uint8Array): boolean {
+    return signed.epoch.members.some(
+      (m) => m.role === 'admin' && buffersEqual(m.publicKey, publicKey),
+    );
+  }
+
+  private broadcastEpoch(groupId: Uint8Array, signed: SignedGroupEpoch): void {
+    const serialized = serializeEpoch(signed.epoch);
+    const epochMessage: ProtocolMessage = {
+      type: MessageType.GroupEpoch,
+      groupId,
+      epochData: serialized,
+      signature: signed.signature,
+      hash: signed.hash,
+      timestamp: Date.now(),
+    };
+
+    const members = this.groupRepo.getMembers(groupId);
+    for (const member of members) {
+      const memberKey = new Uint8Array(member.public_key);
+      if (buffersEqual(memberKey, this.identity.edPublicKey)) continue;
+      const fp = fingerprintFromPublicKey(memberKey);
+      const session = this.swarm.getSession(fp);
+      if (session) {
+        try {
+          session.send(epochMessage);
+        } catch {
+          // Ignore send errors
+        }
+      }
     }
   }
 
