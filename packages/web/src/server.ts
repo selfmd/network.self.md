@@ -7,6 +7,7 @@
 
 import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
+import helmet from '@fastify/helmet';
 import { createHash } from 'node:crypto';
 import { createId } from '@paralleldrive/cuid2';
 import { ApprovalQueue } from './approval.js';
@@ -60,6 +61,9 @@ export class TTYAServer {
   async start(): Promise<string> {
     const app = Fastify({ logger: false });
     this.app = app;
+
+    // Register security headers
+    await app.register(helmet);
 
     // Register WebSocket support
     await app.register(websocket);

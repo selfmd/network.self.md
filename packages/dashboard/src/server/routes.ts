@@ -1,5 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Agent } from '@networkselfmd/node';
 import type { ApiStatus, ApiPeer, ApiState, ApiStateDetail, ApiDiscoveredState, ApiJoinResponse, ApiIdentity } from './types.js';
@@ -61,6 +63,9 @@ export async function buildApp({ agent }: DashboardAgent) {
       callback(null, isAllowedLocalOrigin(origin));
     },
   });
+
+  await app.register(helmet);
+  await app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
 
   const startedAt = Date.now();
 

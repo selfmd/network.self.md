@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
+    "@fastify/helmet": "^13.0.0",
+    "@fastify/rate-limit": "^10.2.0",
     "@fastify/static": "^9.1.1",
     "@networkselfmd/node": "workspace:*",
     "fastify": "^5.2.0",

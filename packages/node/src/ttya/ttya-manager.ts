@@ -30,6 +30,7 @@ export interface TTYAVisitor {
   ipHash: string;
   timestamp: number;
   status: 'pending' | 'approved' | 'rejected';
+  lastActivity: number;
 }
 
 /** Maximum clock skew allowed for auth frame timestamps (5 minutes) */
@@ -37,6 +38,12 @@ const AUTH_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
 
 /** Time to wait for auth frame before disconnecting (5 seconds) */
 const AUTH_TIMEOUT_MS = 5_000;
+
+/** Interval for visitor cleanup (5 minutes) */
+const VISITOR_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Visitors with no activity for this long are removed (30 minutes) */
+const VISITOR_STALE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Auth frame sent by bridge as first message */
 interface TTYAAuthFrame {
@@ -127,6 +134,7 @@ export class TTYAManager extends EventEmitter {
   private authenticated = false;
   private bridgePublicKey: Uint8Array | null = null;
   private authTimeout: ReturnType<typeof setTimeout> | null = null;
+  private visitorCleanupTimer: ReturnType<typeof setInterval> | null = null;
   isRunning = false;
 
   constructor(edPublicKey: Uint8Array) {
@@ -187,11 +195,21 @@ export class TTYAManager extends EventEmitter {
     const discovery = this.swarm.join(Buffer.from(topic), { server: true, client: true });
     await discovery.flushed();
     this.isRunning = true;
+
+    // Periodically remove stale visitors to prevent memory leaks
+    this.visitorCleanupTimer = setInterval(() => {
+      this.cleanupStaleVisitors();
+    }, VISITOR_CLEANUP_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
+
+    if (this.visitorCleanupTimer) {
+      clearInterval(this.visitorCleanupTimer);
+      this.visitorCleanupTimer = null;
+    }
 
     this.clearAuthTimeout();
 
@@ -315,6 +333,15 @@ export class TTYAManager extends EventEmitter {
     }
   }
 
+  private cleanupStaleVisitors(): void {
+    const now = Date.now();
+    for (const [id, visitor] of this.visitors) {
+      if (now - visitor.lastActivity > VISITOR_STALE_TIMEOUT_MS) {
+        this.visitors.delete(id);
+      }
+    }
+  }
+
   private verifyAuthFrame(frame: TTYAAuthFrame): boolean {
     // Check timestamp within tolerance
     const now = Date.now();
@@ -352,7 +379,11 @@ export class TTYAManager extends EventEmitter {
         ipHash: req.metadata.ipHash,
         timestamp: req.metadata.timestamp,
         status: 'pending',
+        lastActivity: Date.now(),
       });
+    } else {
+      const visitor = this.visitors.get(req.visitorId)!;
+      visitor.lastActivity = Date.now();
     }
 
     this.emit('visitor:request', {
