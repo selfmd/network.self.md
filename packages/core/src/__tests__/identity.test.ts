@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateIdentity, fingerprintFromPublicKey, zBase32Encode } from '../identity.js';
+import { x25519 } from '@noble/curves/ed25519';
 
 describe('identity', () => {
   it('generates a valid identity with all key fields', () => {
@@ -42,5 +43,11 @@ describe('identity', () => {
   it('generates identity without display name', () => {
     const identity = generateIdentity();
     expect(identity.displayName).toBeUndefined();
+  });
+
+  it('xPublicKey is correctly derived from xPrivateKey', () => {
+    const identity = generateIdentity('key-check');
+    const expectedXPublicKey = x25519.getPublicKey(identity.xPrivateKey);
+    expect(identity.xPublicKey).toEqual(expectedXPublicKey);
   });
 });

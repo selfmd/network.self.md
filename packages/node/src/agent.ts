@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { argon2id } from 'hash-wasm';
 import {
   generateIdentity,
+  deriveX25519KeyPair,
   fingerprintFromPublicKey,
   encrypt,
   decrypt,
@@ -473,10 +474,8 @@ export class Agent extends EventEmitter {
         }
       }
 
-      // When loading from storage, we don't have x keys stored,
-      // so derive placeholder values. In a full implementation these would be stored too.
-      const xPrivateKey = deriveKey(edPrivateKey, 'x25519-private', '', 32);
-      const xPublicKey = deriveKey(edPublicKey, 'x25519-public', '', 32);
+      // Derive X25519 keys from Ed25519 keys using proper curve conversion
+      const { xPrivateKey, xPublicKey } = deriveX25519KeyPair(edPrivateKey);
 
       this.identity = {
         edPublicKey,
