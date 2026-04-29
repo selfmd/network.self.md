@@ -43,10 +43,10 @@ export class TTYAServer {
   private rateLimitMap = new Map<string, number>(); // visitorId -> last message timestamp
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: Partial<TTYAServerConfig> & Pick<TTYAServerConfig, 'agentFingerprint' | 'agentEdPublicKey'>) {
+  constructor(config: Partial<TTYAServerConfig> & Pick<TTYAServerConfig, 'agentFingerprint' | 'agentEdPublicKey' | 'ttyaAuthSecret'>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
 
-    this.bridge = new TTYABridge(this.config.agentEdPublicKey);
+    this.bridge = new TTYABridge(this.config.agentEdPublicKey, this.config.ttyaAuthSecret);
     this.queue = new ApprovalQueue({
       maxPending: this.config.maxPendingVisitors,
       autoApprove: this.config.autoApprove,

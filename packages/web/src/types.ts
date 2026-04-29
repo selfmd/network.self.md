@@ -51,10 +51,12 @@ export interface TTYAServerConfig {
   sessionTimeout: number;
   agentFingerprint: string;
   agentEdPublicKey: Uint8Array;
+  /** Pre-shared secret for TTYA bridge authentication (HMAC challenge-response) */
+  ttyaAuthSecret: Uint8Array;
 }
 
 /** Default configuration values */
-export const DEFAULT_CONFIG: Omit<TTYAServerConfig, 'agentFingerprint' | 'agentEdPublicKey'> = {
+export const DEFAULT_CONFIG: Omit<TTYAServerConfig, 'agentFingerprint' | 'agentEdPublicKey' | 'ttyaAuthSecret'> = {
   port: 3000,
   host: '0.0.0.0',
   autoApprove: false,

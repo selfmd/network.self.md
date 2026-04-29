@@ -7,9 +7,7 @@
  */
 
 import Hyperswarm from 'hyperswarm';
-import b4a from 'b4a';
 import { createHmac } from 'node:crypto';
-import { sign, generateIdentity } from '@networkselfmd/core';
 import type { TTYARequest, TTYAResponse } from './types.js';
 
 /** Maximum allowed TTYA frame payload size (64 KB). Prevents OOM from malicious peers. */
@@ -106,31 +104,36 @@ function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: numb
   return { responses, consumed: offset };
 }
 
-const MAX_PENDING_REQUESTS = 1000;
-
-/** Encode a uint64 as 8-byte big-endian buffer */
-function uint64BE(n: number): Buffer {
-  const buf = Buffer.alloc(8);
-  buf.writeBigUInt64BE(BigInt(n), 0);
-  return buf;
+/** Challenge frame sent by agent to bridge on connection */
+interface TTYAChallengeFrame {
+  type: 'ttya-challenge';
+  challenge: string; // hex-encoded 32 random bytes
 }
+
+function isValidChallengeFrame(obj: unknown): obj is TTYAChallengeFrame {
+  if (obj === null || typeof obj !== 'object') return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    o.type === 'ttya-challenge' &&
+    typeof o.challenge === 'string'
+  );
+}
+
+const MAX_PENDING_REQUESTS = 1000;
 
 export class TTYABridge {
   private agentEdPublicKey: Uint8Array;
+  private authSecret: Uint8Array;
   private swarm: Hyperswarm | null = null;
   private agentConnection: any = null;
   private responseHandler: ((response: TTYAResponse) => void) | null = null;
   private pendingRequests: TTYARequest[] = [];
   private receiveBuffer = Buffer.alloc(0);
-  private bridgeEdPublicKey: Uint8Array;
-  private bridgeEdPrivateKey: Uint8Array;
+  private authenticated = false;
 
-  constructor(agentEdPublicKey: Uint8Array) {
+  constructor(agentEdPublicKey: Uint8Array, authSecret: Uint8Array) {
     this.agentEdPublicKey = agentEdPublicKey;
-    // Generate ephemeral Ed25519 keypair for bridge authentication
-    const identity = generateIdentity();
-    this.bridgeEdPublicKey = identity.edPublicKey;
-    this.bridgeEdPrivateKey = identity.edPrivateKey;
+    this.authSecret = authSecret;
   }
 
   /**
@@ -152,15 +155,9 @@ export class TTYABridge {
 
     this.swarm.on('connection', (conn: any, _info: any) => {
       this.agentConnection = conn;
+      this.authenticated = false;
 
-      // Send auth frame before any TTYARequests
-      this.sendAuthFrame();
-
-      // Flush any requests that queued before the agent connected
-      for (const req of this.pendingRequests) {
-        this.writeRequest(req);
-      }
-      this.pendingRequests = [];
+      // Don't send requests yet — wait for challenge from agent
 
       conn.on('data', (chunk: Buffer) => {
         this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);
@@ -177,11 +174,13 @@ export class TTYABridge {
 
       conn.on('close', () => {
         this.agentConnection = null;
+        this.authenticated = false;
         this.receiveBuffer = Buffer.alloc(0);
       });
 
       conn.on('error', () => {
         this.agentConnection = null;
+        this.authenticated = false;
         this.receiveBuffer = Buffer.alloc(0);
       });
     });
@@ -211,6 +210,7 @@ export class TTYABridge {
 
     this.receiveBuffer = Buffer.alloc(0);
     this.pendingRequests = [];
+    this.authenticated = false;
   }
 
   /**
@@ -218,7 +218,7 @@ export class TTYABridge {
    * If agent is not connected yet, the request is queued.
    */
   sendToAgent(request: TTYARequest): void {
-    if (this.agentConnection) {
+    if (this.agentConnection && this.authenticated) {
       this.writeRequest(request);
     } else {
       if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
@@ -238,30 +238,27 @@ export class TTYABridge {
 
   /** Whether we have an active connection to the agent node */
   get isConnected(): boolean {
-    return this.agentConnection !== null;
+    return this.agentConnection !== null && this.authenticated;
   }
 
   /**
-   * Send an authentication frame to the agent.
-   * Must be the first message on a new connection.
+   * Send a challenge-response HMAC back to the agent.
    */
-  private sendAuthFrame(): void {
+  private sendChallengeResponse(challenge: string): void {
     if (!this.agentConnection) return;
-    const timestamp = Date.now();
-    const payload = Buffer.concat([
-      Buffer.from(this.agentEdPublicKey),
-      uint64BE(timestamp),
-    ]);
-    const signature = sign(payload, this.bridgeEdPrivateKey);
 
-    const authFrame = {
-      type: 'ttya-auth',
-      bridgePublicKey: Buffer.from(this.bridgeEdPublicKey).toString('hex'),
-      timestamp,
-      signature: Buffer.from(signature).toString('hex'),
+    const challengeBytes = Buffer.from(challenge, 'hex');
+    const hmacValue = createHmac('sha256', this.authSecret)
+      .update(challengeBytes)
+      .digest()
+      .toString('hex');
+
+    const responseFrame = {
+      type: 'ttya-challenge-response',
+      hmac: hmacValue,
     };
 
-    const json = JSON.stringify(authFrame);
+    const json = JSON.stringify(responseFrame);
     const jsonBuf = Buffer.from(json, 'utf-8');
     const frame = Buffer.alloc(4 + jsonBuf.length);
     frame.writeUInt32BE(jsonBuf.length, 0);
@@ -285,6 +282,52 @@ export class TTYABridge {
   }
 
   private processReceiveBuffer(): void {
+    // If not authenticated, expect the first frame to be a challenge from the agent
+    if (!this.authenticated) {
+      if (this.receiveBuffer.length < 4) return;
+      const len = this.receiveBuffer.readUInt32BE(0);
+      if (len > MAX_TTYA_FRAME_SIZE) {
+        console.warn('[TTYABridge] Challenge frame too large, destroying connection');
+        this.receiveBuffer = Buffer.alloc(0);
+        if (this.agentConnection) this.agentConnection.destroy();
+        return;
+      }
+      if (this.receiveBuffer.length < 4 + len) return;
+
+      const payload = this.receiveBuffer.subarray(4, 4 + len);
+      this.receiveBuffer = Buffer.from(this.receiveBuffer.subarray(4 + len));
+
+      try {
+        const parsed: unknown = JSON.parse(payload.toString('utf-8'));
+        if (isValidChallengeFrame(parsed)) {
+          // Respond with HMAC
+          this.sendChallengeResponse(parsed.challenge);
+          this.authenticated = true;
+
+          // Flush any requests that queued before authentication
+          for (const req of this.pendingRequests) {
+            this.writeRequest(req);
+          }
+          this.pendingRequests = [];
+
+          // Continue processing any remaining data in the buffer
+          if (this.receiveBuffer.length > 0) {
+            this.processReceiveBuffer();
+          }
+          return;
+        }
+      } catch {
+        // malformed frame
+      }
+
+      // Challenge parsing failed — destroy connection
+      console.warn('[TTYABridge] Failed to parse challenge frame, destroying connection');
+      this.receiveBuffer = Buffer.alloc(0);
+      if (this.agentConnection) this.agentConnection.destroy();
+      return;
+    }
+
+    // Authenticated — process TTYAResponse frames normally
     let responses: TTYAResponse[];
     let consumed: number;
     try {

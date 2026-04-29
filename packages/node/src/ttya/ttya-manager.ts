@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import Hyperswarm from 'hyperswarm';
-import { deriveKey, verify } from '@networkselfmd/core';
+import { deriveKey } from '@networkselfmd/core';
 
 /** TTYA request sent from web bridge to agent node via Hyperswarm */
 export interface TTYARequest {
@@ -33,10 +34,7 @@ export interface TTYAVisitor {
   lastActivity: number;
 }
 
-/** Maximum clock skew allowed for auth frame timestamps (5 minutes) */
-const AUTH_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
-
-/** Time to wait for auth frame before disconnecting (5 seconds) */
+/** Time to wait for challenge-response before disconnecting (5 seconds) */
 const AUTH_TIMEOUT_MS = 5_000;
 
 /** Interval for visitor cleanup (5 minutes) */
@@ -45,22 +43,24 @@ const VISITOR_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 /** Visitors with no activity for this long are removed (30 minutes) */
 const VISITOR_STALE_TIMEOUT_MS = 30 * 60 * 1000;
 
-/** Auth frame sent by bridge as first message */
-interface TTYAAuthFrame {
-  type: 'ttya-auth';
-  bridgePublicKey: string;
-  timestamp: number;
-  signature: string;
+/** Challenge frame sent by agent to bridge on connection */
+interface TTYAChallengeFrame {
+  type: 'ttya-challenge';
+  challenge: string; // hex-encoded 32 random bytes
 }
 
-function isValidAuthFrame(obj: unknown): obj is TTYAAuthFrame {
+/** Challenge-response frame sent by bridge back to agent */
+interface TTYAChallengeResponseFrame {
+  type: 'ttya-challenge-response';
+  hmac: string; // hex-encoded HMAC-SHA256(authSecret, challenge)
+}
+
+function isValidChallengeResponseFrame(obj: unknown): obj is TTYAChallengeResponseFrame {
   if (obj === null || typeof obj !== 'object') return false;
   const o = obj as Record<string, unknown>;
   return (
-    o.type === 'ttya-auth' &&
-    typeof o.bridgePublicKey === 'string' &&
-    typeof o.timestamp === 'number' &&
-    typeof o.signature === 'string'
+    o.type === 'ttya-challenge-response' &&
+    typeof o.hmac === 'string'
   );
 }
 
@@ -89,7 +89,7 @@ function isValidTTYARequest(obj: unknown): obj is TTYARequest {
   return true;
 }
 
-function encodeFrame(msg: TTYAResponse): Buffer {
+function encodeFrame(msg: TTYAResponse | TTYAChallengeFrame): Buffer {
   const json = JSON.stringify(msg);
   const payload = Buffer.from(json, 'utf-8');
   const frame = Buffer.alloc(4 + payload.length);
@@ -127,19 +127,21 @@ function decodeFrames(data: Buffer): { requests: TTYARequest[]; consumed: number
 
 export class TTYAManager extends EventEmitter {
   private edPublicKey: Uint8Array;
+  private authSecret: Uint8Array;
   private swarm: Hyperswarm | null = null;
   private bridgeConnection: any = null;
   private receiveBuffer = Buffer.alloc(0);
   private visitors = new Map<string, TTYAVisitor>();
   private authenticated = false;
-  private bridgePublicKey: Uint8Array | null = null;
+  private pendingChallenge: Buffer | null = null;
   private authTimeout: ReturnType<typeof setTimeout> | null = null;
   private visitorCleanupTimer: ReturnType<typeof setInterval> | null = null;
   isRunning = false;
 
-  constructor(edPublicKey: Uint8Array) {
+  constructor(edPublicKey: Uint8Array, authSecret: Uint8Array) {
     super();
     this.edPublicKey = edPublicKey;
+    this.authSecret = authSecret;
   }
 
   async start(): Promise<void> {
@@ -151,9 +153,23 @@ export class TTYAManager extends EventEmitter {
       this.bridgeConnection = conn;
       this.receiveBuffer = Buffer.alloc(0);
       this.authenticated = false;
-      this.bridgePublicKey = null;
+      this.pendingChallenge = null;
 
-      // Require auth frame within AUTH_TIMEOUT_MS
+      // Send challenge to the bridge
+      const challenge = randomBytes(32);
+      this.pendingChallenge = challenge;
+      const challengeFrame: TTYAChallengeFrame = {
+        type: 'ttya-challenge',
+        challenge: challenge.toString('hex'),
+      };
+      try {
+        conn.write(encodeFrame(challengeFrame));
+      } catch {
+        conn.destroy();
+        return;
+      }
+
+      // Require challenge-response within AUTH_TIMEOUT_MS
       this.authTimeout = setTimeout(() => {
         if (!this.authenticated && this.bridgeConnection === conn) {
           console.warn('[TTYAManager] Auth timeout — destroying connection');
@@ -178,7 +194,7 @@ export class TTYAManager extends EventEmitter {
         this.clearAuthTimeout();
         this.bridgeConnection = null;
         this.authenticated = false;
-        this.bridgePublicKey = null;
+        this.pendingChallenge = null;
         this.receiveBuffer = Buffer.alloc(0);
       });
 
@@ -186,7 +202,7 @@ export class TTYAManager extends EventEmitter {
         this.clearAuthTimeout();
         this.bridgeConnection = null;
         this.authenticated = false;
-        this.bridgePublicKey = null;
+        this.pendingChallenge = null;
         this.receiveBuffer = Buffer.alloc(0);
       });
     });
@@ -229,7 +245,7 @@ export class TTYAManager extends EventEmitter {
 
     this.visitors.clear();
     this.authenticated = false;
-    this.bridgePublicKey = null;
+    this.pendingChallenge = null;
     this.receiveBuffer = Buffer.alloc(0);
   }
 
@@ -275,7 +291,7 @@ export class TTYAManager extends EventEmitter {
   }
 
   private processBuffer(conn?: any): void {
-    // If not authenticated, expect the first frame to be an auth frame
+    // If not authenticated, expect the first frame to be a challenge-response
     if (!this.authenticated) {
       // Need at least 4 bytes for the length prefix
       if (this.receiveBuffer.length < 4) return;
@@ -287,10 +303,10 @@ export class TTYAManager extends EventEmitter {
 
       try {
         const parsed: unknown = JSON.parse(payload.toString('utf-8'));
-        if (isValidAuthFrame(parsed)) {
-          if (this.verifyAuthFrame(parsed)) {
+        if (isValidChallengeResponseFrame(parsed)) {
+          if (this.verifyChallengeResponse(parsed)) {
             this.authenticated = true;
-            this.bridgePublicKey = Buffer.from(parsed.bridgePublicKey, 'hex');
+            this.pendingChallenge = null;
             this.clearAuthTimeout();
             // Continue processing any remaining data in the buffer
             if (this.receiveBuffer.length > 0) {
@@ -342,24 +358,23 @@ export class TTYAManager extends EventEmitter {
     }
   }
 
-  private verifyAuthFrame(frame: TTYAAuthFrame): boolean {
-    // Check timestamp within tolerance
-    const now = Date.now();
-    const diff = Math.abs(now - frame.timestamp);
-    if (diff > AUTH_TIMESTAMP_TOLERANCE_MS) {
-      console.warn('[TTYAManager] Auth frame timestamp out of range:', diff, 'ms');
+  private verifyChallengeResponse(frame: TTYAChallengeResponseFrame): boolean {
+    if (!this.pendingChallenge) {
+      console.warn('[TTYAManager] No pending challenge for verification');
       return false;
     }
 
-    // Verify signature: sign(agentPublicKey || uint64BE(timestamp))
     try {
-      const timestampBuf = Buffer.alloc(8);
-      timestampBuf.writeBigUInt64BE(BigInt(frame.timestamp), 0);
-      const message = Buffer.concat([Buffer.from(this.edPublicKey), timestampBuf]);
-      const signature = Buffer.from(frame.signature, 'hex');
-      const bridgePubKey = Buffer.from(frame.bridgePublicKey, 'hex');
+      const expectedHmac = createHmac('sha256', this.authSecret)
+        .update(this.pendingChallenge)
+        .digest();
+      const receivedHmac = Buffer.from(frame.hmac, 'hex');
 
-      return verify(signature, message, bridgePubKey);
+      if (receivedHmac.length !== expectedHmac.length) {
+        return false;
+      }
+
+      return timingSafeEqual(expectedHmac, receivedHmac);
     } catch {
       return false;
     }
