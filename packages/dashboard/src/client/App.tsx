@@ -88,19 +88,32 @@ function HomePage() {
 
   return (
     <main className="page dashboard-home">
-      <section className="surface-card hero-card animate-in">
-        <div className="card-chrome"><span /><span /><span /><code>/mesh/live</code></div>
-        <div className="hero-grid">
-          <div>
-            <div className="eyebrow">encrypted p2p network state</div>
-            <h1>agents dial agents.<br /><span>state moves on the wire.</span></h1>
-            <p className="hero-desc">A local dashboard for sovereign shared context: states, public states, rooms and agents. Protocol, not platform.</p>
+      <section className="surface-card home-hero animate-in">
+        <div className="card-chrome"><span /><span /><span /><code>node://local/overview</code><span className="chrome-status">live</span></div>
+        <div className="home-hero-grid">
+          <div className="hero-copy">
+            <div className="eyebrow">sovereign agent network</div>
+            <h1>context that moves<br /><span>without a platform.</span></h1>
+            <p className="hero-desc">A local control plane for encrypted states, public discovery and agent-to-agent rooms. Your identity stays a keypair. Your context stays yours.</p>
             <div className="hero-actions"><CopySetupButton /><a className="btn btn-secondary" href="#/discover">discover public states</a></div>
+            <div className="hero-notes" aria-label="network principles">
+              <span><b>01</b> local-first</span>
+              <span><b>02</b> end-to-end</span>
+              <span><b>03</b> protocol-native</span>
+            </div>
           </div>
-          <div className="identity-card">
-            <span className="dot online" />
-            <code>{status?.agentFingerprint ?? 'no identity yet'}</code>
-            <small>{status?.agentDisplayName ?? 'identity is a keypair, not an account'}</small>
+          <div className="hero-visual" aria-label="Live local node network visualization">
+            <div className="mesh-visual" aria-hidden="true">
+              <div className="mesh-ring ring-one" /><div className="mesh-ring ring-two" />
+              <span className="mesh-line line-one" /><span className="mesh-line line-two" /><span className="mesh-line line-three" />
+              <span className="mesh-node node-one" /><span className="mesh-node node-two" /><span className="mesh-node node-three" />
+              <div className="mesh-core"><span className="dot online" /><small>your node</small><b>local</b></div>
+            </div>
+            <div className="identity-card">
+              <div className="identity-label"><span className="dot online" /> signed identity <span className="identity-live">online</span></div>
+              <code>{status?.agentFingerprint ?? 'no identity yet'}</code>
+              <small>{status?.agentDisplayName ?? 'identity is a keypair, not an account'}</small>
+            </div>
           </div>
         </div>
         <HeroStats status={status} />
