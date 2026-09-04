@@ -1,7 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import Hyperswarm from 'hyperswarm';
-import { deriveKey } from '@networkselfmd/core';
+import {
+  MAX_TTYA_FRAME_SIZE,
+  TTYA_AUTH_NONCE_BYTES,
+  TTYA_AUTH_VERSION,
+  buildTTYAAuthProofPayload,
+  deriveKey,
+  isTTYAAuthResponseFrame,
+  type TTYAAuthChallengeFrame,
+  type TTYAAuthConfirmationFrame,
+  type TTYAAuthResponseFrame,
+} from '@networkselfmd/core';
 
 /** TTYA request sent from web bridge to agent node via Hyperswarm */
 export interface TTYARequest {
@@ -43,30 +53,6 @@ const VISITOR_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 /** Visitors with no activity for this long are removed (30 minutes) */
 const VISITOR_STALE_TIMEOUT_MS = 30 * 60 * 1000;
 
-/** Challenge frame sent by agent to bridge on connection */
-interface TTYAChallengeFrame {
-  type: 'ttya-challenge';
-  challenge: string; // hex-encoded 32 random bytes
-}
-
-/** Challenge-response frame sent by bridge back to agent */
-interface TTYAChallengeResponseFrame {
-  type: 'ttya-challenge-response';
-  hmac: string; // hex-encoded HMAC-SHA256(authSecret, challenge)
-}
-
-function isValidChallengeResponseFrame(obj: unknown): obj is TTYAChallengeResponseFrame {
-  if (obj === null || typeof obj !== 'object') return false;
-  const o = obj as Record<string, unknown>;
-  return (
-    o.type === 'ttya-challenge-response' &&
-    typeof o.hmac === 'string'
-  );
-}
-
-/** Maximum allowed TTYA frame payload size (64 KB). Prevents OOM from malicious peers. */
-const MAX_TTYA_FRAME_SIZE = 65536;
-
 const VALID_REQUEST_ACTIONS = new Set(['message', 'connect', 'disconnect']);
 
 /**
@@ -89,9 +75,14 @@ function isValidTTYARequest(obj: unknown): obj is TTYARequest {
   return true;
 }
 
-function encodeFrame(msg: TTYAResponse | TTYAChallengeFrame): Buffer {
+function encodeFrame(
+  msg: TTYAResponse | TTYAAuthChallengeFrame | TTYAAuthConfirmationFrame,
+): Buffer {
   const json = JSON.stringify(msg);
   const payload = Buffer.from(json, 'utf-8');
+  if (payload.length > MAX_TTYA_FRAME_SIZE) {
+    throw new Error('TTYA frame exceeds maximum size');
+  }
   const frame = Buffer.alloc(4 + payload.length);
   frame.writeUInt32BE(payload.length, 0);
   payload.copy(frame, 4);
@@ -133,7 +124,7 @@ export class TTYAManager extends EventEmitter {
   private receiveBuffer = Buffer.alloc(0);
   private visitors = new Map<string, TTYAVisitor>();
   private authenticated = false;
-  private pendingChallenge: Buffer | null = null;
+  private pendingAgentNonce: string | null = null;
   private authTimeout: ReturnType<typeof setTimeout> | null = null;
   private visitorCleanupTimer: ReturnType<typeof setInterval> | null = null;
   isRunning = false;
@@ -150,61 +141,68 @@ export class TTYAManager extends EventEmitter {
     this.swarm = new Hyperswarm();
 
     this.swarm.on('connection', (conn: any, _info: any) => {
-      this.bridgeConnection = conn;
-      this.receiveBuffer = Buffer.alloc(0);
-      this.authenticated = false;
-      this.pendingChallenge = null;
-
-      // Send challenge to the bridge
-      const challenge = randomBytes(32);
-      this.pendingChallenge = challenge;
-      const challengeFrame: TTYAChallengeFrame = {
-        type: 'ttya-challenge',
-        challenge: challenge.toString('hex'),
-      };
-      try {
-        conn.write(encodeFrame(challengeFrame));
-      } catch {
+      if (this.bridgeConnection && this.authenticated) {
         conn.destroy();
         return;
       }
 
-      // Require challenge-response within AUTH_TIMEOUT_MS
-      this.authTimeout = setTimeout(() => {
-        if (!this.authenticated && this.bridgeConnection === conn) {
-          console.warn('[TTYAManager] Auth timeout — destroying connection');
-          conn.destroy();
+      if (this.bridgeConnection) {
+        const previousConnection = this.bridgeConnection;
+        this.bridgeConnection = null;
+        this.clearAuthTimeout();
+        try {
+          previousConnection.destroy();
+        } catch {
+          // ignore a stale unauthenticated connection
         }
-      }, AUTH_TIMEOUT_MS);
+      }
+
+      this.bridgeConnection = conn;
+      this.receiveBuffer = Buffer.alloc(0);
+      this.authenticated = false;
+      this.pendingAgentNonce = null;
 
       conn.on('data', (chunk: Buffer) => {
+        if (this.bridgeConnection !== conn) return;
         this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);
+        this.processBuffer(conn);
 
         if (this.receiveBuffer.length > MAX_TTYA_FRAME_SIZE + 4) {
-          console.warn(`[TTYAManager] Receive buffer exceeded max size (${this.receiveBuffer.length} bytes), destroying connection`);
-          this.receiveBuffer = Buffer.alloc(0);
-          conn.destroy();
-          return;
+          console.warn('[TTYAManager] Incomplete frame exceeded maximum size; closing peer');
+          this.destroyConnection(conn);
         }
-
-        this.processBuffer(conn);
       });
 
       conn.on('close', () => {
-        this.clearAuthTimeout();
-        this.bridgeConnection = null;
-        this.authenticated = false;
-        this.pendingChallenge = null;
-        this.receiveBuffer = Buffer.alloc(0);
+        this.handleConnectionClosed(conn);
       });
 
       conn.on('error', () => {
-        this.clearAuthTimeout();
-        this.bridgeConnection = null;
-        this.authenticated = false;
-        this.pendingChallenge = null;
-        this.receiveBuffer = Buffer.alloc(0);
+        this.handleConnectionClosed(conn);
       });
+
+      // Register all connection handlers before starting the handshake.
+      const agentNonce = randomBytes(TTYA_AUTH_NONCE_BYTES).toString('hex');
+      this.pendingAgentNonce = agentNonce;
+      const challengeFrame: TTYAAuthChallengeFrame = {
+        type: 'ttya-auth-challenge',
+        version: TTYA_AUTH_VERSION,
+        agentNonce,
+      };
+
+      this.authTimeout = setTimeout(() => {
+        if (!this.authenticated && this.bridgeConnection === conn) {
+          console.warn('[TTYAManager] Authentication timed out; closing peer');
+          this.destroyConnection(conn);
+        }
+      }, AUTH_TIMEOUT_MS);
+
+      try {
+        conn.write(encodeFrame(challengeFrame));
+      } catch {
+        this.destroyConnection(conn);
+        return;
+      }
     });
 
     const topic = deriveKey(this.edPublicKey, 'networkselfmd-ttya-v1', '', 32);
@@ -245,7 +243,7 @@ export class TTYAManager extends EventEmitter {
 
     this.visitors.clear();
     this.authenticated = false;
-    this.pendingChallenge = null;
+    this.pendingAgentNonce = null;
     this.receiveBuffer = Buffer.alloc(0);
   }
 
@@ -275,11 +273,11 @@ export class TTYAManager extends EventEmitter {
   }
 
   private sendResponse(response: TTYAResponse): void {
-    if (!this.bridgeConnection) return;
+    if (!this.bridgeConnection || !this.authenticated) return;
     try {
       this.bridgeConnection.write(encodeFrame(response));
     } catch {
-      // connection may have dropped
+      this.destroyConnection(this.bridgeConnection);
     }
   }
 
@@ -291,11 +289,19 @@ export class TTYAManager extends EventEmitter {
   }
 
   private processBuffer(conn?: any): void {
+    const activeConnection = conn || this.bridgeConnection;
+    if (!activeConnection || this.bridgeConnection !== activeConnection) return;
+
     // If not authenticated, expect the first frame to be a challenge-response
     if (!this.authenticated) {
       // Need at least 4 bytes for the length prefix
       if (this.receiveBuffer.length < 4) return;
       const len = this.receiveBuffer.readUInt32BE(0);
+      if (len > MAX_TTYA_FRAME_SIZE) {
+        console.warn('[TTYAManager] Authentication frame exceeded maximum size; closing peer');
+        this.destroyConnection(activeConnection);
+        return;
+      }
       if (this.receiveBuffer.length < 4 + len) return;
 
       const payload = this.receiveBuffer.subarray(4, 4 + len);
@@ -303,14 +309,21 @@ export class TTYAManager extends EventEmitter {
 
       try {
         const parsed: unknown = JSON.parse(payload.toString('utf-8'));
-        if (isValidChallengeResponseFrame(parsed)) {
-          if (this.verifyChallengeResponse(parsed)) {
+        if (isTTYAAuthResponseFrame(parsed)) {
+          if (this.verifyBridgeResponse(parsed)) {
+            const confirmation = this.createAuthConfirmation(parsed);
+            try {
+              activeConnection.write(encodeFrame(confirmation));
+            } catch {
+              this.destroyConnection(activeConnection);
+              return;
+            }
             this.authenticated = true;
-            this.pendingChallenge = null;
+            this.pendingAgentNonce = null;
             this.clearAuthTimeout();
             // Continue processing any remaining data in the buffer
             if (this.receiveBuffer.length > 0) {
-              this.processBuffer(conn);
+              this.processBuffer(activeConnection);
             }
             return;
           }
@@ -320,11 +333,8 @@ export class TTYAManager extends EventEmitter {
       }
 
       // Auth failed — destroy connection
-      console.warn('[TTYAManager] Auth failed — destroying connection');
-      const target = conn || this.bridgeConnection;
-      if (target) {
-        try { target.destroy(); } catch { /* ignore */ }
-      }
+      console.warn('[TTYAManager] Mutual authentication failed; closing peer');
+      this.destroyConnection(activeConnection);
       return;
     }
 
@@ -333,14 +343,11 @@ export class TTYAManager extends EventEmitter {
     let consumed: number;
     try {
       ({ requests, consumed } = decodeFrames(this.receiveBuffer));
-    } catch (err) {
-      console.warn('[TTYAManager] Frame decode error, clearing buffer:', err);
-      this.receiveBuffer = Buffer.alloc(0);
-      const target = conn || this.bridgeConnection;
-      if (target) { try { target.destroy(); } catch { /* ignore */ } }
+    } catch {
+      console.warn('[TTYAManager] Invalid request frame; closing peer');
+      this.destroyConnection(activeConnection);
       return;
     }
-    if (requests.length === 0) return;
 
     this.receiveBuffer = Buffer.from(this.receiveBuffer.subarray(consumed));
 
@@ -358,17 +365,26 @@ export class TTYAManager extends EventEmitter {
     }
   }
 
-  private verifyChallengeResponse(frame: TTYAChallengeResponseFrame): boolean {
-    if (!this.pendingChallenge) {
+  private verifyBridgeResponse(frame: TTYAAuthResponseFrame): boolean {
+    if (
+      !this.pendingAgentNonce ||
+      frame.agentNonce !== this.pendingAgentNonce
+    ) {
       console.warn('[TTYAManager] No pending challenge for verification');
       return false;
     }
 
     try {
       const expectedHmac = createHmac('sha256', this.authSecret)
-        .update(this.pendingChallenge)
+        .update(
+          buildTTYAAuthProofPayload(
+            'bridge',
+            frame.agentNonce,
+            frame.bridgeNonce,
+          ),
+        )
         .digest();
-      const receivedHmac = Buffer.from(frame.hmac, 'hex');
+      const receivedHmac = Buffer.from(frame.proof, 'hex');
 
       if (receivedHmac.length !== expectedHmac.length) {
         return false;
@@ -377,6 +393,45 @@ export class TTYAManager extends EventEmitter {
       return timingSafeEqual(expectedHmac, receivedHmac);
     } catch {
       return false;
+    }
+  }
+
+  private createAuthConfirmation(
+    response: TTYAAuthResponseFrame,
+  ): TTYAAuthConfirmationFrame {
+    const proof = createHmac('sha256', this.authSecret)
+      .update(
+        buildTTYAAuthProofPayload(
+          'agent',
+          response.agentNonce,
+          response.bridgeNonce,
+        ),
+      )
+      .digest('hex');
+    return {
+      type: 'ttya-auth-confirmation',
+      version: TTYA_AUTH_VERSION,
+      agentNonce: response.agentNonce,
+      bridgeNonce: response.bridgeNonce,
+      proof,
+    };
+  }
+
+  private handleConnectionClosed(conn: any): void {
+    if (this.bridgeConnection !== conn) return;
+    this.clearAuthTimeout();
+    this.bridgeConnection = null;
+    this.authenticated = false;
+    this.pendingAgentNonce = null;
+    this.receiveBuffer = Buffer.alloc(0);
+  }
+
+  private destroyConnection(conn: any): void {
+    this.handleConnectionClosed(conn);
+    try {
+      conn.destroy();
+    } catch {
+      // ignore
     }
   }
 

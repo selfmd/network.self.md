@@ -255,6 +255,32 @@ The peer with the lexicographically smaller Ed25519 public key initiates the fir
 
 ## TTYA Protocol
 
+TTYA uses length-prefixed JSON frames on its dedicated Hyperswarm connection.
+Each frame has a 4-byte big-endian payload length and a maximum payload of 64
+KiB. Before either side accepts an application frame, the bridge and agent
+complete this mutual HMAC-SHA256 handshake:
+
+```text
+Agent  -> Bridge: challenge(agentNonce)
+Bridge -> Agent:  response(agentNonce, bridgeNonce, bridgeProof)
+Agent  -> Bridge: confirmation(agentNonce, bridgeNonce, agentProof)
+
+transcript(role) =
+  "networkselfmd-ttya-auth-v2" || 0x00 || role || 0x00 ||
+  hex_decode(agentNonce) || hex_decode(bridgeNonce)
+
+bridgeProof = HMAC-SHA256(authSecret, transcript("bridge"))
+agentProof  = HMAC-SHA256(authSecret, transcript("agent"))
+```
+
+Both nonces are 32 fresh random bytes encoded as lowercase hexadecimal. Proofs
+are checked in constant time, the roles provide reflection resistance, and the
+handshake must finish within five seconds. The agent accepts no requests before
+verifying `bridgeProof`; the bridge releases no queued or future visitor
+requests, and accepts no approve/reject/reply responses, before verifying
+`agentProof`. Authentication state and partial frames are discarded on every
+disconnect.
+
 ### TTYARequest (0x07)
 
 Sent from TTYA Server to Agent Node.

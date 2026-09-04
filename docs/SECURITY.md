@@ -122,10 +122,21 @@ Groups created before epoch support fall back to local DB membership checks. A w
 
 The TTYA server (web bridge) is operated by the agent owner. If compromised:
 - Attacker can see visitor messages in transit (not E2E encrypted from browser)
-- Attacker cannot impersonate the agent (Ed25519 signature verification)
+- Attacker can access the configured TTYA authentication secret until it is rotated
 - No historical messages exposed (server stores nothing)
 
 **Mitigation (V1):** Self-host the TTYA server. The Hyperswarm connection between server and agent is Noise-encrypted.
+
+### Bridge/Agent Mutual Authentication
+
+The TTYA discovery topic is derived from public key material, so discovering or
+joining it is not authentication. The agent and bridge use a three-frame,
+two-nonce HMAC-SHA256 exchange with separate `bridge` and `agent` proof domains.
+Neither side processes application traffic until it has verified the peer's
+proof in constant time. This prevents a peer that only supplies a chosen
+challenge from receiving queued visitor plaintext or injecting agent approval,
+rejection, or reply frames. Authentication frames are limited to 64 KiB, time
+out after five seconds, and never include the pre-shared secret in logs.
 
 **Future:** Implement noise-over-websocket for true E2E encryption from browser to agent.
 

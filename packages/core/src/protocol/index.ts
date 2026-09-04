@@ -36,6 +36,23 @@ export {
 } from './announce-signature.js';
 
 export {
+  TTYA_AUTH_PROTOCOL,
+  TTYA_AUTH_VERSION,
+  TTYA_AUTH_NONCE_BYTES,
+  TTYA_AUTH_PROOF_BYTES,
+  MAX_TTYA_FRAME_SIZE,
+  isTTYAAuthChallengeFrame,
+  isTTYAAuthResponseFrame,
+  isTTYAAuthConfirmationFrame,
+  buildTTYAAuthProofPayload,
+  type TTYAAuthRole,
+  type TTYAAuthChallengeFrame,
+  type TTYAAuthResponseFrame,
+  type TTYAAuthConfirmationFrame,
+  type TTYAAuthFrame,
+} from './ttya-auth.js';
+
+export {
   SenderKeys,
   type SenderKeyState,
   type SenderKeyRecord,
