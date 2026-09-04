@@ -223,3 +223,63 @@ describe('Dashboard API routes', () => {
     expect(res.json().error.code).toBe('security-keys-unavailable');
   });
 });
+
+describe('Dashboard API authentication', () => {
+  const credentials = Buffer.from(
+    'operator:a-strong-dashboard-password',
+    'utf8',
+  ).toString('base64');
+
+  it('leaves only the health probe public', async () => {
+    const app = await buildApp({
+      agent: mockAgent() as any,
+      auth: { username: 'operator', password: 'a-strong-dashboard-password' },
+    });
+
+    const health = await app.inject({ method: 'GET', url: '/healthz' });
+    expect(health.statusCode).toBe(200);
+
+    for (const authorization of [undefined, 'Basic invalid']) {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/status',
+        headers: authorization ? { authorization } : undefined,
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.headers['www-authenticate']).toContain('Basic');
+      expect(response.json().error.code).toBe('unauthorized');
+    }
+
+    const authorized = await app.inject({
+      method: 'GET',
+      url: '/api/status',
+      headers: { authorization: `Basic ${credentials}` },
+    });
+    expect(authorized.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('requires valid credentials before mutation origin checks', async () => {
+    const app = await buildApp({
+      agent: mockAgent() as any,
+      auth: { username: 'operator', password: 'a-strong-dashboard-password' },
+    });
+    const unauthorized = await app.inject({
+      method: 'POST',
+      url: '/api/discovery/states/040506/join',
+      headers: { origin: 'http://127.0.0.1:3001' },
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const authorized = await app.inject({
+      method: 'POST',
+      url: '/api/discovery/states/040506/join',
+      headers: {
+        origin: 'http://127.0.0.1:3001',
+        authorization: `Basic ${credentials}`,
+      },
+    });
+    expect(authorized.statusCode).toBe(200);
+    await app.close();
+  });
+});

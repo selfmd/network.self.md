@@ -4,12 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { Agent } from '@networkselfmd/node';
 import { attachAgentLogging } from './agentEvents.js';
 import { buildApp } from './routes.js';
-import { dashboardAgentOptions } from './config.js';
+import { dashboardAgentOptions, dashboardServerOptions } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function main() {
   const agentOptions = dashboardAgentOptions();
+  const serverOptions = await dashboardServerOptions();
 
   // Dashboard IS an agent — it joins the P2P network, discovers peers and states
   const agent = new Agent(agentOptions);
@@ -21,7 +22,7 @@ async function main() {
   console.log(`Display name: ${agent.identity.displayName ?? '(none)'}`);
   console.log(`Data dir: ${agentOptions.dataDir}`);
 
-  const app = await buildApp({ agent });
+  const app = await buildApp({ agent, auth: serverOptions.auth });
 
   // Serve static client build if it exists
   const clientDist = path.resolve(__dirname, '../../dist/client');
@@ -40,10 +41,10 @@ async function main() {
     });
   }
 
-  const port = parseInt(process.env.PORT ?? '3001', 10);
-  const host = process.env.HOST ?? '127.0.0.1';
-  await app.listen({ port, host });
-  console.log(`Dashboard: http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
+  await app.listen({ port: serverOptions.port, host: serverOptions.host });
+  console.log(
+    `Dashboard: http://${serverOptions.host === '0.0.0.0' ? 'localhost' : serverOptions.host}:${serverOptions.port}`,
+  );
 
   // Graceful shutdown
   for (const signal of ['SIGINT', 'SIGTERM']) {
