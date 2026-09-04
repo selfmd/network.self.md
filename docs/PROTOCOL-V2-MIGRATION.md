@@ -47,8 +47,15 @@ cost under adversarial traffic.
 
 ## Storage migration
 
-Database migration 6 upgrades the migration-5 replay ledger with transactional state and
-expiry columns, adds indexes for pruning/caps, pins group creator/genesis hashes, persists
-authenticated discovery anchors, and adds pending invite bootstrap storage. Migration from
-an existing schema-v4 database is covered by a fixture test; existing v5 replay rows are
-carried forward with bounded expiry.
+Database migration 6 upgrades every previously shipped schema-v5 variant, including the
+four-column replay ledger, with transactional state and expiry columns. Existing replay rows
+are retained as accepted entries with bounded expiry. Independently shipped v5 identity,
+group/discovery, sender-key, and Noise columns are reconciled by schema inspection before the
+shared v6 layout is applied.
+
+Migration 7 quarantines legacy v4 epoch rows whose map-based `timestamp` encoding cannot be
+verified as the canonical v2 `createdAt` encoding. Their original bytes and signatures remain
+available in `quarantined_group_epochs`, but they are never treated as v2 trust anchors or sent
+on the wire. Affected groups stay unpinned and offline until an authenticated v2 invite or
+verified public announcement supplies a canonical genesis. Populated v4 and replay-v5 fixtures
+cover both upgrade paths.

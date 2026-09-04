@@ -1,8 +1,10 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync, readFileSync, statSync } from 'node:fs';
+import { deserializeEpoch } from '@networkselfmd/core';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
+const REPLAY_TTL_MS = 10 * 60 * 1000;
 
 const MIGRATIONS: string[] = [
   `
@@ -201,33 +203,11 @@ const MIGRATIONS: string[] = [
   UPDATE schema_version SET version = 5;
   `,
   `
-  CREATE TABLE IF NOT EXISTS group_bootstraps (
-    group_id BLOB PRIMARY KEY,
-    group_name TEXT NOT NULL,
-    inviter_public_key BLOB NOT NULL,
-    genesis_epoch_data BLOB NOT NULL,
-    genesis_signature BLOB NOT NULL,
-    genesis_hash BLOB NOT NULL,
-    received_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS protocol_replay (
-    message_id BLOB PRIMARY KEY,
-    sender_fingerprint TEXT NOT NULL,
-    message_type INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted')),
-    received_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS protocol_replay_received_at
-    ON protocol_replay(received_at);
-  CREATE INDEX IF NOT EXISTS protocol_replay_sender_received_at
-    ON protocol_replay(sender_fingerprint, received_at);
-  CREATE INDEX IF NOT EXISTS protocol_replay_expires_at
-    ON protocol_replay(expires_at);
-
-  UPDATE schema_version SET version = 6;
+  -- Migration 6 is applied programmatically to reconcile incompatible schema-v5 variants.
+  `,
+  `
+  -- Migration 7 is applied programmatically so legacy epoch CBOR can be
+  -- decoded and quarantined in the same transaction as the version update.
   `,
 ];
 
@@ -261,13 +241,280 @@ export class AgentDatabase {
     }
 
     const transaction = this.db.transaction(() => {
+      // Several security branches shipped different schema-v5 layouts. Make
+      // every known v5 shape converge before applying the shared v6 schema.
+      if (currentVersion === 5) this.reconcileSchemaV5();
+
       for (let i = currentVersion; i < SCHEMA_VERSION; i++) {
-        this.db.exec(MIGRATIONS[i]);
+        if (i === 5) {
+          this.applyMigrationV6();
+        } else if (i === 6) {
+          this.applyMigrationV7();
+        } else {
+          this.db.exec(MIGRATIONS[i]);
+        }
       }
     });
 
     transaction();
     this.enforcePermissions();
+  }
+
+  /** Reconcile the independently shipped identity, group, Noise, and replay v5 schemas. */
+  private reconcileSchemaV5(): void {
+    if (this.columnNotNull('identity', 'ed_private_key')) {
+      this.db.exec(`
+        CREATE TABLE identity_v5_reconciled (
+          id INTEGER PRIMARY KEY,
+          ed_private_key BLOB,
+          ed_public_key BLOB NOT NULL,
+          display_name TEXT,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO identity_v5_reconciled
+          (id, ed_private_key, ed_public_key, display_name, created_at)
+          SELECT id, ed_private_key, ed_public_key, display_name, created_at
+          FROM identity;
+        DROP TABLE identity;
+        ALTER TABLE identity_v5_reconciled RENAME TO identity;
+      `);
+    }
+
+    this.addColumnIfMissing('groups', 'creator_public_key', 'BLOB');
+    this.addColumnIfMissing('groups', 'genesis_hash', 'BLOB');
+    this.addColumnIfMissing('discovered_groups', 'authority_key', 'BLOB');
+    this.addColumnIfMissing('discovered_groups', 'genesis_hash', 'BLOB');
+    this.addColumnIfMissing('discovered_groups', 'genesis_epoch_data', 'BLOB');
+    this.addColumnIfMissing('discovered_groups', 'genesis_signature', 'BLOB');
+    this.db.exec(`
+      DELETE FROM discovered_groups
+      WHERE authority_key IS NULL
+         OR genesis_hash IS NULL
+         OR genesis_epoch_data IS NULL
+         OR genesis_signature IS NULL;
+    `);
+
+    this.addColumnIfMissing('sender_keys', 'generation_id', 'BLOB');
+    this.addColumnIfMissing(
+      'sender_keys',
+      'distribution_sequence',
+      'INTEGER NOT NULL DEFAULT -1',
+    );
+    this.addColumnIfMissing(
+      'sender_keys',
+      'epoch_version',
+      'INTEGER NOT NULL DEFAULT 0',
+    );
+    this.addColumnIfMissing('sender_keys', 'epoch_hash', 'BLOB');
+    this.addColumnIfMissing('peers', 'noise_public_key', 'BLOB');
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS group_invites (
+        invite_id TEXT PRIMARY KEY,
+        group_id BLOB NOT NULL,
+        group_name TEXT NOT NULL,
+        inviter_public_key BLOB NOT NULL,
+        invitee_public_key BLOB NOT NULL,
+        genesis_epoch_data BLOB NOT NULL,
+        genesis_signature BLOB NOT NULL,
+        genesis_hash BLOB NOT NULL,
+        direction TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS group_invites_group_id
+        ON group_invites(group_id);
+      CREATE TABLE IF NOT EXISTS network_announce_state (
+        peer_public_key BLOB PRIMARY KEY,
+        last_timestamp INTEGER NOT NULL,
+        window_started INTEGER NOT NULL,
+        message_count INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS peers_noise_public_key
+        ON peers(noise_public_key)
+        WHERE noise_public_key IS NOT NULL;
+    `);
+  }
+
+  private applyMigrationV6(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS group_bootstraps (
+        group_id BLOB PRIMARY KEY,
+        group_name TEXT NOT NULL,
+        inviter_public_key BLOB NOT NULL,
+        genesis_epoch_data BLOB NOT NULL,
+        genesis_signature BLOB NOT NULL,
+        genesis_hash BLOB NOT NULL,
+        received_at INTEGER NOT NULL
+      );
+    `);
+
+    const replayColumns = this.columnNames('protocol_replay');
+    if (replayColumns.size === 0) {
+      this.createProtocolReplayTable();
+    } else if (!replayColumns.has('state') || !replayColumns.has('expires_at')) {
+      // The protocol-validation branch shipped this four-column table as v5.
+      // Preserve accepted replay IDs while adding the durable reservation state
+      // and bounded expiry required by the integrated protocol.
+      this.db.exec('ALTER TABLE protocol_replay RENAME TO protocol_replay_v5');
+      this.createProtocolReplayTable();
+      this.db.prepare(`
+        INSERT INTO protocol_replay
+          (message_id, sender_fingerprint, message_type, state, received_at, expires_at)
+        SELECT message_id, sender_fingerprint, message_type, 'accepted', received_at,
+               received_at + ?
+        FROM protocol_replay_v5
+      `).run(REPLAY_TTL_MS);
+      this.db.exec('DROP TABLE protocol_replay_v5');
+    }
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS protocol_replay_received_at
+        ON protocol_replay(received_at);
+      CREATE INDEX IF NOT EXISTS protocol_replay_sender_received_at
+        ON protocol_replay(sender_fingerprint, received_at);
+      CREATE INDEX IF NOT EXISTS protocol_replay_expires_at
+        ON protocol_replay(expires_at);
+      UPDATE schema_version SET version = 6;
+    `);
+  }
+
+  private applyMigrationV7(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS quarantined_group_epochs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_id INTEGER NOT NULL,
+        group_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        prev_hash BLOB NOT NULL,
+        epoch_data BLOB NOT NULL,
+        signature BLOB NOT NULL,
+        hash BLOB NOT NULL,
+        created_by BLOB NOT NULL,
+        created_at INTEGER NOT NULL,
+        quarantine_reason TEXT NOT NULL,
+        quarantined_at INTEGER NOT NULL,
+        UNIQUE(group_id, version)
+      );
+    `);
+
+    const rows = (this.tableExists('group_epochs')
+      ? this.db.prepare('SELECT * FROM group_epochs').all()
+      : []) as Array<{
+      id: number;
+      group_id: string;
+      version: number;
+      prev_hash: Buffer;
+      epoch_data: Buffer;
+      signature: Buffer;
+      hash: Buffer;
+      created_by: Buffer;
+      created_at: number;
+    }>;
+    const invalidGroups = new Set<string>();
+    for (const row of rows) {
+      try {
+        deserializeEpoch(new Uint8Array(row.epoch_data));
+      } catch {
+        invalidGroups.add(row.group_id);
+      }
+    }
+
+    const quarantine = this.db.prepare(`
+      INSERT OR REPLACE INTO quarantined_group_epochs
+        (original_id, group_id, version, prev_hash, epoch_data, signature, hash,
+         created_by, created_at, quarantine_reason, quarantined_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const remove = this.tableExists('group_epochs')
+      ? this.db.prepare('DELETE FROM group_epochs WHERE id = ?')
+      : null;
+    const quarantinedAt = Date.now();
+
+    for (const row of rows) {
+      if (invalidGroups.has(row.group_id)) {
+        quarantine.run(
+          row.id,
+          row.group_id,
+          row.version,
+          row.prev_hash,
+          row.epoch_data,
+          row.signature,
+          row.hash,
+          row.created_by,
+          row.created_at,
+          'unsupported-or-invalid-epoch-format',
+          quarantinedAt,
+        );
+        remove!.run(row.id);
+      }
+    }
+
+    if (invalidGroups.size > 0) {
+      const clearAuthority = this.db.prepare(`
+        UPDATE groups SET creator_public_key = NULL, genesis_hash = NULL
+        WHERE group_id = ?
+      `);
+      const clearMembers = this.tableExists('group_members')
+        ? this.db.prepare('DELETE FROM group_members WHERE group_id = ?')
+        : null;
+      const clearSenderKeys = this.tableExists('sender_keys')
+        ? this.db.prepare('DELETE FROM sender_keys WHERE group_id = ?')
+        : null;
+      for (const groupId of invalidGroups) {
+        if (/^[0-9a-fA-F]{64}$/.test(groupId)) {
+          const groupIdBytes = Buffer.from(groupId, 'hex');
+          clearAuthority.run(groupIdBytes);
+          clearMembers?.run(groupIdBytes);
+          clearSenderKeys?.run(groupIdBytes);
+        }
+      }
+    }
+
+    this.db.exec('UPDATE schema_version SET version = 7');
+  }
+
+  private createProtocolReplayTable(): void {
+    this.db.exec(`
+      CREATE TABLE protocol_replay (
+        message_id BLOB PRIMARY KEY,
+        sender_fingerprint TEXT NOT NULL,
+        message_type INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted')),
+        received_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  private columnNames(table: string): Set<string> {
+    if (!this.tableExists(table)) return new Set();
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    return new Set(rows.map((row) => row.name));
+  }
+
+  private columnNotNull(table: string, column: string): boolean {
+    if (!this.tableExists(table)) return false;
+    const row = this.db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all()
+      .find((candidate) => (candidate as { name: string }).name === column) as
+      | { notnull: number }
+      | undefined;
+    return row?.notnull === 1;
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    if (!this.columnNames(table).has(column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  private tableExists(table: string): boolean {
+    return this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) !== undefined;
   }
 
   private getSchemaVersion(): number {
