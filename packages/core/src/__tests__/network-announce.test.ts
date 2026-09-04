@@ -1,131 +1,113 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
-  encodeMessage,
+  canonicalAnnouncePayload,
+  createGenesisEpoch,
+  createSignedEpoch,
   decodeMessage,
-  MessageType,
-  sign,
-  verify,
+  encodeMessage,
   generateIdentity,
-} from '../index.js';
-import type { NetworkAnnounceMessage } from '../index.js';
-import {
+  MessageType,
+  NETWORK_ANNOUNCE_VERSION,
+  serializeEpoch,
   signAnnounce,
   verifyAnnounce,
-} from '../protocol/announce-signature.js';
+  verifyAnnouncedGroupAuthority,
+} from '../index.js';
+import type { NetworkAnnounceMessage } from '../index.js';
 
-describe('NetworkAnnounce message', () => {
-  it('encodes and decodes round-trip', () => {
-    const msg: NetworkAnnounceMessage = {
+function announcedGroup(identity = generateIdentity(), fill = 1) {
+  const groupId = new Uint8Array(32).fill(fill);
+  const genesis = createSignedEpoch(
+    createGenesisEpoch(toHex(groupId), identity.edPublicKey, 1_700_000_000_000),
+    identity.edPrivateKey,
+  );
+  return {
+    identity,
+    group: {
+      groupId,
+      name: 'builders',
+      selfMd: 'We build things.',
+      memberCount: 1,
+      genesisEpochData: serializeEpoch(genesis.epoch),
+      genesisSignature: genesis.signature,
+      genesisHash: genesis.hash,
+    },
+  };
+}
+
+describe('NetworkAnnounce canonical authentication', () => {
+  it('round-trips the exhaustive versioned schema', () => {
+    const { group } = announcedGroup();
+    const message: NetworkAnnounceMessage = {
       type: MessageType.NetworkAnnounce,
-      groups: [
-        {
-          groupId: new Uint8Array(32).fill(1),
-          name: 'builders',
-          selfMd: 'We build network.self.md. Ship > discuss.',
-          memberCount: 3,
-        },
-      ],
+      protocolVersion: NETWORK_ANNOUNCE_VERSION,
+      groups: [group],
       signature: new Uint8Array(64),
-      timestamp: Date.now(),
+      timestamp: 1_700_000_000_001,
     };
-    const encoded = encodeMessage(msg);
-    const decoded = decodeMessage(encoded) as NetworkAnnounceMessage;
-    expect(decoded.type).toBe(MessageType.NetworkAnnounce);
-    expect(decoded.groups).toHaveLength(1);
-    expect(decoded.groups[0].name).toBe('builders');
-    expect(decoded.groups[0].selfMd).toBe(
-      'We build network.self.md. Ship > discuss.',
+    expect(decodeMessage(encodeMessage(message))).toEqual(message);
+  });
+
+  it('binds the version, ordered groups, provenance, and timestamp', () => {
+    const { identity, group } = announcedGroup();
+    const timestamp = 1_700_000_000_001;
+    const signature = signAnnounce([group], timestamp, identity.edPrivateKey);
+    expect(
+      verifyAnnounce([group], timestamp, signature, identity.edPublicKey),
+    ).toBe(true);
+    expect(
+      verifyAnnounce(
+        [{ ...group, selfMd: 'tampered' }],
+        timestamp,
+        signature,
+        identity.edPublicKey,
+      ),
+    ).toBe(false);
+    expect(
+      verifyAnnounce([group], timestamp + 1, signature, identity.edPublicKey),
+    ).toBe(false);
+    expect(
+      verifyAnnounce([group], timestamp, signature, identity.edPublicKey, 1),
+    ).toBe(false);
+  });
+
+  it('rejects non-canonical order and duplicate group IDs', () => {
+    const first = announcedGroup(undefined, 1).group;
+    const second = announcedGroup(undefined, 2).group;
+    expect(() => canonicalAnnouncePayload(2, [second, first], 1)).toThrow(
+      /canonical/i,
+    );
+    expect(() => canonicalAnnouncePayload(2, [first, first], 1)).toThrow(
+      /canonical/i,
     );
   });
 
-  it('handles empty groups list', () => {
-    const msg: NetworkAnnounceMessage = {
-      type: MessageType.NetworkAnnounce,
-      groups: [],
-      signature: new Uint8Array(64),
-      timestamp: Date.now(),
+  it('authenticates exact genesis provenance', () => {
+    const { identity, group } = announcedGroup();
+    expect(verifyAnnouncedGroupAuthority(group, identity.edPublicKey)).toBe(
+      true,
+    );
+    expect(
+      verifyAnnouncedGroupAuthority(group, generateIdentity().edPublicKey),
+    ).toBe(false);
+  });
+
+  it('matches the canonical payload golden vector', () => {
+    const group = {
+      groupId: new Uint8Array(32).fill(1),
+      name: 'g',
+      selfMd: '',
+      memberCount: 1,
+      genesisEpochData: new Uint8Array([0xaa]),
+      genesisSignature: new Uint8Array(64).fill(2),
+      genesisHash: new Uint8Array(32).fill(3),
     };
-    const encoded = encodeMessage(msg);
-    const decoded = decodeMessage(encoded) as NetworkAnnounceMessage;
-    expect(decoded.groups).toHaveLength(0);
+    expect(toHex(canonicalAnnouncePayload(2, [group], 5))).toBe(
+      '6e6574776f726b2e73656c662e6d642f4e6574776f726b416e6e6f756e63652f76320000020000000000000005000101010101010101010101010101010101010101010101010101010101010101010000000167000000000000000100000001aa020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303',
+    );
   });
 });
 
-describe('NetworkAnnounce signature', () => {
-  it('signAnnounce produces a valid signature verified by verifyAnnounce', () => {
-    const identity = generateIdentity('test-agent');
-    const groups = [
-      {
-        groupId: new Uint8Array([1, 2, 3]),
-        name: 'builders',
-        selfMd: 'We build things.',
-        memberCount: 2,
-      },
-    ];
-    const timestamp = Date.now();
-
-    const signature = signAnnounce(groups, timestamp, identity.edPrivateKey);
-    const valid = verifyAnnounce(
-      groups,
-      timestamp,
-      signature,
-      identity.edPublicKey,
-    );
-    expect(valid).toBe(true);
-  });
-
-  it('rejects signature from a different key', () => {
-    const identity1 = generateIdentity('agent-1');
-    const identity2 = generateIdentity('agent-2');
-    const groups = [
-      {
-        groupId: new Uint8Array([4, 5, 6]),
-        name: 'research',
-        selfMd: 'Papers only.',
-        memberCount: 1,
-      },
-    ];
-    const timestamp = Date.now();
-
-    const signature = signAnnounce(groups, timestamp, identity1.edPrivateKey);
-    const valid = verifyAnnounce(
-      groups,
-      timestamp,
-      signature,
-      identity2.edPublicKey,
-    );
-    expect(valid).toBe(false);
-  });
-
-  it('rejects signature when payload is tampered', () => {
-    const identity = generateIdentity('test-agent');
-    const groups = [
-      {
-        groupId: new Uint8Array([1, 2, 3]),
-        name: 'builders',
-        selfMd: 'Original.',
-        memberCount: 2,
-      },
-    ];
-    const timestamp = Date.now();
-
-    const signature = signAnnounce(groups, timestamp, identity.edPrivateKey);
-
-    // Tamper with selfMd
-    const tampered = [
-      {
-        groupId: new Uint8Array([1, 2, 3]),
-        name: 'builders',
-        selfMd: 'Hijacked!',
-        memberCount: 2,
-      },
-    ];
-    const valid = verifyAnnounce(
-      tampered,
-      timestamp,
-      signature,
-      identity.edPublicKey,
-    );
-    expect(valid).toBe(false);
-  });
-});
+function toHex(value: Uint8Array): string {
+  return Buffer.from(value).toString('hex');
+}

@@ -6,6 +6,7 @@ export {
   MessageRepository,
   SenderKeyRepository,
   DiscoveredGroupRepository,
+  GroupBootstrapRepository,
   RatchetStateRepository,
   GroupEpochRepository,
   ProtocolReplayRepository,
@@ -19,5 +20,8 @@ export type {
   StoredSenderKey,
   StoredKeyData,
   StoredDiscoveredGroup,
+  StoredGroupBootstrap,
+  ReplayReservation,
+  ProtocolReplayOptions,
   MessageQueryOptions,
 } from './repositories.js';

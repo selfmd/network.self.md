@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeMessage,
   encodeMessage,
+  createGenesisEpoch,
+  createSignedEpoch,
   generateIdentity,
   MessageType,
   signAuthenticatedMessage,
+  serializeEpoch,
   verifyAuthenticatedMessage,
 } from '../index.js';
 import type {
@@ -13,7 +16,6 @@ import type {
   GroupEncryptedMessage,
   GroupManagementMessage,
   ProtocolMessage,
-  SenderKeyDistributionMessage,
 } from '../index.js';
 
 const rawEncoder = new Encoder({ useRecords: false });
@@ -21,6 +23,17 @@ const fpA = 'y'.repeat(32);
 const fpB = 'b'.repeat(32);
 const bytes = (length: number, fill: number) =>
   new Uint8Array(length).fill(fill);
+const anchorIdentity = generateIdentity();
+const anchorGroupId = bytes(32, 1);
+const anchorGenesis = createSignedEpoch(
+  createGenesisEpoch(
+    Buffer.from(anchorGroupId).toString('hex'),
+    anchorIdentity.edPublicKey,
+    1,
+  ),
+  anchorIdentity.edPrivateKey,
+);
+const anchorEpochData = serializeEpoch(anchorGenesis.epoch);
 
 const goldenMessages: ProtocolMessage[] = [
   {
@@ -42,20 +55,19 @@ const goldenMessages: ProtocolMessage[] = [
   },
   {
     type: MessageType.SenderKeyDistribution,
-    groupId: bytes(32, 1),
-    chainKey: bytes(32, 2),
-    chainIndex: 3,
-    signingPublicKey: bytes(32, 4),
-    senderFingerprint: fpA,
-    recipientFingerprint: fpB,
+    protocolVersion: 1,
+    recipientPublicKey: bytes(32, 1),
+    ciphertext: bytes(16, 2),
+    nonce: bytes(24, 3),
     timestamp: 4,
-    signature: bytes(64, 5),
   },
   {
     type: MessageType.GroupMessage,
     groupId: bytes(32, 1),
     senderFingerprint: fpA,
     chainIndex: 2,
+    epochVersion: 3,
+    epochHash: bytes(32, 2),
     ciphertext: bytes(16, 3),
     nonce: bytes(24, 4),
     timestamp: 5,
@@ -76,9 +88,8 @@ const goldenMessages: ProtocolMessage[] = [
   {
     type: MessageType.GroupManagement,
     groupId: bytes(32, 1),
-    action: 'invite',
+    action: 'kick',
     targetFingerprint: fpB,
-    groupName: 'group',
     senderFingerprint: fpA,
     recipientFingerprint: fpB,
     timestamp: 7,
@@ -99,18 +110,31 @@ const goldenMessages: ProtocolMessage[] = [
   },
   {
     type: MessageType.NetworkAnnounce,
+    protocolVersion: 2,
     groups: [
-      { groupId: bytes(32, 1), name: 'group', selfMd: '', memberCount: 1 },
+      {
+        groupId: bytes(32, 1),
+        name: 'group',
+        selfMd: '',
+        memberCount: 1,
+        genesisEpochData: anchorEpochData,
+        genesisSignature: anchorGenesis.signature,
+        genesisHash: anchorGenesis.hash,
+      },
     ],
     signature: bytes(64, 2),
     timestamp: 10,
   },
   {
     type: MessageType.GroupEpoch,
+    protocolVersion: 2,
     groupId: bytes(32, 1),
-    epochData: bytes(1, 2),
-    signature: bytes(64, 3),
-    hash: bytes(32, 4),
+    epochData: anchorEpochData,
+    signature: anchorGenesis.signature,
+    hash: anchorGenesis.hash,
+    senderFingerprint: fpA,
+    recipientFingerprint: fpB,
+    envelopeSignature: bytes(64, 5),
     timestamp: 11,
   },
   { type: MessageType.Ack, messageId: 'id', timestamp: 12 },
@@ -126,14 +150,58 @@ describe('protocol runtime validation', () => {
 
   it.each([
     ['wrong key size', { ...goldenMessages[0], edPublicKey: bytes(31, 1) }],
-    ['negative counter', { ...goldenMessages[2], chainIndex: -1 }],
+    ['bad envelope version', { ...goldenMessages[2], protocolVersion: 2 }],
     ['wrong nonce size', { ...goldenMessages[3], nonce: bytes(12, 1) }],
     ['non-integer counter', { ...goldenMessages[4], messageNumber: 1.5 }],
     ['missing action field', { ...goldenMessages[5], action: undefined }],
     ['extra field', { ...goldenMessages[10], unexpected: true }],
+    [
+      'duplicate group members',
+      {
+        ...goldenMessages[1],
+        members: [bytes(32, 2), bytes(32, 2)],
+      },
+    ],
+    [
+      'oversized ciphertext',
+      { ...goldenMessages[3], ciphertext: bytes(65_553, 1) },
+    ],
+    [
+      'oversized UTF-8 display name',
+      { ...goldenMessages[0], displayName: 'é'.repeat(65) },
+    ],
+    ['invalid nested epoch', { ...goldenMessages[9], epochData: bytes(1, 2) }],
+    [
+      'invalid announced genesis',
+      {
+        ...goldenMessages[8],
+        groups: [
+          {
+            ...(
+              goldenMessages[8] as Extract<
+                ProtocolMessage,
+                { type: typeof MessageType.NetworkAnnounce }
+              >
+            ).groups[0],
+            genesisHash: bytes(32, 0),
+          },
+        ],
+      },
+    ],
   ])('rejects malformed payload: %s', (_label, malformed) => {
     expect(() => decodeMessage(rawEncoder.encode(malformed))).toThrow(
       /invalid message/i,
+    );
+  });
+
+  it.each(
+    goldenMessages.map((message) => [
+      message.type,
+      { ...message, unexpected: true },
+    ]),
+  )('rejects unknown fields for message type %s', (_type, malformed) => {
+    expect(() => decodeMessage(rawEncoder.encode(malformed))).toThrow(
+      /is not allowed/i,
     );
   });
 
@@ -151,25 +219,14 @@ describe('authenticated protocol payloads', () => {
   function signedMessages() {
     const timestamp = 1_700_000_000_000;
     return [
-      signAuthenticatedMessage<SenderKeyDistributionMessage>(
-        {
-          type: MessageType.SenderKeyDistribution,
-          groupId: bytes(32, 1),
-          chainKey: bytes(32, 2),
-          chainIndex: 3,
-          signingPublicKey: sender.edPublicKey,
-          senderFingerprint: sender.fingerprint,
-          recipientFingerprint: recipient.fingerprint,
-          timestamp,
-        },
-        sender.edPrivateKey,
-      ),
       signAuthenticatedMessage<GroupEncryptedMessage>(
         {
           type: MessageType.GroupMessage,
           groupId: bytes(32, 1),
           senderFingerprint: sender.fingerprint,
           chainIndex: 3,
+          epochVersion: 1,
+          epochHash: bytes(32, 8),
           ciphertext: bytes(16, 2),
           nonce: bytes(24, 3),
           timestamp,
@@ -214,12 +271,31 @@ describe('authenticated protocol payloads', () => {
     },
   );
 
+  it('keeps signatures valid across Buffer/Uint8Array wire normalization', () => {
+    const timestamp = 1_700_000_000_000;
+    const message = signAuthenticatedMessage<GroupManagementMessage>(
+      {
+        type: MessageType.GroupManagement,
+        groupId: Buffer.alloc(32, 1),
+        action: 'kick',
+        targetFingerprint: recipient.fingerprint,
+        senderFingerprint: sender.fingerprint,
+        recipientFingerprint: recipient.fingerprint,
+        timestamp,
+      },
+      sender.edPrivateKey,
+    );
+    const decoded = decodeMessage(
+      encodeMessage(message),
+    ) as GroupManagementMessage;
+    expect(verifyAuthenticatedMessage(decoded, sender.edPublicKey)).toBe(true);
+  });
+
   it.each(signedMessages())(
     'rejects context/ciphertext swaps for type $type',
     (message) => {
       const swapped =
         message.type === MessageType.DirectMessage ||
-        message.type === MessageType.SenderKeyDistribution ||
         message.type === MessageType.GroupManagement
           ? { ...message, recipientFingerprint: fpB }
           : { ...message, groupId: bytes(32, 9) };
@@ -246,9 +322,6 @@ describe('authenticated protocol payloads', () => {
     (message) => {
       let tampered;
       switch (message.type) {
-        case MessageType.SenderKeyDistribution:
-          tampered = { ...message, chainKey: bytes(32, 9) };
-          break;
         case MessageType.GroupMessage:
         case MessageType.DirectMessage:
           tampered = {

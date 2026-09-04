@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const MIGRATIONS: string[] = [
   `
@@ -120,6 +120,53 @@ const MIGRATIONS: string[] = [
     ON protocol_replay(received_at);
 
   UPDATE schema_version SET version = 5;
+  `,
+  `
+  ALTER TABLE groups ADD COLUMN creator_public_key BLOB;
+  ALTER TABLE groups ADD COLUMN genesis_hash BLOB;
+
+  ALTER TABLE discovered_groups ADD COLUMN creator_public_key BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_epoch_data BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_signature BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_hash BLOB;
+
+  CREATE TABLE IF NOT EXISTS group_bootstraps (
+    group_id BLOB PRIMARY KEY,
+    group_name TEXT NOT NULL,
+    inviter_public_key BLOB NOT NULL,
+    genesis_epoch_data BLOB NOT NULL,
+    genesis_signature BLOB NOT NULL,
+    genesis_hash BLOB NOT NULL,
+    received_at INTEGER NOT NULL
+  );
+
+  ALTER TABLE protocol_replay RENAME TO protocol_replay_v5;
+
+  CREATE TABLE protocol_replay (
+    message_id BLOB PRIMARY KEY,
+    sender_fingerprint TEXT NOT NULL,
+    message_type INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted')),
+    received_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+
+  INSERT INTO protocol_replay
+    (message_id, sender_fingerprint, message_type, state, received_at, expires_at)
+  SELECT message_id, sender_fingerprint, message_type, 'accepted', received_at,
+         received_at + 600000
+  FROM protocol_replay_v5;
+
+  DROP TABLE protocol_replay_v5;
+
+  CREATE INDEX protocol_replay_received_at
+    ON protocol_replay(received_at);
+  CREATE INDEX protocol_replay_sender_received_at
+    ON protocol_replay(sender_fingerprint, received_at);
+  CREATE INDEX protocol_replay_expires_at
+    ON protocol_replay(expires_at);
+
+  UPDATE schema_version SET version = 6;
   `,
 ];
 

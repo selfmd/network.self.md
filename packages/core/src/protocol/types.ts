@@ -35,14 +35,11 @@ export interface GroupSyncMessage {
 
 export interface SenderKeyDistributionMessage {
   type: typeof MessageType.SenderKeyDistribution;
-  groupId: Uint8Array;
-  chainKey: Uint8Array;
-  chainIndex: number;
-  signingPublicKey: Uint8Array;
-  senderFingerprint: string;
-  recipientFingerprint: string;
+  protocolVersion: number;
+  recipientPublicKey: Uint8Array;
+  ciphertext: Uint8Array;
+  nonce: Uint8Array;
   timestamp: number;
-  signature: Uint8Array;
 }
 
 export interface GroupEncryptedMessage {
@@ -50,6 +47,8 @@ export interface GroupEncryptedMessage {
   groupId: Uint8Array;
   senderFingerprint: string;
   chainIndex: number;
+  epochVersion: number;
+  epochHash: Uint8Array;
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
@@ -75,6 +74,9 @@ export interface GroupManagementMessage {
   action: 'create' | 'invite' | 'join' | 'leave' | 'kick' | 'promote';
   targetFingerprint?: string;
   groupName?: string;
+  genesisEpochData?: Uint8Array;
+  genesisSignature?: Uint8Array;
+  genesisHash?: Uint8Array;
   senderFingerprint: string;
   recipientFingerprint: string;
   timestamp: number;
@@ -98,11 +100,15 @@ export interface TTYAResponseMessage {
 
 export interface NetworkAnnounceMessage {
   type: typeof MessageType.NetworkAnnounce;
+  protocolVersion: number;
   groups: Array<{
     groupId: Uint8Array;
     name: string;
     selfMd: string;
     memberCount: number;
+    genesisEpochData: Uint8Array;
+    genesisSignature: Uint8Array;
+    genesisHash: Uint8Array;
   }>;
   signature: Uint8Array;
   timestamp: number;
@@ -110,10 +116,16 @@ export interface NetworkAnnounceMessage {
 
 export interface GroupEpochMessage {
   type: typeof MessageType.GroupEpoch;
+  protocolVersion: number;
   groupId: Uint8Array;
   epochData: Uint8Array;
+  /** Signature of the immutable epoch. */
   signature: Uint8Array;
   hash: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
+  /** Signature of this fresh, recipient-bound delivery envelope. */
+  envelopeSignature: Uint8Array;
   timestamp: number;
 }
 

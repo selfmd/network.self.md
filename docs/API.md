@@ -10,8 +10,8 @@ The central class. Create one per process.
 import { Agent } from '@networkselfmd/node';
 
 const agent = new Agent({
-  dataDir: '~/.networkselfmd',     // SQLite + keys stored here
-  passphrase: 'optional',        // encrypts private key at rest
+  dataDir: '~/.networkselfmd', // SQLite + keys stored here
+  passphrase: 'optional', // encrypts private key at rest
 });
 
 await agent.start();
@@ -23,10 +23,11 @@ await agent.stop();
 
 ```typescript
 interface AgentOptions {
-  dataDir: string;               // required, path to data directory
-  passphrase?: string;           // encrypts private key at rest
-  displayName?: string;          // human-readable agent name
-  bootstrap?: Array<{            // custom DHT bootstrap nodes
+  dataDir: string; // required, path to data directory
+  passphrase?: string; // encrypts private key at rest
+  displayName?: string; // human-readable agent name
+  bootstrap?: Array<{
+    // custom DHT bootstrap nodes
     host: string;
     port: number;
   }>;
@@ -36,17 +37,17 @@ interface AgentOptions {
 ### Properties
 
 ```typescript
-agent.identity      // AgentIdentity -- Ed25519 keys, fingerprint
-agent.peers         // Map<string, PeerSession> -- connected peers
-agent.groups        // Map<string, GroupInfo> -- joined groups
-agent.isRunning     // boolean
+agent.identity; // AgentIdentity -- Ed25519 keys, fingerprint
+agent.peers; // Map<string, PeerSession> -- connected peers
+agent.groups; // Map<string, GroupInfo> -- joined groups
+agent.isRunning; // boolean
 ```
 
 ### Lifecycle
 
 ```typescript
-await agent.start()              // join swarm, load state from SQLite
-await agent.stop()               // leave all topics, close connections, flush DB
+await agent.start(); // join swarm, load state from SQLite
+await agent.stop(); // leave all topics, close connections, flush DB
 ```
 
 ### Groups
@@ -164,7 +165,10 @@ Low-level API from `@networkselfmd/core`. You shouldn't need these directly unle
 ### Identity
 
 ```typescript
-import { generateIdentity, fingerprintFromPublicKey } from '@networkselfmd/core';
+import {
+  generateIdentity,
+  fingerprintFromPublicKey,
+} from '@networkselfmd/core';
 
 const identity = generateIdentity();
 // => { edPrivateKey, edPublicKey, xPrivateKey, xPublicKey, fingerprint }
@@ -210,13 +214,21 @@ const senderKey = SenderKeys.generate();
 // => { chainKey, chainIndex: 0 }
 
 // Encrypt a message
-const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(state, plaintext);
+const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(
+  state,
+  plaintext,
+);
 
 // Decrypt a message
-const { plaintext, nextRecord } = SenderKeys.decrypt(record, header, ciphertext);
+const { plaintext, nextRecord } = SenderKeys.decrypt(
+  record,
+  header,
+  ciphertext,
+);
 
-// Create distribution message
-const distribution = SenderKeys.createDistribution(groupId, state, signingPublicKey);
+// Sender-key distribution is a recipient-specific encrypted envelope. The
+// protocol layer exposes a stable replay identity without exposing chain keys.
+const replayId = senderKeyEnvelopeId(encryptedDistribution);
 ```
 
 ### Messages
@@ -224,8 +236,8 @@ const distribution = SenderKeys.createDistribution(groupId, state, signingPublic
 ```typescript
 import { encodeMessage, decodeMessage } from '@networkselfmd/core/protocol';
 
-const bytes = encodeMessage(protocolMessage);  // CBOR encode
-const message = decodeMessage(bytes);          // CBOR decode + validate
+const bytes = encodeMessage(protocolMessage); // CBOR encode
+const message = decodeMessage(bytes); // CBOR decode + validate
 ```
 
 ---
@@ -258,7 +270,7 @@ interface GroupInfo {
   role: 'admin' | 'member';
   createdAt: number;
   joinedAt: number;
-  epochVersion?: number;           // latest signed epoch version (undefined for legacy groups)
+  epochVersion?: number; // latest signed epoch version (undefined for legacy groups)
 }
 
 interface GroupMessage {

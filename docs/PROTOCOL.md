@@ -19,18 +19,18 @@ Maximum frame size: 1 MB (1,048,576 bytes). Frames exceeding this are rejected a
 
 Each CBOR payload is a map with a `type` field (uint8) that determines the message structure.
 
-| Type | Name | Direction | Description |
-|------|------|-----------|-------------|
-| 0x01 | IdentityHandshake | Bidirectional | Exchange Ed25519 identities |
-| 0x02 | GroupSync | Bidirectional | Share group membership |
-| 0x03 | SenderKeyDistribution | Sender → Recipient | Deliver group encryption key |
-| 0x04 | GroupMessage | Sender → Group peers | Encrypted group message |
-| 0x05 | DirectMessage | Sender → Recipient | Encrypted 1-to-1 message |
-| 0x06 | GroupManagement | Varies | Group admin operations |
-| 0x07 | TTYARequest | TTYA Server → Agent | Visitor message for approval |
-| 0x08 | TTYAResponse | Agent → TTYA Server | Approval decision + reply |
-| 0x0a | GroupEpoch | Admin → Group peers | Signed group state snapshot |
-| 0xFF | Ack | Recipient → Sender | Delivery acknowledgment |
+| Type | Name                  | Direction            | Description                  |
+| ---- | --------------------- | -------------------- | ---------------------------- |
+| 0x01 | IdentityHandshake     | Bidirectional        | Exchange Ed25519 identities  |
+| 0x02 | GroupSync             | Bidirectional        | Share group membership       |
+| 0x03 | SenderKeyDistribution | Sender → Recipient   | Deliver group encryption key |
+| 0x04 | GroupMessage          | Sender → Group peers | Encrypted group message      |
+| 0x05 | DirectMessage         | Sender → Recipient   | Encrypted 1-to-1 message     |
+| 0x06 | GroupManagement       | Varies               | Group admin operations       |
+| 0x07 | TTYARequest           | TTYA Server → Agent  | Visitor message for approval |
+| 0x08 | TTYAResponse          | Agent → TTYA Server  | Approval decision + reply    |
+| 0x0a | GroupEpoch            | Admin → Group peers  | Signed group state snapshot  |
+| 0xFF | Ack                   | Recipient → Sender   | Delivery acknowledgment      |
 
 ## Connection Handshake
 
@@ -51,6 +51,7 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 ```
 
 **Verification:**
+
 1. Verify `ed25519.verify(signature, noisePublicKey, edPublicKey)` is true
 2. Verify `noisePublicKey` matches the Noise key from the Hyperswarm connection
 3. Verify `timestamp` is within ±300,000 ms of local time
@@ -71,6 +72,7 @@ Sent immediately after both sides complete IdentityHandshake.
 ```
 
 **Processing:**
+
 1. Each side compares received hashes against their own group membership
 2. Intersection = shared groups
 3. For each shared group, exchange SenderKeyDistribution if the peer doesn't have our latest chain key
@@ -84,21 +86,21 @@ Encrypted to the specific recipient using pairwise X25519.
 ```typescript
 {
   type: 0x03,
-  groupId: Uint8Array,           // 32 bytes
-  chainKey: Uint8Array,          // 32 bytes, encrypted
-  chainIndex: number,            // current position in chain
-  signingPublicKey: Uint8Array,  // 32 bytes, sender's Ed25519 key
-  encryptedPayload: Uint8Array,  // XChaCha20-Poly1305 ciphertext
-  nonce: Uint8Array,             // 24 bytes
-  ephemeralPublicKey: Uint8Array // 32 bytes, for X25519 key exchange
+  protocolVersion: 1,
+  recipientPublicKey: Uint8Array, // 32 bytes
+  ciphertext: Uint8Array,         // authenticated encrypted payload
+  nonce: Uint8Array,              // 24 bytes
+  timestamp: number
 }
 ```
 
 **Key exchange for distribution:**
+
 ```
 sharedSecret = x25519(sender.xPrivateKey, recipient.xPublicKey)
 encryptionKey = hkdf(sha256, sharedSecret, "networkselfmd-skd-v1", "", 32)
-encryptedPayload = xchacha20poly1305(encryptionKey, nonce).encrypt(chainKey || uint32(chainIndex))
+ciphertext = xchacha20poly1305(encryptionKey, nonce, recipientBoundAad)
+  .encrypt(canonicalSenderKeyPayload)
 ```
 
 ### GroupMessage (0x04)
@@ -106,26 +108,29 @@ encryptedPayload = xchacha20poly1305(encryptionKey, nonce).encrypt(chainKey || u
 ```typescript
 {
   type: 0x04,
-  id: string,                    // unique message ID (cuid2)
   groupId: Uint8Array,           // 32 bytes
-  senderPublicKey: Uint8Array,   // 32 bytes, Ed25519
+  senderFingerprint: string,     // authenticated session identity
   chainIndex: number,            // sender's chain position
+  epochVersion: number,          // must equal current epoch
+  epochHash: Uint8Array,         // must equal current epoch hash
   nonce: Uint8Array,             // 24 bytes, random
   ciphertext: Uint8Array,        // XChaCha20-Poly1305
-  signature: Uint8Array,         // Ed25519 over (groupId || chainIndex || nonce || ciphertext)
+  signature: Uint8Array,         // Ed25519 over the domain-separated v2 payload
   timestamp: number              // unix ms
 }
 ```
 
 **Encryption:**
+
 ```
 messageKey = hkdf(sha256, chainKey[chainIndex], "networkselfmd-msg-v1", "", 32)
 chainKey[chainIndex + 1] = hkdf(sha256, chainKey[chainIndex], "networkselfmd-chain-v1", "", 32)
 ciphertext = xchacha20poly1305(messageKey, nonce).encrypt(cbor(payload))
-signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || ciphertext), edPrivateKey)
+signature = ed25519.sign(canonicalAuthenticatedV2Payload, edPrivateKey)
 ```
 
 **Payload (plaintext before encryption):**
+
 ```typescript
 {
   content: string,               // message text
@@ -136,6 +141,7 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 ```
 
 **Decryption:**
+
 1. Look up sender's SenderKeyRecord for this group
 2. If `chainIndex > record.chainIndex`: advance chain, cache skipped keys (max 256)
 3. Derive messageKey from the correct chainKey position
@@ -170,11 +176,13 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 | update | Admin only |
 
 **Group ID derivation:**
+
 ```
 groupId = sha256(creator.edPublicKey || uint64(timestamp) || nonce)
 ```
 
 **Topic derivation:**
+
 ```
 topic = hkdf(sha256, groupId, "networkselfmd-topic-v1", "", 32)
 ```
@@ -186,22 +194,35 @@ A signed snapshot of group state, forming a hash chain. Every group mutation (cr
 ```typescript
 {
   type: 0x0a,
-  groupId: string,
+  protocolVersion: 2,
+  groupId: Uint8Array,
+  epochData: Uint8Array,          // canonical immutable epoch below
+  signature: Uint8Array,          // immutable epoch signature
+  hash: Uint8Array,               // immutable epoch hash
+  senderFingerprint: string,
+  recipientFingerprint: string,
+  envelopeSignature: Uint8Array,  // recipient-bound delivery signature
+  timestamp: number               // fresh delivery time
+}
+
+// Decoded epochData:
+{
   version: number,                 // 0 for genesis, increments by 1
   prevHash: Uint8Array,            // 32 bytes, SHA-256 of previous epoch (zeros for genesis)
   members: Array<{
     publicKey: Uint8Array,         // Ed25519 public key
     role: "admin" | "member"
   }>,
-  timestamp: number,               // unix ms
+  createdAt: number,               // immutable unix ms
   createdBy: Uint8Array,           // 32 bytes, admin's Ed25519 public key
   signature: Uint8Array            // Ed25519 over CBOR-serialized epoch data (excluding signature)
 }
 ```
 
 **Epoch hash:**
+
 ```
-epochHash = sha256(cbor(groupId || version || prevHash || members || timestamp || createdBy))
+epochHash = sha256(canonical("network.self.md/GroupEpoch", 1, groupId, version, prevHash, members, createdAt, createdBy))
 ```
 
 **Genesis epoch (version 0):**
@@ -211,6 +232,7 @@ On group creation, the creator produces a genesis epoch with `prevHash = zeros(3
 Each group mutation creates a new epoch: `version = previous.version + 1`, `prevHash = hash(previous)`, updated member list, signed by the admin performing the action.
 
 **Verification rules:**
+
 1. Verify `ed25519.verify(signature, cbor(epochData), createdBy)` is true
 2. Verify `createdBy` is an admin in the previous epoch (or is the creator for genesis)
 3. Verify `prevHash` matches `sha256(cbor(previousEpoch))`
@@ -247,10 +269,12 @@ Uses Double Ratchet for forward secrecy.
 
 **Session initialization:**
 On first connection between two peers (after IdentityHandshake), both derive a shared secret:
+
 ```
 sharedSecret = x25519(myXPrivateKey, peer.xPublicKey)
 rootKey = hkdf(sha256, sharedSecret, "networkselfmd-dm-v1", "", 32)
 ```
+
 The peer with the lexicographically smaller Ed25519 public key initiates the first DH ratchet step.
 
 ## TTYA Protocol
@@ -310,6 +334,7 @@ Every 100 messages or 24 hours (whichever comes first), a sender generates a new
 When a member is kicked or leaves a group, ALL remaining members must rotate their sender keys immediately. This ensures the departed member cannot decrypt future messages (they knew everyone's chain keys up to the point of departure).
 
 **Rotation protocol:**
+
 1. Admin sends `GroupManagement.kick` to all members
 2. Each member generates new `chainKey_0`
 3. Each member sends `SenderKeyDistribution` to all remaining members
@@ -317,14 +342,14 @@ When a member is kicked or leaves a group, ALL remaining members must rotate the
 
 ## Error Handling
 
-| Condition | Action |
-|-----------|--------|
-| Unknown message type | Log warning, ignore message |
-| Failed signature verification | Drop message, log alert |
-| Unknown group | Ignore message (not a member) |
-| Unknown sender in group | Ignore message (not in membership list) |
-| Chain index too far ahead (>256 skip) | Request SenderKeyDistribution re-send |
-| Decryption failure | Log error, request key re-distribution |
-| Frame too large (>1MB) | Drop connection |
-| Handshake timeout (>10s) | Drop connection |
-| Timestamp drift (>5min) | Reject message |
+| Condition                             | Action                                  |
+| ------------------------------------- | --------------------------------------- |
+| Unknown message type                  | Log warning, ignore message             |
+| Failed signature verification         | Drop message, log alert                 |
+| Unknown group                         | Ignore message (not a member)           |
+| Unknown sender in group               | Ignore message (not in membership list) |
+| Chain index too far ahead (>256 skip) | Request SenderKeyDistribution re-send   |
+| Decryption failure                    | Log error, request key re-distribution  |
+| Frame too large (>1MB)                | Drop connection                         |
+| Handshake timeout (>10s)              | Drop connection                         |
+| Timestamp drift (>5min)               | Reject message                          |

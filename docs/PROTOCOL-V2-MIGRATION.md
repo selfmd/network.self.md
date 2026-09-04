@@ -7,37 +7,48 @@ maintenance window.
 
 ## Wire changes
 
-All CBOR message maps now use exhaustive schemas. Missing fields, unknown fields,
-invalid enum values, unsafe or out-of-range integers, oversized text/binary values,
+Every CBOR message map has an exhaustive schema. Missing or unknown fields, invalid enum
+values, unsafe or out-of-range integers, oversized UTF-8/binary values, duplicate entries,
 and incorrectly sized keys, nonces, hashes, or signatures are rejected before routing.
+Nested group epochs and genesis anchors are decoded and verified at the same boundary.
 
-The following messages gained a 64-byte Ed25519 `signature` over a canonical,
-domain-separated v2 payload:
+- `SenderKeyDistribution` is now only the opaque v1 recipient envelope expected from the
+  `security-02-sender-keys` integration: `recipientPublicKey`, `nonce`, `ciphertext`, and
+  `timestamp`. This branch never serializes or broadcasts plaintext chain keys and does not
+  duplicate the envelope encryption implementation from branch 02.
+- `GroupMessage` signs the current `epochVersion` and `epochHash` in addition to its group,
+  sender, chain index, nonce, ciphertext, and timestamp. Unknown groups, missing epochs,
+  stale epoch contexts, and senders removed from the current epoch are rejected.
+- `DirectMessage` and `GroupManagement` bind both authenticated session identities. Invites
+  additionally carry an exact signed genesis v0 anchor; an unpinned group cannot be joined.
+- `NetworkAnnounce` v2 uses a fixed domain-separated canonical payload, sorted unique group
+  IDs, and a signed genesis anchor for every advertised group. The announcer must be the
+  authenticated genesis creator.
+- `GroupEpoch` uses a domain-separated/versioned canonical immutable epoch containing
+  `createdAt`. Delivery uses a separate v2 recipient-bound signed envelope with a fresh
+  `timestamp`, allowing an old epoch to be sent during catch-up without changing its hash or
+  epoch signature.
 
-- `SenderKeyDistribution` also gains `senderFingerprint` and
-  `recipientFingerprint`. Its signature binds both identities, `groupId`, key material,
-  `chainIndex`, and `timestamp`.
-- `GroupMessage` signs `senderFingerprint`, `groupId`, `chainIndex`, `nonce`,
-  `ciphertext`, and `timestamp`.
-- `DirectMessage` signs both fingerprints, ratchet key and counters, `nonce`,
-  `ciphertext`, and `timestamp`.
-- `GroupManagement` also gains both fingerprints and signs them with the group,
-  action, optional target/name, and timestamp. Broadcast operations therefore create a
-  separately signed message for each recipient.
+Byte strings are normalized before canonical authentication, so Node `Buffer` and plain
+`Uint8Array` values produce identical signatures across a CBOR round-trip.
 
-Signatures are verified against the Ed25519 identity authenticated by the active Noise
-session. Sender and recipient fields must match that session and the local identity.
-Messages older or newer than five minutes are rejected. Accepted signed messages are
-recorded in the new SQLite `protocol_replay` table before decryption or state mutation,
-so exact replays remain rejected after process restart.
+## Replay durability and bounds
 
-`GroupEpoch` nested CBOR is now schema-validated and its outer group, timestamp, and
-hash must match the signed epoch. Unsupported/dead message types and management actions
-are rejected by the routing/phase gate instead of being implicitly accepted or ignored.
+Authentication produces a replay reservation but does not consume it. The reservation is
+inserted and promoted to `accepted` in the same SQLite transaction as the ratchet,
+sender-key, epoch, discovery, and message state mutation. A missing ratchet/key, failed
+decrypt, validation error, thrown callback, or process crash rolls the whole transaction
+back; an authentic frame can be retried instead of being permanently poisoned.
 
-## Operational impact
+Accepted replay rows expire after ten minutes. Expired rows are pruned on acceptance, and
+the ledger rejects new reservations above 2,048 live rows per sender or 100,000 globally.
+These limits exceed the five-minute wire freshness window while bounding disk and lookup
+cost under adversarial traffic.
 
-Database migration 5 adds the durable replay ledger automatically. The ledger must be
-preserved with `agent.db`; deleting it removes cross-restart replay history. Existing
-identities, groups, ratchet state, sender keys, messages, and epochs require no data
-conversion, but application traffic cannot resume until both endpoints run protocol v2.
+## Storage migration
+
+Database migration 6 upgrades the migration-5 replay ledger with transactional state and
+expiry columns, adds indexes for pruning/caps, pins group creator/genesis hashes, persists
+authenticated discovery anchors, and adds pending invite bootstrap storage. Migration from
+an existing schema-v4 database is covered by a fixture test; existing v5 replay rows are
+carried forward with bounded expiry.

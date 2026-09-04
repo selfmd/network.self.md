@@ -6,14 +6,12 @@ import type {
   DirectEncryptedMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
-  SenderKeyDistributionMessage,
 } from './types.js';
 
 const encoder = new Encoder({ useRecords: false, mapsAsObjects: true });
 const AUTH_DOMAIN = 'networkselfmd-protocol-auth-v2';
 
 export type AuthenticatedProtocolMessage =
-  | SenderKeyDistributionMessage
   | GroupEncryptedMessage
   | DirectEncryptedMessage
   | GroupManagementMessage;
@@ -30,24 +28,15 @@ export function authenticatedMessagePayload(
 ): Uint8Array {
   let fields: unknown[];
   switch (message.type) {
-    case MessageType.SenderKeyDistribution:
-      fields = [
-        message.groupId,
-        message.chainKey,
-        message.chainIndex,
-        message.signingPublicKey,
-        message.senderFingerprint,
-        message.recipientFingerprint,
-        message.timestamp,
-      ];
-      break;
     case MessageType.GroupMessage:
       fields = [
-        message.groupId,
+        canonicalBytes(message.groupId),
         message.senderFingerprint,
         message.chainIndex,
-        message.nonce,
-        message.ciphertext,
+        message.epochVersion,
+        canonicalBytes(message.epochHash),
+        canonicalBytes(message.nonce),
+        canonicalBytes(message.ciphertext),
         message.timestamp,
       ];
       break;
@@ -55,20 +44,23 @@ export function authenticatedMessagePayload(
       fields = [
         message.senderFingerprint,
         message.recipientFingerprint,
-        message.ratchetPublicKey,
+        canonicalBytes(message.ratchetPublicKey),
         message.previousChainLength,
         message.messageNumber,
-        message.nonce,
-        message.ciphertext,
+        canonicalBytes(message.nonce),
+        canonicalBytes(message.ciphertext),
         message.timestamp,
       ];
       break;
     case MessageType.GroupManagement:
       fields = [
-        message.groupId,
+        canonicalBytes(message.groupId),
         message.action,
         message.targetFingerprint ?? null,
         message.groupName ?? null,
+        optionalBytes(message.genesisEpochData),
+        optionalBytes(message.genesisSignature),
+        optionalBytes(message.genesisHash),
         message.senderFingerprint,
         message.recipientFingerprint,
         message.timestamp,
@@ -78,6 +70,14 @@ export function authenticatedMessagePayload(
       throw new Error('Message type is not authenticated by protocol v2');
   }
   return encoder.encode([AUTH_DOMAIN, message.type, ...fields]);
+}
+
+function canonicalBytes(value: Uint8Array): Uint8Array {
+  return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function optionalBytes(value: Uint8Array | undefined): Uint8Array | null {
+  return value === undefined ? null : canonicalBytes(value);
 }
 
 export function signAuthenticatedMessage<

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { SenderKeys, type SenderKeyRecord } from '../protocol/sender-keys.js';
-import { generateIdentity } from '../identity.js';
 
 describe('SenderKeys', () => {
   it('generates initial state with random chain key and index 0', () => {
@@ -147,28 +146,5 @@ describe('SenderKeys', () => {
     expect(() =>
       SenderKeys.decrypt(record, chainIndex, nonce, ciphertext),
     ).toThrow(/too many skipped/i);
-  });
-
-  it('createDistribution produces valid message', () => {
-    const state = SenderKeys.generate();
-    const groupId = new Uint8Array(32);
-    const identity = generateIdentity();
-    const recipient = 'y'.repeat(32);
-    const dist = SenderKeys.createDistribution(
-      groupId,
-      state,
-      identity.edPublicKey,
-      identity.fingerprint,
-      recipient,
-      identity.edPrivateKey,
-    );
-
-    expect(dist.type).toBe(0x03);
-    expect(dist.groupId).toBe(groupId);
-    expect(dist.chainKey).toBe(state.chainKey);
-    expect(dist.chainIndex).toBe(state.chainIndex);
-    expect(dist.signingPublicKey).toBe(identity.edPublicKey);
-    expect(dist.signature).toHaveLength(64);
-    expect(typeof dist.timestamp).toBe('number');
   });
 });

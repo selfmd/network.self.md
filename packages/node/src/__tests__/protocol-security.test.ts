@@ -7,19 +7,21 @@ import {
   MessageType,
   signAuthenticatedMessage,
 } from '@networkselfmd/core';
-import type { GroupEncryptedMessage } from '@networkselfmd/core';
 import type {
   AuthenticatedProtocolMessage,
   DirectEncryptedMessage,
+  GroupEncryptedMessage,
   GroupManagementMessage,
-  SenderKeyDistributionMessage,
 } from '@networkselfmd/core';
 import { PeerSession } from '../network/connection.js';
-import { acceptAuthenticatedMessage } from '../network/protocol-security.js';
+import {
+  validateAuthenticatedMessage,
+  validateSenderKeyEnvelope,
+} from '../network/protocol-security.js';
 import { MessageRouter } from '../network/router.js';
 import { AgentDatabase, ProtocolReplayRepository } from '../storage/index.js';
 
-describe('authenticated inbound replay protection', () => {
+describe('atomic inbound replay protection', () => {
   let dir: string;
   let database: AgentDatabase;
   const sender = generateIdentity();
@@ -48,6 +50,8 @@ describe('authenticated inbound replay protection', () => {
         groupId: new Uint8Array(32).fill(1),
         senderFingerprint: sender.fingerprint,
         chainIndex: 0,
+        epochVersion: 0,
+        epochHash: new Uint8Array(32).fill(9),
         ciphertext: new Uint8Array(16).fill(2),
         nonce: new Uint8Array(24).fill(3),
         timestamp,
@@ -60,19 +64,6 @@ describe('authenticated inbound replay protection', () => {
     timestamp = Date.now(),
   ): AuthenticatedProtocolMessage[] {
     return [
-      signAuthenticatedMessage<SenderKeyDistributionMessage>(
-        {
-          type: MessageType.SenderKeyDistribution,
-          groupId: new Uint8Array(32).fill(1),
-          chainKey: new Uint8Array(32).fill(2),
-          chainIndex: 1,
-          signingPublicKey: sender.edPublicKey,
-          senderFingerprint: sender.fingerprint,
-          recipientFingerprint: recipient.fingerprint,
-          timestamp,
-        },
-        sender.edPrivateKey,
-      ),
       message(timestamp),
       signAuthenticatedMessage<DirectEncryptedMessage>(
         {
@@ -92,9 +83,8 @@ describe('authenticated inbound replay protection', () => {
         {
           type: MessageType.GroupManagement,
           groupId: new Uint8Array(32).fill(1),
-          action: 'invite',
+          action: 'kick',
           targetFingerprint: recipient.fingerprint,
-          groupName: 'test',
           senderFingerprint: sender.fingerprint,
           recipientFingerprint: recipient.fingerprint,
           timestamp,
@@ -105,90 +95,155 @@ describe('authenticated inbound replay protection', () => {
   }
 
   it.each(authenticatedMessages())(
-    'rejects duplicate signed message type $type',
+    'rejects a committed duplicate for type $type',
     (signed) => {
       const replay = new ProtocolReplayRepository(database.getDb());
-      expect(() =>
-        acceptAuthenticatedMessage(
-          session,
-          signed,
-          recipient.fingerprint,
-          replay,
-        ),
-      ).not.toThrow();
-      expect(() =>
-        acceptAuthenticatedMessage(
-          session,
-          signed,
-          recipient.fingerprint,
-          replay,
-        ),
-      ).toThrow(/replay/i);
+      const reservation = validateAuthenticatedMessage(
+        session,
+        signed,
+        recipient.fingerprint,
+      );
+      expect(() => replay.accept(reservation, () => undefined)).not.toThrow();
+      expect(() => replay.accept(reservation, () => undefined)).toThrow(
+        /replay/i,
+      );
     },
   );
 
-  it('rejects a replay and preserves the decision across restart', () => {
+  it('rolls back both reservation and state when mutation/decrypt fails', () => {
+    let replay = new ProtocolReplayRepository(database.getDb());
+    const reservation = validateAuthenticatedMessage(
+      session,
+      message(),
+      recipient.fingerprint,
+    );
+    expect(() =>
+      replay.accept(reservation, () => {
+        database
+          .getDb()
+          .prepare(
+            `INSERT INTO messages (id, content, timestamp, type)
+             VALUES ('partial', 'must rollback', 1, 'direct')`,
+          )
+          .run();
+        throw new Error('simulated decrypt failure/crash');
+      }),
+    ).toThrow(/simulated/i);
+    expect(replay.has(reservation.messageId)).toBe(false);
+    expect(
+      database
+        .getDb()
+        .prepare("SELECT 1 FROM messages WHERE id = 'partial'")
+        .get(),
+    ).toBeUndefined();
+    database.close();
+    database = new AgentDatabase(dir);
+    database.migrate();
+    replay = new ProtocolReplayRepository(database.getDb());
+    expect(() => replay.accept(reservation, () => undefined)).not.toThrow();
+  });
+
+  it('survives restart only after state and reservation commit together', () => {
     const signed = message();
     let replay = new ProtocolReplayRepository(database.getDb());
-    expect(() =>
-      acceptAuthenticatedMessage(
-        session,
-        signed,
-        recipient.fingerprint,
-        replay,
-      ),
-    ).not.toThrow();
-    expect(() =>
-      acceptAuthenticatedMessage(
-        session,
-        signed,
-        recipient.fingerprint,
-        replay,
-      ),
-    ).toThrow(/replay/i);
+    const reservation = validateAuthenticatedMessage(
+      session,
+      signed,
+      recipient.fingerprint,
+    );
+    replay.accept(reservation, () => {
+      database
+        .getDb()
+        .prepare(
+          `INSERT INTO messages (id, content, timestamp, type)
+           VALUES ('committed', 'ok', 1, 'direct')`,
+        )
+        .run();
+    });
 
     database.close();
     database = new AgentDatabase(dir);
     database.migrate();
     replay = new ProtocolReplayRepository(database.getDb());
-    expect(() =>
-      acceptAuthenticatedMessage(
-        session,
-        signed,
-        recipient.fingerprint,
-        replay,
-      ),
-    ).toThrow(/replay/i);
+    expect(replay.has(reservation.messageId)).toBe(true);
+    expect(() => replay.accept(reservation, () => undefined)).toThrow(
+      /replay/i,
+    );
+    expect(
+      database
+        .getDb()
+        .prepare("SELECT 1 FROM messages WHERE id = 'committed'")
+        .get(),
+    ).toBeDefined();
   });
 
-  it('rejects stale timestamps and forged session identities before claiming', () => {
-    const replay = new ProtocolReplayRepository(database.getDb());
+  it('prunes by TTL and enforces per-sender and global caps', () => {
+    const replay = new ProtocolReplayRepository(database.getDb(), {
+      ttlMs: 10,
+      perSenderCap: 2,
+      globalCap: 3,
+    });
+    const reserve = (
+      id: number,
+      senderFingerprint = sender.fingerprint,
+      at = 1,
+    ) => ({
+      messageId: new Uint8Array(32).fill(id),
+      senderFingerprint,
+      messageType: MessageType.DirectMessage,
+      receivedAt: at,
+    });
+    replay.accept(reserve(1), () => undefined);
+    replay.accept(reserve(2), () => undefined);
+    expect(() => replay.accept(reserve(3), () => undefined)).toThrow(
+      /per-sender/i,
+    );
+    replay.accept(reserve(3, recipient.fingerprint), () => undefined);
+    expect(() =>
+      replay.accept(reserve(4, 'b'.repeat(32)), () => undefined),
+    ).toThrow(/global/i);
+    expect(replay.prune(11)).toBe(3);
+    expect(() =>
+      replay.accept(reserve(4, sender.fingerprint, 11), () => undefined),
+    ).not.toThrow();
+  });
+
+  it('rejects stale timestamps and forged session identities before reservation', () => {
     const stale = message(Date.now() - 5 * 60 * 1000 - 1);
     expect(() =>
-      acceptAuthenticatedMessage(session, stale, recipient.fingerprint, replay),
+      validateAuthenticatedMessage(session, stale, recipient.fingerprint),
     ).toThrow(/timestamp/i);
-
-    const signed = message();
     const forgedSession = {
       ...session,
       peerFingerprint: recipient.fingerprint,
     } as PeerSession;
     expect(() =>
-      acceptAuthenticatedMessage(
+      validateAuthenticatedMessage(
         forgedSession,
-        signed,
+        message(),
         recipient.fingerprint,
-        replay,
       ),
-    ).toThrow(/sender/i);
+    ).toThrow(/fingerprint/i);
+  });
+
+  it('prepares opaque recipient-specific sender-key envelopes for atomic replay', () => {
+    const envelope = {
+      type: MessageType.SenderKeyDistribution,
+      protocolVersion: 1,
+      recipientPublicKey: recipient.edPublicKey,
+      ciphertext: new Uint8Array(16).fill(7),
+      nonce: new Uint8Array(24).fill(8),
+      timestamp: Date.now(),
+    } as const;
+    const reservation = validateSenderKeyEnvelope(
+      session,
+      envelope,
+      recipient.edPublicKey,
+    );
+    expect(reservation.senderFingerprint).toBe(sender.fingerprint);
     expect(() =>
-      acceptAuthenticatedMessage(
-        session,
-        signed,
-        recipient.fingerprint,
-        replay,
-      ),
-    ).not.toThrow();
+      validateSenderKeyEnvelope(session, envelope, sender.edPublicKey),
+    ).toThrow(/recipient/i);
   });
 });
 
@@ -197,9 +252,8 @@ describe('protocol phase and use gating', () => {
   const identity = generateIdentity();
 
   it('rejects application traffic before the session is ready', async () => {
-    const session = { state: 'verified' } as PeerSession;
     await expect(
-      router.route(session, {
+      router.route({ state: 'verified' } as PeerSession, {
         type: MessageType.GroupSync,
         groupId: new Uint8Array(32),
         members: [],
@@ -210,9 +264,9 @@ describe('protocol phase and use gating', () => {
   });
 
   it('rejects handshakes and unsupported dead types after readiness', async () => {
-    const session = { state: 'ready' } as PeerSession;
+    const ready = { state: 'ready' } as PeerSession;
     await expect(
-      router.route(session, {
+      router.route(ready, {
         type: MessageType.IdentityHandshake,
         edPublicKey: identity.edPublicKey,
         xPublicKey: identity.xPublicKey,
@@ -222,9 +276,8 @@ describe('protocol phase and use gating', () => {
         timestamp: Date.now(),
       }),
     ).rejects.toThrow(/invalid after handshake/i);
-
     await expect(
-      router.route(session, {
+      router.route(ready, {
         type: MessageType.Ack,
         messageId: 'unused',
         timestamp: Date.now(),
@@ -233,8 +286,12 @@ describe('protocol phase and use gating', () => {
   });
 });
 
-describe('malformed frame handling', () => {
-  it('reports the error and destroys the offending session', () => {
+describe('malformed frame handling matrix', () => {
+  it.each([
+    ['malformed cbor', Buffer.from([0, 0, 0, 1, 0xff])],
+    ['empty frame', Buffer.from([0, 0, 0, 0])],
+    ['oversized frame', Buffer.from([0, 16, 0, 1])],
+  ])('reports %s and destroys the offending session', (_label, frame) => {
     const handlers = new Map<string, (...args: unknown[]) => void>();
     const destroy = vi.fn();
     const peerSession = new PeerSession({
@@ -248,10 +305,24 @@ describe('malformed frame handling', () => {
     });
     const errors: Error[] = [];
     peerSession.on('error', (error) => errors.push(error));
-
-    handlers.get('data')?.(Buffer.from([0, 0, 0, 1, 0xff]));
-
+    handlers.get('data')?.(frame);
     expect(errors).toHaveLength(1);
     expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not destroy a session for a fragmented frame prefix', () => {
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    const destroy = vi.fn();
+    new PeerSession({
+      write: vi.fn(),
+      end: vi.fn(),
+      destroy,
+      on: (event, handler) => handlers.set(event, handler),
+      removeAllListeners: vi.fn(),
+      publicKey: Buffer.alloc(32, 1),
+      remotePublicKey: Buffer.alloc(32, 2),
+    });
+    handlers.get('data')?.(Buffer.from([0, 0]));
+    expect(destroy).not.toHaveBeenCalled();
   });
 });

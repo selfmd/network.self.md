@@ -93,6 +93,26 @@ describe('framing', () => {
     expect(result).toBeNull();
   });
 
+  it('rejects an empty frame payload', () => {
+    expect(() => parseFrame(new Uint8Array(4))).toThrow(/empty payload/i);
+  });
+
+  it('rejects malformed CBOR in a complete frame', () => {
+    expect(() => parseFrame(new Uint8Array([0, 0, 0, 1, 0x1a]))).toThrow(
+      /malformed CBOR/i,
+    );
+  });
+
+  it('consumes exactly one frame and leaves trailing bytes to the caller', () => {
+    const first = frameMessage(sampleMsg);
+    const second = frameMessage({ ...sampleMsg, messageId: 'second' });
+    const combined = new Uint8Array(first.length + second.length);
+    combined.set(first);
+    combined.set(second, first.length);
+    const parsed = parseFrame(combined);
+    expect(parsed?.bytesConsumed).toBe(first.length);
+  });
+
   it('rejects frames exceeding MAX_FRAME_SIZE', () => {
     // Create a buffer with length prefix > MAX_FRAME_SIZE
     const buf = new Uint8Array(8);

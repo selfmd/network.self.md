@@ -39,7 +39,28 @@ export {
   type AuthenticatedProtocolMessage,
 } from './message-auth.js';
 
-export { signAnnounce, verifyAnnounce } from './announce-signature.js';
+export {
+  NETWORK_ANNOUNCE_VERSION,
+  MAX_ANNOUNCE_GROUPS,
+  canonicalAnnouncePayload,
+  signAnnounce,
+  verifyAnnounce,
+  networkAnnounceId,
+  verifyAnnouncedGroupAuthority,
+} from './announce-signature.js';
+
+export {
+  GROUP_EPOCH_ENVELOPE_VERSION,
+  canonicalGroupEpochEnvelope,
+  signGroupEpochEnvelope,
+  verifyGroupEpochEnvelope,
+  groupEpochEnvelopeId,
+} from './epoch-envelope.js';
+
+export {
+  SENDER_KEY_ENVELOPE_VERSION,
+  senderKeyEnvelopeId,
+} from './sender-key-envelope.js';
 
 export {
   SenderKeys,
@@ -58,5 +79,9 @@ export {
   hashEpoch,
   createSignedEpoch,
   verifyEpoch,
+  verifyGenesisEpoch,
   createGenesisEpoch,
+  GROUP_EPOCH_FORMAT_VERSION,
+  MAX_EPOCH_BYTES,
+  MAX_GROUP_MEMBERS,
 } from './group-state.js';

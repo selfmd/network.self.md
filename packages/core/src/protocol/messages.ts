@@ -1,13 +1,22 @@
 import { Encoder, Decoder } from 'cbor-x';
 import type { ProtocolMessage } from './types.js';
 import { MessageType } from './types.js';
+import {
+  deserializeEpoch,
+  hashEpoch,
+  verifyGenesisEpoch,
+} from './group-state.js';
 
 const encoder = new Encoder({ useRecords: false });
 const decoder = new Decoder({ mapsAsObjects: true, useRecords: false });
 
 export const MAX_FRAME_SIZE = 1_048_576;
 const MAX_TEXT_SIZE = 65_536;
+const MAX_CIPHERTEXT_SIZE = MAX_TEXT_SIZE + 16;
+const MAX_EPOCH_SIZE = 256 * 1024;
+const MAX_GENESIS_SIZE = 4096;
 const FINGERPRINT = /^[ybndrfg8ejkmcpqxot1uwisza345h769]{32}$/;
+const textEncoder = new TextEncoder();
 
 function fail(field: string, reason: string): never {
   throw new Error(`Invalid message: ${field} ${reason}`);
@@ -70,8 +79,10 @@ function string(
   min: number,
   max: number,
 ): asserts value is string {
-  if (typeof value !== 'string' || value.length < min || value.length > max) {
-    fail(field, `must be a string of ${min}-${max} characters`);
+  const length =
+    typeof value === 'string' ? textEncoder.encode(value).length : -1;
+  if (typeof value !== 'string' || length < min || length > max) {
+    fail(field, `must be a string of ${min}-${max} UTF-8 bytes`);
   }
 }
 
@@ -117,7 +128,13 @@ function validateGroupSync(m: Record<string, unknown>): void {
   bytes(m.groupId, 'groupId', 32);
   if (!Array.isArray(m.members) || m.members.length > 1024)
     fail('members', 'must be an array with at most 1024 entries');
-  for (const member of m.members) bytes(member, 'members[]', 32);
+  const seen = new Set<string>();
+  for (const member of m.members) {
+    bytes(member, 'members[]', 32);
+    const key = toHex(member);
+    if (seen.has(key)) fail('members', 'must not contain duplicates');
+    seen.add(key);
+  }
   integer(m.epoch, 'epoch');
   timestamp(m.timestamp);
 }
@@ -125,23 +142,19 @@ function validateGroupSync(m: Record<string, unknown>): void {
 function validateSenderKeyDistribution(m: Record<string, unknown>): void {
   keys(m, [
     'type',
-    'groupId',
-    'chainKey',
-    'chainIndex',
-    'signingPublicKey',
-    'senderFingerprint',
-    'recipientFingerprint',
+    'protocolVersion',
+    'recipientPublicKey',
+    'ciphertext',
+    'nonce',
     'timestamp',
-    'signature',
   ]);
-  bytes(m.groupId, 'groupId', 32);
-  bytes(m.chainKey, 'chainKey', 32);
-  integer(m.chainIndex, 'chainIndex');
-  bytes(m.signingPublicKey, 'signingPublicKey', 32);
-  fingerprint(m.senderFingerprint, 'senderFingerprint');
-  fingerprint(m.recipientFingerprint, 'recipientFingerprint');
+  if (m.protocolVersion !== 1) fail('protocolVersion', 'must be 1');
+  bytes(m.recipientPublicKey, 'recipientPublicKey', 32);
+  bytes(m.ciphertext, 'ciphertext', undefined, 16);
+  if ((m.ciphertext as Uint8Array).length > MAX_TEXT_SIZE)
+    fail('ciphertext', 'is too large');
+  bytes(m.nonce, 'nonce', 24);
   timestamp(m.timestamp);
-  bytes(m.signature, 'signature', 64);
 }
 
 function validateGroupMessage(m: Record<string, unknown>): void {
@@ -150,6 +163,8 @@ function validateGroupMessage(m: Record<string, unknown>): void {
     'groupId',
     'senderFingerprint',
     'chainIndex',
+    'epochVersion',
+    'epochHash',
     'ciphertext',
     'nonce',
     'timestamp',
@@ -158,8 +173,10 @@ function validateGroupMessage(m: Record<string, unknown>): void {
   bytes(m.groupId, 'groupId', 32);
   fingerprint(m.senderFingerprint, 'senderFingerprint');
   integer(m.chainIndex, 'chainIndex');
+  integer(m.epochVersion, 'epochVersion');
+  bytes(m.epochHash, 'epochHash', 32);
   bytes(m.ciphertext, 'ciphertext', undefined, 16);
-  if ((m.ciphertext as Uint8Array).length > MAX_FRAME_SIZE)
+  if ((m.ciphertext as Uint8Array).length > MAX_CIPHERTEXT_SIZE)
     fail('ciphertext', 'is too large');
   bytes(m.nonce, 'nonce', 24);
   timestamp(m.timestamp);
@@ -185,7 +202,7 @@ function validateDirectMessage(m: Record<string, unknown>): void {
   integer(m.previousChainLength, 'previousChainLength');
   integer(m.messageNumber, 'messageNumber');
   bytes(m.ciphertext, 'ciphertext', undefined, 16);
-  if ((m.ciphertext as Uint8Array).length > MAX_FRAME_SIZE)
+  if ((m.ciphertext as Uint8Array).length > MAX_CIPHERTEXT_SIZE)
     fail('ciphertext', 'is too large');
   bytes(m.nonce, 'nonce', 24);
   timestamp(m.timestamp);
@@ -204,7 +221,13 @@ function validateGroupManagement(m: Record<string, unknown>): void {
       'timestamp',
       'signature',
     ],
-    ['targetFingerprint', 'groupName'],
+    [
+      'targetFingerprint',
+      'groupName',
+      'genesisEpochData',
+      'genesisSignature',
+      'genesisHash',
+    ],
   );
   bytes(m.groupId, 'groupId', 32);
   if (
@@ -219,15 +242,43 @@ function validateGroupManagement(m: Record<string, unknown>): void {
   bytes(m.signature, 'signature', 64);
   if (m.targetFingerprint !== undefined)
     fingerprint(m.targetFingerprint, 'targetFingerprint');
-  optionalString(m.groupName, 'groupName', 1, 256);
+  optionalString(m.groupName, 'groupName', 1, 128);
+  if (m.genesisEpochData !== undefined) {
+    bytes(m.genesisEpochData, 'genesisEpochData', undefined, 1);
+    if ((m.genesisEpochData as Uint8Array).length > MAX_GENESIS_SIZE)
+      fail('genesisEpochData', 'is too large');
+  }
+  if (m.genesisSignature !== undefined)
+    bytes(m.genesisSignature, 'genesisSignature', 64);
+  if (m.genesisHash !== undefined) bytes(m.genesisHash, 'genesisHash', 32);
   if (
     (m.action === 'invite' || m.action === 'kick' || m.action === 'promote') &&
     m.targetFingerprint === undefined
   ) {
     fail('targetFingerprint', `is required for ${String(m.action)}`);
   }
-  if (m.action === 'invite' && m.groupName === undefined)
-    fail('groupName', 'is required for invite');
+  if (m.action === 'invite') {
+    if (m.groupName === undefined) fail('groupName', 'is required for invite');
+    if (m.genesisEpochData === undefined)
+      fail('genesisEpochData', 'is required for invite');
+    if (m.genesisSignature === undefined)
+      fail('genesisSignature', 'is required for invite');
+    if (m.genesisHash === undefined)
+      fail('genesisHash', 'is required for invite');
+    validateGenesisAnchor(
+      m.groupId as Uint8Array,
+      m.genesisEpochData as Uint8Array,
+      m.genesisSignature as Uint8Array,
+      m.genesisHash as Uint8Array,
+      'invite',
+    );
+  } else if (
+    m.genesisEpochData !== undefined ||
+    m.genesisSignature !== undefined ||
+    m.genesisHash !== undefined
+  ) {
+    fail('genesisEpochData', 'is only allowed for invite');
+  }
 }
 
 function validateTTYARequest(m: Record<string, unknown>): void {
@@ -246,30 +297,129 @@ function validateTTYAResponse(m: Record<string, unknown>): void {
 }
 
 function validateNetworkAnnounce(m: Record<string, unknown>): void {
-  keys(m, ['type', 'groups', 'signature', 'timestamp']);
-  if (!Array.isArray(m.groups) || m.groups.length > 256)
-    fail('groups', 'must be an array with at most 256 entries');
+  keys(m, ['type', 'protocolVersion', 'groups', 'signature', 'timestamp']);
+  if (m.protocolVersion !== 2) fail('protocolVersion', 'must be 2');
+  if (!Array.isArray(m.groups) || m.groups.length > 64)
+    fail('groups', 'must be an array with at most 64 entries');
+  let previous = '';
   for (const item of m.groups) {
     const group = object(item);
-    keys(group, ['groupId', 'name', 'selfMd', 'memberCount']);
+    keys(group, [
+      'groupId',
+      'name',
+      'selfMd',
+      'memberCount',
+      'genesisEpochData',
+      'genesisSignature',
+      'genesisHash',
+    ]);
     bytes(group.groupId, 'groups[].groupId', 32);
-    string(group.name, 'groups[].name', 1, 256);
-    string(group.selfMd, 'groups[].selfMd', 0, MAX_TEXT_SIZE);
-    integer(group.memberCount, 'groups[].memberCount', 1_000_000);
+    const id = Array.from(group.groupId as Uint8Array, (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    if (previous && id <= previous)
+      fail('groups', 'must contain unique group IDs in ascending order');
+    previous = id;
+    string(group.name, 'groups[].name', 1, 128);
+    string(group.selfMd, 'groups[].selfMd', 0, 16 * 1024);
+    integer(group.memberCount, 'groups[].memberCount', 100_000);
+    if ((group.memberCount as number) < 1)
+      fail('groups[].memberCount', 'must be at least 1');
+    bytes(group.genesisEpochData, 'groups[].genesisEpochData', undefined, 1);
+    if ((group.genesisEpochData as Uint8Array).length > MAX_GENESIS_SIZE)
+      fail('groups[].genesisEpochData', 'is too large');
+    bytes(group.genesisSignature, 'groups[].genesisSignature', 64);
+    bytes(group.genesisHash, 'groups[].genesisHash', 32);
+    validateGenesisAnchor(
+      group.groupId as Uint8Array,
+      group.genesisEpochData as Uint8Array,
+      group.genesisSignature as Uint8Array,
+      group.genesisHash as Uint8Array,
+      'groups[]',
+    );
   }
   bytes(m.signature, 'signature', 64);
   timestamp(m.timestamp);
 }
 
 function validateGroupEpoch(m: Record<string, unknown>): void {
-  keys(m, ['type', 'groupId', 'epochData', 'signature', 'hash', 'timestamp']);
+  keys(m, [
+    'type',
+    'protocolVersion',
+    'groupId',
+    'epochData',
+    'signature',
+    'hash',
+    'senderFingerprint',
+    'recipientFingerprint',
+    'envelopeSignature',
+    'timestamp',
+  ]);
+  if (m.protocolVersion !== 2) fail('protocolVersion', 'must be 2');
   bytes(m.groupId, 'groupId', 32);
   bytes(m.epochData, 'epochData', undefined, 1);
-  if ((m.epochData as Uint8Array).length > MAX_FRAME_SIZE)
+  if ((m.epochData as Uint8Array).length > MAX_EPOCH_SIZE)
     fail('epochData', 'is too large');
   bytes(m.signature, 'signature', 64);
   bytes(m.hash, 'hash', 32);
+  fingerprint(m.senderFingerprint, 'senderFingerprint');
+  fingerprint(m.recipientFingerprint, 'recipientFingerprint');
+  bytes(m.envelopeSignature, 'envelopeSignature', 64);
   timestamp(m.timestamp);
+  let epoch;
+  try {
+    epoch = deserializeEpoch(m.epochData as Uint8Array);
+  } catch {
+    fail('epochData', 'contains an invalid group epoch');
+  }
+  if (epoch.groupId !== toHex(m.groupId as Uint8Array))
+    fail('epochData', 'groupId does not match envelope');
+  if (!bytesEqual(hashEpoch(m.epochData as Uint8Array), m.hash as Uint8Array))
+    fail('hash', 'does not match epochData');
+}
+
+function validateGenesisAnchor(
+  groupId: Uint8Array,
+  epochData: Uint8Array,
+  signature: Uint8Array,
+  hash: Uint8Array,
+  field: string,
+): void {
+  try {
+    const epoch = deserializeEpoch(epochData);
+    if (
+      !verifyGenesisEpoch(
+        { epoch, signature, hash },
+        toHex(groupId),
+        epoch.createdBy,
+      )
+    ) {
+      fail(field, 'contains an invalid genesis trust anchor');
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith('Invalid message:')
+    ) {
+      throw error;
+    }
+    fail(field, 'contains an invalid genesis trust anchor');
+  }
+}
+
+function toHex(value: Uint8Array): string {
+  return Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  );
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let index = 0; index < a.length; index++) {
+    difference |= a[index] ^ b[index];
+  }
+  return difference === 0;
 }
 
 function validateAck(m: Record<string, unknown>): void {

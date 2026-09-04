@@ -53,7 +53,7 @@ describe('AgentDatabase', () => {
     const row = db.prepare('SELECT version FROM schema_version').get() as {
       version: number;
     };
-    expect(row.version).toBe(5);
+    expect(row.version).toBe(6);
   });
 });
 

@@ -1,9 +1,6 @@
 import { randomBytes } from '@noble/hashes/utils';
 import { encrypt, decrypt } from '../crypto/aead.js';
 import { advanceChain } from '../crypto/kdf.js';
-import type { SenderKeyDistributionMessage } from './types.js';
-import { MessageType } from './types.js';
-import { signAuthenticatedMessage } from './message-auth.js';
 
 export interface SenderKeyState {
   chainKey: Uint8Array;
@@ -106,28 +103,5 @@ export const SenderKeys = {
         skippedKeys: newSkipped,
       },
     };
-  },
-
-  createDistribution(
-    groupId: Uint8Array,
-    state: SenderKeyState,
-    signingPublicKey: Uint8Array,
-    senderFingerprint: string,
-    recipientFingerprint: string,
-    signingPrivateKey: Uint8Array,
-  ): SenderKeyDistributionMessage {
-    return signAuthenticatedMessage<SenderKeyDistributionMessage>(
-      {
-        type: MessageType.SenderKeyDistribution,
-        groupId,
-        chainKey: state.chainKey,
-        chainIndex: state.chainIndex,
-        signingPublicKey,
-        senderFingerprint,
-        recipientFingerprint,
-        timestamp: Date.now(),
-      },
-      signingPrivateKey,
-    );
   },
 };
