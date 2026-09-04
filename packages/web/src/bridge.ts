@@ -40,12 +40,26 @@ type BridgeAuthState =
   | 'awaiting-confirmation'
   | 'authenticated';
 
+interface BridgeConnectionState {
+  readonly decoder: TTYAFrameDecoder;
+  readonly binding: Uint8Array;
+  readonly key: string;
+  authState: BridgeAuthState;
+  agentNonce: string | null;
+  bridgeNonce: string | null;
+  sessionKey: Buffer | null;
+  receiveSequence: number;
+  sendSequence: number;
+  authTimeout: ReturnType<typeof setTimeout> | null;
+}
+
 const AUTH_TIMEOUT_MS = 5_000;
 const AUTH_RATE_WINDOW_MS = 60_000;
 const AUTH_FAILURES_PER_PEER = 5;
 const AUTH_FAILURES_GLOBAL = 20;
 const AUTH_BACKOFF_BASE_MS = 250;
 const AUTH_BACKOFF_MAX_MS = 30_000;
+export const MAX_TTYA_AUTH_CANDIDATES = 4;
 const MAX_PENDING_REQUESTS = 1_000;
 const MAX_VISITOR_ID_BYTES = 128;
 const MAX_CONTENT_BYTES = 4_096;
@@ -116,17 +130,9 @@ export class TTYABridge {
   private swarm: Hyperswarm | null = null;
   private connectPromise: Promise<void> | null = null;
   private agentConnection: TTYASocket | null = null;
+  private connections = new Map<TTYASocket, BridgeConnectionState>();
   private responseHandler: ((response: TTYAResponse) => void) | null = null;
   private pendingRequests: TTYARequest[] = [];
-  private decoder = new TTYAFrameDecoder();
-  private authState: BridgeAuthState = 'awaiting-challenge';
-  private agentNonce: string | null = null;
-  private bridgeNonce: string | null = null;
-  private channelBinding: Uint8Array | null = null;
-  private sessionKey: Buffer | null = null;
-  private receiveSequence = 0;
-  private sendSequence = 0;
-  private authTimeout: ReturnType<typeof setTimeout> | null = null;
   private authFailures = new Map<string, AuthFailureState>();
   private globalAuthFailures: number[] = [];
 
@@ -175,12 +181,11 @@ export class TTYABridge {
 
   async disconnect(): Promise<void> {
     if (this.connectPromise) await this.connectPromise.catch(() => {});
-    const connection = this.agentConnection;
-    this.resetConnectionState();
-    try {
-      connection?.destroy();
-    } catch {
-      // ignore a closing transport
+    const connections = [...this.connections.keys()];
+    this.agentConnection = null;
+    for (const connection of connections) {
+      this.removeConnection(connection);
+      this.closeSocket(connection);
     }
     const swarm = this.swarm;
     this.swarm = null;
@@ -191,8 +196,10 @@ export class TTYABridge {
   }
 
   sendToAgent(request: TTYARequest): void {
-    if (this.agentConnection && this.authState === 'authenticated') {
-      if (this.writeRequest(request, this.agentConnection)) return;
+    const connection = this.agentConnection;
+    const state = connection ? this.connections.get(connection) : undefined;
+    if (connection && state?.authState === 'authenticated') {
+      if (this.writeRequest(request, connection, state)) return;
     }
     if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
       this.pendingRequests.shift();
@@ -205,12 +212,20 @@ export class TTYABridge {
   }
 
   get isConnected(): boolean {
-    return this.agentConnection !== null && this.authState === 'authenticated';
+    if (!this.agentConnection) return false;
+    return (
+      this.connections.get(this.agentConnection)?.authState === 'authenticated'
+    );
   }
 
   private acceptConnection(conn: TTYASocket): void {
-    // A late or malicious socket cannot evict the current candidate/incumbent.
+    // Keep an authenticated incumbent stable, but allow a bounded race among
+    // candidates so a silent first socket cannot monopolize the topic.
     if (this.agentConnection) {
+      this.closeSocket(conn);
+      return;
+    }
+    if (this.connections.size >= MAX_TTYA_AUTH_CANDIDATES) {
       this.closeSocket(conn);
       return;
     }
@@ -230,103 +245,130 @@ export class TTYABridge {
       return;
     }
 
-    this.agentConnection = conn;
-    this.decoder = new TTYAFrameDecoder();
-    this.resetAuthentication(binding);
+    const state: BridgeConnectionState = {
+      decoder: new TTYAFrameDecoder(),
+      binding,
+      key,
+      authState: 'awaiting-challenge',
+      agentNonce: null,
+      bridgeNonce: null,
+      sessionKey: null,
+      receiveSequence: 0,
+      sendSequence: 0,
+      authTimeout: null,
+    };
+    this.connections.set(conn, state);
     conn.on('data', (chunk: Uint8Array) => {
-      if (this.agentConnection !== conn) return;
+      if (this.connections.get(conn) !== state) return;
       try {
-        const frames = this.decoder.push(chunk);
+        const frames = state.decoder.push(chunk);
         for (const frame of frames) {
-          if (this.agentConnection !== conn) return;
-          this.processFrame(conn, frame);
+          if (this.connections.get(conn) !== state) return;
+          this.processFrame(conn, state, frame);
         }
       } catch {
-        this.destroyConnection(conn, this.authState !== 'authenticated');
+        this.destroyConnection(conn, state.authState !== 'authenticated');
       }
     });
     conn.on('close', () => this.handleConnectionClosed(conn));
     conn.on('error', () => this.handleConnectionClosed(conn));
 
-    this.authTimeout = setTimeout(() => {
-      if (this.agentConnection === conn && this.authState !== 'authenticated') {
+    state.authTimeout = setTimeout(() => {
+      if (
+        this.connections.get(conn) === state &&
+        state.authState !== 'authenticated'
+      ) {
         this.destroyConnection(conn, true);
       }
     }, AUTH_TIMEOUT_MS);
-    this.authTimeout.unref?.();
+    state.authTimeout.unref?.();
   }
 
-  private processFrame(conn: TTYASocket, payload: Uint8Array): void {
+  private processFrame(
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+    payload: Uint8Array,
+  ): void {
     const parsed = parseJsonFrame(payload);
-    if (this.authState === 'awaiting-challenge') {
-      if (!isTTYAAuthChallengeFrame(parsed) || !this.channelBinding) {
+    if (state.authState === 'awaiting-challenge') {
+      if (!isTTYAAuthChallengeFrame(parsed)) {
         throw new Error('Invalid TTYA authentication challenge');
       }
-      this.agentNonce = parsed.agentNonce;
-      this.bridgeNonce = randomBytes(TTYA_AUTH_NONCE_BYTES).toString('hex');
+      state.agentNonce = parsed.agentNonce;
+      state.bridgeNonce = randomBytes(TTYA_AUTH_NONCE_BYTES).toString('hex');
       const response: TTYAAuthResponseFrame = {
         type: 'ttya-auth-response',
         version: TTYA_AUTH_VERSION,
-        agentNonce: this.agentNonce,
-        bridgeNonce: this.bridgeNonce,
+        agentNonce: state.agentNonce,
+        bridgeNonce: state.bridgeNonce,
         proof: createHmac('sha256', this.authSecret)
           .update(
             buildTTYAAuthProofPayload(
               'bridge',
-              this.agentNonce,
-              this.bridgeNonce,
-              this.channelBinding,
+              state.agentNonce,
+              state.bridgeNonce,
+              state.binding,
             ),
           )
           .digest('hex'),
       };
-      this.authState = 'awaiting-confirmation';
+      state.authState = 'awaiting-confirmation';
       conn.write(encodeFrame(response));
       return;
     }
 
-    if (this.authState === 'awaiting-confirmation') {
+    if (state.authState === 'awaiting-confirmation') {
       if (
         !isTTYAAuthConfirmationFrame(parsed) ||
-        !this.verifyAgentConfirmation(parsed)
+        !this.verifyAgentConfirmation(state, parsed)
       ) {
         throw new Error('Invalid TTYA authentication confirmation');
       }
-      this.sessionKey = createHmac('sha256', this.authSecret)
+      state.sessionKey = createHmac('sha256', this.authSecret)
         .update(
           buildTTYASessionKeyPayload(
-            this.agentNonce!,
-            this.bridgeNonce!,
-            this.channelBinding!,
+            state.agentNonce!,
+            state.bridgeNonce!,
+            state.binding,
           ),
         )
         .digest();
-      this.authState = 'authenticated';
-      this.agentNonce = null;
-      this.bridgeNonce = null;
-      this.clearAuthTimeout();
-      this.authFailures.delete(connectionKey(conn));
-      this.flushPendingRequests(conn);
+      if (this.agentConnection && this.agentConnection !== conn) {
+        this.destroyConnection(conn, false);
+        return;
+      }
+      state.authState = 'authenticated';
+      state.agentNonce = null;
+      state.bridgeNonce = null;
+      this.clearAuthTimeout(state);
+      this.authFailures.delete(state.key);
+      this.agentConnection = conn;
+      for (const candidate of [...this.connections.keys()]) {
+        if (candidate !== conn) this.destroyConnection(candidate, false);
+      }
+      this.flushPendingRequests(conn, state);
       return;
     }
 
     if (!isTTYADataFrame(parsed)) {
       throw new Error('Expected authenticated TTYA data frame');
     }
-    const response = this.verifyAndDecodeDataFrame(parsed);
+    const response = this.verifyAndDecodeDataFrame(state, parsed);
     if (!isValidTTYAResponse(response)) {
       throw new Error('Invalid TTYA response');
     }
     this.responseHandler?.(response);
   }
 
-  private verifyAgentConfirmation(frame: TTYAAuthConfirmationFrame): boolean {
+  private verifyAgentConfirmation(
+    state: BridgeConnectionState,
+    frame: TTYAAuthConfirmationFrame,
+  ): boolean {
     if (
-      !this.agentNonce ||
-      !this.bridgeNonce ||
-      !this.channelBinding ||
-      frame.agentNonce !== this.agentNonce ||
-      frame.bridgeNonce !== this.bridgeNonce
+      !state.agentNonce ||
+      !state.bridgeNonce ||
+      frame.agentNonce !== state.agentNonce ||
+      frame.bridgeNonce !== state.bridgeNonce
     ) {
       return false;
     }
@@ -334,9 +376,9 @@ export class TTYABridge {
       .update(
         buildTTYAAuthProofPayload(
           'agent',
-          this.agentNonce,
-          this.bridgeNonce,
-          this.channelBinding,
+          state.agentNonce,
+          state.bridgeNonce,
+          state.binding,
         ),
       )
       .digest();
@@ -346,15 +388,18 @@ export class TTYABridge {
     );
   }
 
-  private verifyAndDecodeDataFrame(frame: TTYADataFrame): unknown {
-    if (!this.sessionKey || frame.sequence !== this.receiveSequence) {
+  private verifyAndDecodeDataFrame(
+    state: BridgeConnectionState,
+    frame: TTYADataFrame,
+  ): unknown {
+    if (!state.sessionKey || frame.sequence !== state.receiveSequence) {
       throw new Error('Invalid TTYA data sequence');
     }
     const payload = Buffer.from(frame.payload, 'base64');
     if (payload.toString('base64') !== frame.payload) {
       throw new Error('Non-canonical TTYA data payload');
     }
-    const expected = createHmac('sha256', this.sessionKey)
+    const expected = createHmac('sha256', state.sessionKey)
       .update(
         buildTTYADataProofPayload('agent-to-bridge', frame.sequence, payload),
       )
@@ -366,34 +411,38 @@ export class TTYABridge {
     ) {
       throw new Error('Invalid TTYA data proof');
     }
-    this.receiveSequence += 1;
+    state.receiveSequence += 1;
     return JSON.parse(payload.toString('utf8')) as unknown;
   }
 
-  private writeRequest(request: TTYARequest, conn: TTYASocket): boolean {
+  private writeRequest(
+    request: TTYARequest,
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+  ): boolean {
     if (
       this.agentConnection !== conn ||
-      this.authState !== 'authenticated' ||
-      !this.sessionKey
+      state.authState !== 'authenticated' ||
+      !state.sessionKey
     ) {
       return false;
     }
     try {
       const payload = Buffer.from(JSON.stringify(request), 'utf8');
-      const sequence = this.sendSequence;
+      const sequence = state.sendSequence;
       const frame: TTYADataFrame = {
         type: 'ttya-data',
         version: TTYA_AUTH_VERSION,
         sequence,
         payload: payload.toString('base64'),
-        proof: createHmac('sha256', this.sessionKey)
+        proof: createHmac('sha256', state.sessionKey)
           .update(
             buildTTYADataProofPayload('bridge-to-agent', sequence, payload),
           )
           .digest('hex'),
       };
       conn.write(encodeFrame(frame));
-      this.sendSequence += 1;
+      state.sendSequence += 1;
       return true;
     } catch {
       this.destroyConnection(conn, false);
@@ -401,11 +450,14 @@ export class TTYABridge {
     }
   }
 
-  private flushPendingRequests(conn: TTYASocket): void {
+  private flushPendingRequests(
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+  ): void {
     const queued = this.pendingRequests;
     this.pendingRequests = [];
     for (let index = 0; index < queued.length; index += 1) {
-      if (!this.writeRequest(queued[index], conn)) {
+      if (!this.writeRequest(queued[index], conn, state)) {
         this.pendingRequests.unshift(...queued.slice(index));
         return;
       }
@@ -449,39 +501,33 @@ export class TTYABridge {
     });
   }
 
-  private clearAuthTimeout(): void {
-    if (this.authTimeout) clearTimeout(this.authTimeout);
-    this.authTimeout = null;
-  }
-
-  private resetAuthentication(binding: Uint8Array | null = null): void {
-    this.clearAuthTimeout();
-    this.authState = 'awaiting-challenge';
-    this.agentNonce = null;
-    this.bridgeNonce = null;
-    this.channelBinding = binding;
-    this.sessionKey = null;
-    this.receiveSequence = 0;
-    this.sendSequence = 0;
+  private clearAuthTimeout(state: BridgeConnectionState): void {
+    if (state.authTimeout) clearTimeout(state.authTimeout);
+    state.authTimeout = null;
   }
 
   private handleConnectionClosed(conn: TTYASocket): void {
-    if (this.agentConnection !== conn) return;
-    this.resetConnectionState();
+    const state = this.connections.get(conn);
+    if (state && state.authState !== 'authenticated') {
+      this.recordAuthFailure(state.key);
+    }
+    this.removeConnection(conn);
   }
 
   private destroyConnection(conn: TTYASocket, authFailure: boolean): void {
-    if (this.agentConnection === conn) {
-      if (authFailure) this.recordAuthFailure(connectionKey(conn));
-      this.resetConnectionState();
-    }
+    const state = this.connections.get(conn);
+    if (state && authFailure) this.recordAuthFailure(state.key);
+    this.removeConnection(conn);
     this.closeSocket(conn);
   }
 
-  private resetConnectionState(): void {
-    this.agentConnection = null;
-    this.decoder.reset();
-    this.resetAuthentication();
+  private removeConnection(conn: TTYASocket): void {
+    const state = this.connections.get(conn);
+    if (!state) return;
+    this.clearAuthTimeout(state);
+    state.decoder.reset();
+    this.connections.delete(conn);
+    if (this.agentConnection === conn) this.agentConnection = null;
   }
 
   private closeSocket(conn: TTYASocket): void {

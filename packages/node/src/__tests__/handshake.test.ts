@@ -22,9 +22,13 @@ import {
 } from '../network/handshake.js';
 import {
   MAX_COALESCED_HANDSHAKE_TAIL_BYTES,
+  MAX_IDENTITY_HANDSHAKE_FRAME_SIZE,
   PeerSession,
 } from '../network/connection.js';
-import { SwarmManager } from '../network/swarm.js';
+import {
+  MAX_PENDING_HANDSHAKES,
+  SwarmManager,
+} from '../network/swarm.js';
 
 const TRANSPORT_A = new Uint8Array(32).fill(0xa1);
 const TRANSPORT_B = new Uint8Array(32).fill(0xb2);
@@ -360,6 +364,19 @@ describe('performHandshake over local sockets', () => {
     expect(aliceSocket.destroyed).toBe(true);
   });
 
+  it('rejects an application-sized handshake before receiving its body', async () => {
+    const alice = generateIdentity('Alice');
+    const [aliceSocket, peerSocket] = localNoiseSocketPair();
+    const handshake = performHandshake(aliceSocket, alice);
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(MAX_IDENTITY_HANDSHAKE_FRAME_SIZE + 1, 0);
+
+    for (const byte of header) peerSocket.write(Buffer.from([byte]));
+
+    await expect(handshake).rejects.toThrow(/handshake frame limit/i);
+    expect(aliceSocket.destroyCalls).toBe(1);
+  });
+
   it('accepts split handshake framing and a bounded coalesced follow-up', async () => {
     const alice = generateIdentity('Alice');
     const bob = generateIdentity('Bob');
@@ -384,6 +401,23 @@ describe('performHandshake over local sockets', () => {
     expect(result.session.state).toBe('verified');
     result.session.setReady();
     expect(received).toEqual([sampleAck('coalesced-tail')]);
+  });
+
+  it('accepts a valid handshake delivered one byte at a time', async () => {
+    const alice = generateIdentity('Alice');
+    const bob = generateIdentity('Bob');
+    const [aliceSocket, bobSocket] = localNoiseSocketPair();
+    const handshake = performHandshake(aliceSocket, alice);
+    const handshakeFrame = frameMessage(
+      signedHandshake(bob, TRANSPORT_B, HANDSHAKE_HASH, Date.now()),
+    );
+
+    for (const byte of handshakeFrame) bobSocket.write(Buffer.from([byte]));
+
+    await expect(handshake).resolves.toMatchObject({
+      peerFingerprint: bob.fingerprint,
+    });
+    expect(aliceSocket.destroyCalls).toBe(0);
   });
 
   it('bounds and retains an authenticated tail split across data chunks', async () => {
@@ -494,6 +528,42 @@ describe('PeerSession lifecycle', () => {
 });
 
 describe('SwarmManager session replacement', () => {
+  it('globally bounds simultaneous unauthenticated handshakes', async () => {
+    const manager = new SwarmManager({ identity: generateIdentity('Alice') });
+    manager.on('error', () => undefined);
+    const handleConnection = (socket: LocalNoiseSocket): Promise<void> =>
+      (
+        manager as unknown as {
+          handleConnection(
+            socket: LocalNoiseSocket,
+            peerInfo: unknown,
+          ): Promise<void>;
+        }
+      ).handleConnection(socket, undefined);
+
+    const pendingSockets: LocalNoiseSocket[] = [];
+    const pending = Array.from({ length: MAX_PENDING_HANDSHAKES }, () => {
+      const [socket] = localNoiseSocketPair();
+      pendingSockets.push(socket);
+      return handleConnection(socket);
+    });
+    const [overflow] = localNoiseSocketPair();
+    await handleConnection(overflow);
+
+    expect(overflow.destroyCalls).toBe(1);
+    expect(pendingSockets.every((socket) => !socket.destroyed)).toBe(true);
+
+    pendingSockets[0].destroy();
+    await pending[0];
+    const [replacement] = localNoiseSocketPair();
+    const replacementHandshake = handleConnection(replacement);
+    expect(replacement.destroyed).toBe(false);
+
+    for (const socket of pendingSockets.slice(1)) socket.destroy();
+    replacement.destroy();
+    await Promise.all([...pending.slice(1), replacementHandshake]);
+  });
+
   it('keeps the replacement when the old session closes again', async () => {
     const alice = generateIdentity('Alice');
     const bob = generateIdentity('Bob');

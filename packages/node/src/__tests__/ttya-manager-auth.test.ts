@@ -28,7 +28,11 @@ vi.mock('hyperswarm', async () => {
   return { default: MockHyperswarm };
 });
 
-import { TTYAManager, type TTYARequest } from '../ttya/ttya-manager.js';
+import {
+  MAX_TTYA_AUTH_CANDIDATES,
+  TTYAManager,
+  type TTYARequest,
+} from '../ttya/ttya-manager.js';
 
 class MockConnection extends EventEmitter {
   readonly writes: Buffer[] = [];
@@ -197,15 +201,37 @@ describe('TTYAManager mutual authentication', () => {
     ]);
   });
 
-  it('does not let an unauthenticated socket displace the incumbent', () => {
-    const incumbent = new MockConnection();
-    swarm.emit('connection', incumbent, {});
-    const newcomer = new MockConnection(0x42, 0x52);
-    swarm.emit('connection', newcomer, {});
+  it('lets a valid candidate authenticate despite a silent first socket', () => {
+    const silent = new MockConnection();
+    swarm.emit('connection', silent, {});
+    const valid = new MockConnection(0x42, 0x52);
+    authenticate(valid);
 
-    expect(incumbent.destroyed).toBe(false);
-    expect(newcomer.destroyed).toBe(true);
-    expect(incumbent.writes).toHaveLength(1);
+    expect(silent.destroyed).toBe(true);
+    expect(valid.destroyed).toBe(false);
+    expect(valid.writes).toHaveLength(2);
+
+    const late = new MockConnection(0x43, 0x53);
+    swarm.emit('connection', late, {});
+    expect(late.destroyed).toBe(true);
+  });
+
+  it('bounds authentication candidates and releases capacity on close', () => {
+    const candidates = Array.from(
+      { length: MAX_TTYA_AUTH_CANDIDATES },
+      (_, index) => new MockConnection(0x40 + index, 0x50 + index),
+    );
+    for (const candidate of candidates) swarm.emit('connection', candidate, {});
+
+    const overflow = new MockConnection(0x70, 0x71);
+    swarm.emit('connection', overflow, {});
+    expect(overflow.destroyed).toBe(true);
+
+    candidates[0].destroy();
+    const replacement = new MockConnection(0x72, 0x73);
+    swarm.emit('connection', replacement, {});
+    expect(replacement.destroyed).toBe(false);
+    expect(replacement.writes).toHaveLength(1);
   });
 
   it('rejects a proof created for a different Noise connection', () => {
@@ -273,5 +299,10 @@ describe('TTYAManager mutual authentication', () => {
     expect(connection.destroyed).toBe(false);
     vi.advanceTimersByTime(1);
     expect(connection.destroyed).toBe(true);
+
+    const replacement = new MockConnection(0x42, 0x52);
+    authenticate(replacement);
+    expect(replacement.destroyed).toBe(false);
+    expect(replacement.writes).toHaveLength(2);
   });
 });

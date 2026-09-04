@@ -13,6 +13,8 @@ export interface SwarmManagerOptions {
   acceptPeerIdentity?: (result: HandshakeResult) => void | Promise<void>;
 }
 
+export const MAX_PENDING_HANDSHAKES = 64;
+
 export class SwarmManager extends EventEmitter {
   private swarm: Hyperswarm | null = null;
   private sessions = new Map<string, PeerSession>();
@@ -20,6 +22,7 @@ export class SwarmManager extends EventEmitter {
   private identity: AgentIdentity;
   private bootstrap?: Array<{ host: string; port: number }>;
   private acceptPeerIdentity?: SwarmManagerOptions['acceptPeerIdentity'];
+  private pendingHandshakes = 0;
   readonly router: MessageRouter;
 
   constructor(options: SwarmManagerOptions) {
@@ -57,6 +60,16 @@ export class SwarmManager extends EventEmitter {
     socket: unknown,
     _peerInfo: unknown,
   ): Promise<void> {
+    if (this.pendingHandshakes >= MAX_PENDING_HANDSHAKES) {
+      try {
+        (socket as ConstructorParameters<typeof PeerSession>[0]).destroy();
+      } catch {
+        // The transport may already be closing.
+      }
+      return;
+    }
+
+    this.pendingHandshakes += 1;
     try {
       const result = await performHandshake(
         socket as ConstructorParameters<typeof PeerSession>[0],
@@ -108,6 +121,8 @@ export class SwarmManager extends EventEmitter {
       this.emit('peer:verified', result);
     } catch (err) {
       this.emit('error', err);
+    } finally {
+      this.pendingHandshakes -= 1;
     }
   }
 
