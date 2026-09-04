@@ -179,6 +179,9 @@ importers:
       '@types/better-sqlite3':
         specifier: ^7.6.0
         version: 7.6.13
+      cbor-x:
+        specifier: ^1.6.0
+        version: 1.6.4
 
   packages/web:
     dependencies:
