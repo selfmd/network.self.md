@@ -14,6 +14,8 @@ export class PeerSession extends EventEmitter {
   peerFingerprint: string | null = null;
   peerDisplayName: string | null = null;
   noisePublicKey: Uint8Array | null = null;
+  peerProtocolVersion = 0;
+  peerCapabilities = new Set<string>();
 
   private buffer: Buffer = Buffer.alloc(0);
 
@@ -110,11 +112,15 @@ export class PeerSession extends EventEmitter {
     peerFingerprint: string,
     peerDisplayName?: string,
     peerXPublicKey?: Uint8Array,
+    peerProtocolVersion = 0,
+    peerCapabilities: string[] = [],
   ): void {
     this.peerPublicKey = peerPublicKey;
     this.peerXPublicKey = peerXPublicKey ?? null;
     this.peerFingerprint = peerFingerprint;
     this.peerDisplayName = peerDisplayName ?? null;
+    this.peerProtocolVersion = peerProtocolVersion;
+    this.peerCapabilities = new Set(peerCapabilities);
     this.state = 'verified';
   }
 

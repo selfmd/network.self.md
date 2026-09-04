@@ -191,4 +191,13 @@ describe('GroupEpochRepository', () => {
     expect(new Uint8Array(loaded.epoch.members[1].publicKey)).toEqual(member.publicKey);
     expect(new Uint8Array(loaded.epoch.createdBy)).toEqual(admin.publicKey);
   });
+
+  it('rejects a conflicting same-group/version overwrite', () => {
+    const admin = generateKeypair();
+    const original = createSignedEpoch(createGenesisEpoch('g1', admin.publicKey), admin.privateKey);
+    repo.saveEpoch(original);
+    const conflicting = createSignedEpoch({ ...createGenesisEpoch('g1', admin.publicKey), timestamp: original.epoch.timestamp + 1 }, admin.privateKey);
+    expect(() => repo.saveEpoch(conflicting)).toThrow(/conflicting/i);
+    expect(repo.getEpochByVersion('g1', 0)!.hash).toEqual(original.hash);
+  });
 });

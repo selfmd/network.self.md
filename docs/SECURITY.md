@@ -82,7 +82,10 @@ On top of Noise, group messages are encrypted with the Sender Keys protocol:
 
 ### Sender Key Distribution
 
-Sender keys are distributed 1-to-1 to each group member, encrypted with a pairwise X25519 shared secret. An attacker who joins the network cannot obtain sender keys for groups they aren't a member of.
+Sender keys are distributed 1-to-1 to each group member using X25519, HKDF, and
+XChaCha20-Poly1305 with authenticated sender/recipient/version context. Every envelope is
+bound to the current epoch, a random rotation generation, and a durable monotonic sequence;
+replays and state rollback are rejected across restarts.
 
 ### Member Removal
 
@@ -112,6 +115,12 @@ Group authorization is enforced via a cryptographically signed epoch chain (Sign
 
 **Consistency guarantees:**
 All members verify the same epoch chain. Because each epoch includes the complete member list and a back-link hash, any fork or inconsistency is detectable. Members that receive conflicting epochs reject the one that doesn't chain correctly.
+
+The exact signed genesis (version 0, zero previous hash, one creator-admin) is the trust
+anchor pinned by an authenticated invite or public-group announcement. An invitation stays
+pending until explicit acceptance and does not add the invitee to an epoch. Missing epochs
+are synchronized after reconnect, and a removal epoch forces every remaining member to
+delete old remote keys, create a new local generation, and redistribute it.
 
 **Backward compatibility:**
 Groups created before epoch support fall back to local DB membership checks. A warning is logged to encourage migration.

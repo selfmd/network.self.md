@@ -17,6 +17,9 @@ import createTestnet from 'hyperdht/testnet.js';
 interface StoredKey {
   chain_key: Buffer;
   chain_index: number;
+  generation_id: Buffer;
+  distribution_sequence: number;
+  epoch_version: number;
 }
 
 interface StoredEpoch {
@@ -37,7 +40,7 @@ function readSenderKey(
   try {
     return database
       .prepare(
-        'SELECT chain_key, chain_index FROM sender_keys WHERE group_id = ? AND public_key = ?',
+        'SELECT chain_key, chain_index, generation_id, distribution_sequence, epoch_version FROM sender_keys WHERE group_id = ? AND public_key = ?',
       )
       .get(Buffer.from(groupId), Buffer.from(publicKey)) as StoredKey | undefined;
   } finally {
@@ -131,11 +134,12 @@ describe('Sender-key distribution security E2E', () => {
       );
       expect(aliceInitialKey).toBeDefined();
 
-      // Dedicated topics make both tested links deterministic even if the
-      // shared discovery swarm chooses a sparse three-node topology.
-      await bob.joinGroup(groupIdHex);
-      const decoy = await alice.createGroup('mallory-decoy');
-      await mallory.joinGroup(Buffer.from(decoy.groupId).toString('hex'));
+      // Topic knowledge alone must not grant group membership. It only makes
+      // the authenticated transport links deterministic for the adversarial test.
+      await Promise.all([
+        getSwarm(bob).join(group.topic),
+        getSwarm(mallory).join(group.topic),
+      ]);
 
       await waitUntil(
         () =>
@@ -155,10 +159,15 @@ describe('Sender-key distribution security E2E', () => {
         malloryEnvelopes.push(message as SenderKeyDistributionMessage);
       });
 
+      let inviteReceived = false;
+      bob.once('group:invited', () => { inviteReceived = true; });
       await alice.inviteToGroup(
         groupIdHex,
         Buffer.from(bob.identity.edPublicKey).toString('hex'),
       );
+      await waitUntil(() => inviteReceived, 'Pending invitation was not delivered');
+      expect(bob.listGroups()).toHaveLength(0);
+      await bob.joinGroup(groupIdHex);
 
       await waitUntil(
         () =>
@@ -177,6 +186,10 @@ describe('Sender-key distribution security E2E', () => {
           Buffer.from(envelope.ciphertext).includes(aliceInitialKey!.chain_key),
         ).toBe(false);
       }
+      const receivedAliceKey = readSenderKey(bobDir, groupId, alice.identity.edPublicKey)!;
+      getSwarm(alice).getSession(bob.identity.fingerprint)!.send(bobEnvelopes[0]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(readSenderKey(bobDir, groupId, alice.identity.edPublicKey)).toEqual(receivedAliceKey);
 
       const received = waitForGroupMessage(bob);
       await alice.sendGroupMessage(groupIdHex, 'members only');
@@ -266,6 +279,9 @@ describe('Sender-key distribution security E2E', () => {
       expect(malloryEnvelopes).toEqual([]);
       expect(countSenderKeys(bobDir, groupId)).toBe(0);
       expect(readSenderKey(aliceDir, groupId, bob.identity.edPublicKey)).toBeUndefined();
+      const rotatedAliceKey = readSenderKey(aliceDir, groupId, alice.identity.edPublicKey)!;
+      expect(rotatedAliceKey.generation_id).not.toEqual(aliceInitialKey!.generation_id);
+      expect(rotatedAliceKey.epoch_version).toBeGreaterThan(aliceInitialKey!.epoch_version);
 
       // A formerly valid member can still reach Alice over the global topic,
       // but its old-epoch envelope must not recreate the deleted record.
@@ -286,6 +302,61 @@ describe('Sender-key distribution security E2E', () => {
       rmSync(aliceDir, { recursive: true, force: true });
       rmSync(bobDir, { recursive: true, force: true });
       rmSync(malloryDir, { recursive: true, force: true });
+    }
+  }, 45_000);
+
+  it('syncs an offline removal epoch and forces every remaining sender generation to rotate', async () => {
+    const testnet = await createTestnet(3);
+    const aliceDir = mkdtempSync(join(tmpdir(), 'nsmd-rotate-alice-'));
+    const bobDir = mkdtempSync(join(tmpdir(), 'nsmd-rotate-bob-'));
+    const carolDir = mkdtempSync(join(tmpdir(), 'nsmd-rotate-carol-'));
+    const alice = new Agent({ dataDir: aliceDir, bootstrap: testnet.bootstrap });
+    let bob = new Agent({ dataDir: bobDir, bootstrap: testnet.bootstrap });
+    const carol = new Agent({ dataDir: carolDir, bootstrap: testnet.bootstrap });
+    try {
+      await Promise.all([alice.start(), bob.start(), carol.start()]);
+      const group = await alice.createGroup('offline-rotation');
+      const groupIdHex = Buffer.from(group.groupId).toString('hex');
+      await Promise.all([getSwarm(bob).join(group.topic), getSwarm(carol).join(group.topic)]);
+      await waitUntil(() => Boolean(getSwarm(alice).getSession(bob.identity.fingerprint)) && Boolean(getSwarm(alice).getSession(carol.identity.fingerprint)), 'member links timeout');
+
+      for (const member of [bob, carol]) {
+        let invited = false;
+        member.once('group:invited', () => { invited = true; });
+        await alice.inviteToGroup(groupIdHex, Buffer.from(member.identity.edPublicKey).toString('hex'));
+        await waitUntil(() => invited, 'invite timeout');
+        await member.joinGroup(groupIdHex);
+        await waitUntil(() => readLatestEpoch(member === bob ? bobDir : carolDir, groupIdHex)?.version === alice.getGroupMembers(groupIdHex).length - 1, 'accept epoch timeout');
+      }
+
+      await waitUntil(() => Boolean(readSenderKey(aliceDir, group.groupId, bob.identity.edPublicKey)) && Boolean(readSenderKey(bobDir, group.groupId, alice.identity.edPublicKey)), 'initial keys timeout');
+      const aliceBefore = readSenderKey(aliceDir, group.groupId, alice.identity.edPublicKey)!;
+      const bobBefore = readSenderKey(bobDir, group.groupId, bob.identity.edPublicKey)!;
+      const bobPublicKey = bob.identity.edPublicKey;
+      await bob.stop();
+
+      await alice.kickFromGroup(groupIdHex, Buffer.from(carol.identity.edPublicKey).toString('hex'));
+      const aliceAfter = readSenderKey(aliceDir, group.groupId, alice.identity.edPublicKey)!;
+      expect(aliceAfter.generation_id).not.toEqual(aliceBefore.generation_id);
+      expect(readSenderKey(aliceDir, group.groupId, bobPublicKey)).toBeUndefined();
+
+      bob = new Agent({ dataDir: bobDir, bootstrap: testnet.bootstrap });
+      await bob.start();
+      await waitUntil(() => readLatestEpoch(bobDir, groupIdHex).version === readLatestEpoch(aliceDir, groupIdHex).version, 'offline epoch chain was not synchronized');
+      await waitUntil(() => {
+        const key = readSenderKey(bobDir, group.groupId, bobPublicKey);
+        return Boolean(key && !key.generation_id.equals(bobBefore.generation_id));
+      }, 'offline remaining sender did not rotate');
+      await waitUntil(() => {
+        const key = readSenderKey(aliceDir, group.groupId, bobPublicKey);
+        return Boolean(key && key.epoch_version === readLatestEpoch(aliceDir, groupIdHex).version);
+      }, 'rotated offline sender key was not redistributed');
+    } finally {
+      await Promise.allSettled([alice.stop(), bob.stop(), carol.stop()]);
+      await testnet.destroy();
+      rmSync(aliceDir, { recursive: true, force: true });
+      rmSync(bobDir, { recursive: true, force: true });
+      rmSync(carolDir, { recursive: true, force: true });
     }
   }, 45_000);
 });

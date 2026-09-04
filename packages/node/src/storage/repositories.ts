@@ -27,6 +27,8 @@ export interface StoredGroup {
   joined_at: number | null;
   is_public: number;
   self_md: string | null;
+  creator_public_key: Buffer | null;
+  genesis_hash: Buffer | null;
 }
 
 export interface StoredGroupMember {
@@ -50,6 +52,10 @@ export interface StoredSenderKey {
   public_key: Buffer;
   chain_key: Buffer;
   chain_index: number;
+  generation_id: Buffer | null;
+  distribution_sequence: number;
+  epoch_version: number;
+  epoch_hash: Buffer | null;
 }
 
 export interface StoredKeyData {
@@ -158,22 +164,25 @@ export class PeerRepository {
 export class GroupRepository {
   constructor(private db: Database.Database) {}
 
-  create(groupId: Uint8Array, name: string, role: string = 'admin'): void {
+  create(groupId: Uint8Array, name: string, role: string = 'admin', creatorPublicKey?: Uint8Array, genesisHash?: Uint8Array): void {
     const now = Date.now();
     const stmt = this.db.prepare(
-      `INSERT INTO groups (group_id, name, role, created_at, joined_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO groups (group_id, name, role, created_at, joined_at, creator_public_key, genesis_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
-    stmt.run(Buffer.from(groupId), name, role, now, now);
+    stmt.run(Buffer.from(groupId), name, role, now, now, creatorPublicKey ? Buffer.from(creatorPublicKey) : null, genesisHash ? Buffer.from(genesisHash) : null);
   }
 
-  join(groupId: Uint8Array, name: string, role: string = 'member'): void {
+  join(groupId: Uint8Array, name: string, role: string = 'member', creatorPublicKey?: Uint8Array, genesisHash?: Uint8Array): void {
     const now = Date.now();
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO groups (group_id, name, role, created_at, joined_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO groups (group_id, name, role, created_at, joined_at, creator_public_key, genesis_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, joined_at = excluded.joined_at
+       WHERE (groups.genesis_hash IS NULL OR groups.genesis_hash = excluded.genesis_hash)`,
     );
-    stmt.run(Buffer.from(groupId), name, role, now, now);
+    const result = stmt.run(Buffer.from(groupId), name, role, now, now, creatorPublicKey ? Buffer.from(creatorPublicKey) : null, genesisHash ? Buffer.from(genesisHash) : null);
+    if (result.changes !== 1) throw new Error('Group authority mismatch');
   }
 
   leave(groupId: Uint8Array): void {
@@ -186,6 +195,13 @@ export class GroupRepository {
     return this.db
       .prepare('SELECT * FROM groups WHERE group_id = ?')
       .get(Buffer.from(groupId)) as StoredGroup | undefined;
+  }
+
+  pinAuthority(groupId: Uint8Array, creatorPublicKey: Uint8Array, genesisHash: Uint8Array): void {
+    const result = this.db.prepare(`UPDATE groups SET creator_public_key = ?, genesis_hash = ?
+      WHERE group_id = ? AND (genesis_hash IS NULL OR genesis_hash = ?)`)
+      .run(Buffer.from(creatorPublicKey), Buffer.from(genesisHash), Buffer.from(groupId), Buffer.from(genesisHash));
+    if (result.changes !== 1) throw new Error('Group authority mismatch');
   }
 
   list(): StoredGroup[] {
@@ -294,6 +310,10 @@ export interface StoredDiscoveredGroup {
   member_count: number;
   announced_by: Buffer;
   last_announced: number;
+  authority_key: Buffer;
+  genesis_hash: Buffer;
+  genesis_epoch_data: Buffer;
+  genesis_signature: Buffer;
 }
 
 export class DiscoveredGroupRepository {
@@ -305,18 +325,26 @@ export class DiscoveredGroupRepository {
     selfMd: string | undefined,
     memberCount: number,
     announcedBy: Uint8Array,
-  ): void {
+    genesisEpochData: Uint8Array,
+    genesisSignature: Uint8Array,
+    genesisHash: Uint8Array,
+    announcedAt = Date.now(),
+  ): boolean {
     const stmt = this.db.prepare(
-      `INSERT INTO discovered_groups (group_id, name, self_md, member_count, announced_by, last_announced)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO discovered_groups (group_id, name, self_md, member_count, announced_by, last_announced, authority_key, genesis_hash, genesis_epoch_data, genesis_signature)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(group_id) DO UPDATE SET
          name = excluded.name,
          self_md = COALESCE(excluded.self_md, discovered_groups.self_md),
          member_count = excluded.member_count,
          announced_by = excluded.announced_by,
-         last_announced = excluded.last_announced`,
+         last_announced = excluded.last_announced
+       WHERE discovered_groups.genesis_hash = excluded.genesis_hash
+         AND discovered_groups.authority_key = excluded.authority_key`,
     );
-    stmt.run(Buffer.from(groupId), name, selfMd ?? null, memberCount, Buffer.from(announcedBy), Date.now());
+    const result = stmt.run(Buffer.from(groupId), name, selfMd ?? null, memberCount, Buffer.from(announcedBy), announcedAt, Buffer.from(announcedBy), Buffer.from(genesisHash), Buffer.from(genesisEpochData), Buffer.from(genesisSignature));
+    this.prune(announcedAt);
+    return result.changes === 1;
   }
 
   list(): StoredDiscoveredGroup[] {
@@ -334,6 +362,13 @@ export class DiscoveredGroupRepository {
   remove(groupId: Uint8Array): void {
     this.db.prepare('DELETE FROM discovered_groups WHERE group_id = ?').run(Buffer.from(groupId));
   }
+
+  prune(now = Date.now(), maxRows = 1000, maxAgeMs = 24 * 60 * 60 * 1000): void {
+    this.db.prepare('DELETE FROM discovered_groups WHERE last_announced < ?').run(now - maxAgeMs);
+    this.db.prepare(`DELETE FROM discovered_groups WHERE group_id IN (
+      SELECT group_id FROM discovered_groups ORDER BY last_announced DESC LIMIT -1 OFFSET ?
+    )`).run(maxRows);
+  }
 }
 
 export class SenderKeyRepository {
@@ -344,12 +379,25 @@ export class SenderKeyRepository {
     publicKey: Uint8Array,
     chainKey: Uint8Array,
     chainIndex: number,
+    generationId: Uint8Array = new Uint8Array(16),
+    distributionSequence = -1,
+    epochVersion = 0,
+    epochHash: Uint8Array = new Uint8Array(32),
   ): void {
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index, generation_id, distribution_sequence, epoch_version, epoch_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex);
+    stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex, Buffer.from(generationId), distributionSequence, epochVersion, Buffer.from(epochHash));
+  }
+
+  storeIfNewer(groupId: Uint8Array, publicKey: Uint8Array, chainKey: Uint8Array, chainIndex: number, generationId: Uint8Array, sequence: number, epochVersion: number, epochHash: Uint8Array): boolean {
+    return this.db.transaction(() => {
+      const existing = this.load(groupId, publicKey);
+      if (existing && (sequence <= existing.distribution_sequence || (existing.generation_id?.equals(Buffer.from(generationId)) && chainIndex < existing.chain_index))) return false;
+      this.store(groupId, publicKey, chainKey, chainIndex, generationId, sequence, epochVersion, epochHash);
+      return true;
+    })();
   }
 
   load(groupId: Uint8Array, publicKey: Uint8Array): StoredSenderKey | undefined {
@@ -374,6 +422,77 @@ export class SenderKeyRepository {
     this.db
       .prepare('DELETE FROM sender_keys WHERE group_id = ?')
       .run(Buffer.from(groupId));
+  }
+}
+
+export interface StoredGroupInvite {
+  invite_id: string;
+  group_id: Buffer;
+  group_name: string;
+  inviter_public_key: Buffer;
+  invitee_public_key: Buffer;
+  genesis_epoch_data: Buffer;
+  genesis_signature: Buffer;
+  genesis_hash: Buffer;
+  direction: 'incoming' | 'outgoing';
+  created_at: number;
+}
+
+export class GroupInviteRepository {
+  constructor(private db: Database.Database) {}
+
+  save(invite: Omit<StoredGroupInvite, 'group_id' | 'inviter_public_key' | 'invitee_public_key' | 'genesis_epoch_data' | 'genesis_signature' | 'genesis_hash'> & {
+    groupId: Uint8Array; inviterPublicKey: Uint8Array; inviteePublicKey: Uint8Array;
+    genesisEpochData: Uint8Array; genesisSignature: Uint8Array; genesisHash: Uint8Array;
+  }): void {
+    this.db.prepare(`INSERT OR REPLACE INTO group_invites
+      (invite_id, group_id, group_name, inviter_public_key, invitee_public_key, genesis_epoch_data, genesis_signature, genesis_hash, direction, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      invite.invite_id, Buffer.from(invite.groupId), invite.group_name,
+      Buffer.from(invite.inviterPublicKey), Buffer.from(invite.inviteePublicKey),
+      Buffer.from(invite.genesisEpochData), Buffer.from(invite.genesisSignature), Buffer.from(invite.genesisHash),
+      invite.direction, invite.created_at,
+    );
+    this.db.prepare(`DELETE FROM group_invites WHERE invite_id IN (
+      SELECT invite_id FROM group_invites ORDER BY created_at DESC LIMIT -1 OFFSET 256
+    )`).run();
+  }
+
+  findIncoming(groupId: Uint8Array): StoredGroupInvite | undefined {
+    return this.db.prepare("SELECT * FROM group_invites WHERE group_id = ? AND direction = 'incoming' AND created_at >= ? ORDER BY created_at DESC LIMIT 1").get(Buffer.from(groupId), Date.now() - 24 * 60 * 60 * 1000) as StoredGroupInvite | undefined;
+  }
+
+  findById(inviteId: string): StoredGroupInvite | undefined {
+    return this.db.prepare('SELECT * FROM group_invites WHERE invite_id = ? AND created_at >= ?').get(inviteId, Date.now() - 24 * 60 * 60 * 1000) as StoredGroupInvite | undefined;
+  }
+
+  delete(inviteId: string): void { this.db.prepare('DELETE FROM group_invites WHERE invite_id = ?').run(inviteId); }
+
+  deleteIncoming(groupId: Uint8Array): void {
+    this.db.prepare("DELETE FROM group_invites WHERE group_id = ? AND direction = 'incoming'").run(Buffer.from(groupId));
+  }
+}
+
+export class NetworkAnnounceStateRepository {
+  constructor(private db: Database.Database) {}
+
+  accept(peerPublicKey: Uint8Array, timestamp: number, now = Date.now(), limit = 10, windowMs = 60_000): boolean {
+    const transaction = this.db.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM network_announce_state WHERE peer_public_key = ?').get(Buffer.from(peerPublicKey)) as { last_timestamp: number; window_started: number; message_count: number } | undefined;
+      if (row && timestamp <= row.last_timestamp) return false;
+      const inWindow = Boolean(row && now - row.window_started < windowMs);
+      const count = inWindow ? row!.message_count + 1 : 1;
+      if (count > limit) return false;
+      this.db.prepare(`INSERT OR REPLACE INTO network_announce_state
+        (peer_public_key, last_timestamp, window_started, message_count) VALUES (?, ?, ?, ?)`)
+        .run(Buffer.from(peerPublicKey), timestamp, inWindow ? row!.window_started : now, count);
+      this.db.prepare('DELETE FROM network_announce_state WHERE window_started < ?').run(now - 24 * 60 * 60 * 1000);
+      this.db.prepare(`DELETE FROM network_announce_state WHERE peer_public_key IN (
+        SELECT peer_public_key FROM network_announce_state ORDER BY last_timestamp DESC LIMIT -1 OFFSET 10000
+      )`).run();
+      return true;
+    });
+    return transaction();
   }
 }
 
@@ -482,10 +601,11 @@ export class GroupEpochRepository {
   saveEpoch(signed: SignedGroupEpoch): void {
     const serialized = serializeEpoch(signed.epoch);
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO group_epochs (group_id, version, prev_hash, epoch_data, signature, hash, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO group_epochs (group_id, version, prev_hash, epoch_data, signature, hash, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(group_id, version) DO NOTHING`,
     );
-    stmt.run(
+    const result = stmt.run(
       signed.epoch.groupId,
       signed.epoch.version,
       Buffer.from(signed.epoch.prevHash),
@@ -495,6 +615,12 @@ export class GroupEpochRepository {
       Buffer.from(signed.epoch.createdBy),
       signed.epoch.timestamp,
     );
+    if (result.changes === 0) {
+      const existing = this.getEpochByVersion(signed.epoch.groupId, signed.epoch.version);
+      if (!existing || !Buffer.from(existing.hash).equals(Buffer.from(signed.hash))) {
+        throw new Error('Conflicting group epoch overwrite');
+      }
+    }
   }
 
   getLatestEpoch(groupId: string): SignedGroupEpoch | null {

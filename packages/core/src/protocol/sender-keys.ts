@@ -2,7 +2,6 @@ import { randomBytes } from '@noble/hashes/utils';
 import { x25519 } from '@noble/curves/ed25519';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha';
 import { Decoder, Encoder } from 'cbor-x';
-import { encrypt, decrypt } from '../crypto/aead.js';
 import { advanceChain, deriveKey } from '../crypto/kdf.js';
 import type { SenderKeyDistributionMessage } from './types.js';
 import { MessageType } from './types.js';
@@ -20,7 +19,10 @@ export interface SenderKeyRecord {
 
 /** Plaintext carried inside a recipient-specific sender-key envelope. */
 export interface SenderKeyDistributionPayload {
+  protocolVersion: number;
   groupId: Uint8Array;
+  generationId: Uint8Array;
+  sequence: number;
   chainKey: Uint8Array;
   chainIndex: number;
   signingPublicKey: Uint8Array;
@@ -30,6 +32,8 @@ export interface SenderKeyDistributionPayload {
 }
 
 const MAX_SKIP = 256;
+export const SENDER_KEY_PROTOCOL_VERSION = 2;
+export const SENDER_KEY_CAPABILITY = 'sender-key-v2';
 const DISTRIBUTION_KEY_DOMAIN = new TextEncoder().encode(
   'networkselfmd-sender-key-distribution-key-v1',
 );
@@ -49,7 +53,8 @@ export const SenderKeys = {
 
   encrypt(
     state: SenderKeyState,
-    plaintext: Uint8Array
+    plaintext: Uint8Array,
+    aad?: Uint8Array,
   ): {
     ciphertext: Uint8Array;
     nonce: Uint8Array;
@@ -57,7 +62,8 @@ export const SenderKeys = {
     nextState: SenderKeyState;
   } {
     const { messageKey, nextChainKey } = advanceChain(state.chainKey);
-    const { ciphertext, nonce } = encrypt(messageKey, plaintext);
+    const nonce = randomBytes(24);
+    const ciphertext = xchacha20poly1305(messageKey, nonce, aad).encrypt(plaintext);
     return {
       ciphertext,
       nonce,
@@ -73,7 +79,8 @@ export const SenderKeys = {
     record: SenderKeyRecord,
     chainIndex: number,
     nonce: Uint8Array,
-    ciphertext: Uint8Array
+    ciphertext: Uint8Array,
+    aad?: Uint8Array,
   ): {
     plaintext: Uint8Array;
     nextRecord: SenderKeyRecord;
@@ -81,7 +88,7 @@ export const SenderKeys = {
     // Check skipped keys first
     if (record.skippedKeys.has(chainIndex)) {
       const messageKey = record.skippedKeys.get(chainIndex)!;
-      const plaintext = decrypt(messageKey, nonce, ciphertext);
+      const plaintext = xchacha20poly1305(messageKey, nonce, aad).decrypt(ciphertext);
       const newSkipped = new Map(record.skippedKeys);
       newSkipped.delete(chainIndex);
       return {
@@ -119,7 +126,7 @@ export const SenderKeys = {
 
     // Derive message key for this index
     const { messageKey, nextChainKey } = advanceChain(currentChainKey);
-    const plaintext = decrypt(messageKey, nonce, ciphertext);
+    const plaintext = xchacha20poly1305(messageKey, nonce, aad).decrypt(ciphertext);
 
     return {
       plaintext,
@@ -137,9 +144,14 @@ export const SenderKeys = {
     signingPublicKey: Uint8Array,
     epochVersion = 0,
     epochHash: Uint8Array = new Uint8Array(32),
+    generationId: Uint8Array = randomBytes(16),
+    sequence = 0,
   ): SenderKeyDistributionPayload {
     return {
+      protocolVersion: SENDER_KEY_PROTOCOL_VERSION,
       groupId,
+      generationId,
+      sequence,
       chainKey: state.chainKey,
       chainIndex: state.chainIndex,
       signingPublicKey,
@@ -187,6 +199,7 @@ export const SenderKeys = {
 
     return {
       type: MessageType.SenderKeyDistribution,
+      protocolVersion: SENDER_KEY_PROTOCOL_VERSION,
       recipientPublicKey,
       ciphertext: cipher.encrypt(encoder.encode(payload)),
       nonce,
@@ -201,6 +214,10 @@ export const SenderKeys = {
     authenticatedSenderXPublicKey: Uint8Array,
     authenticatedSenderPublicKey: Uint8Array,
   ): SenderKeyDistributionPayload {
+    assertSenderKeyDistributionMessage(message);
+    if (message.protocolVersion !== SENDER_KEY_PROTOCOL_VERSION) {
+      throw new Error('Unsupported sender-key distribution version');
+    }
     assertLength(message.recipientPublicKey, 32, 'recipient public key');
     assertLength(message.nonce, 24, 'sender-key distribution nonce');
     assertLength(recipientXPrivateKey, 32, 'recipient X25519 private key');
@@ -218,6 +235,7 @@ export const SenderKeys = {
       authenticatedSenderPublicKey,
       recipientPublicKey,
       message.timestamp,
+      message.protocolVersion,
     );
     const sharedSecret = x25519.getSharedSecret(
       recipientXPrivateKey,
@@ -237,6 +255,9 @@ export const SenderKeys = {
     if (decoded.timestamp !== message.timestamp) {
       throw new Error('Sender-key distribution timestamp mismatch');
     }
+    if (decoded.protocolVersion !== message.protocolVersion) {
+      throw new Error('Sender-key distribution protocol mismatch');
+    }
     if (!bytesEqual(decoded.signingPublicKey, authenticatedSenderPublicKey)) {
       throw new Error(
         'Sender-key signing public key does not match authenticated session',
@@ -247,15 +268,28 @@ export const SenderKeys = {
   },
 };
 
+export function assertSenderKeyDistributionMessage(value: unknown): asserts value is SenderKeyDistributionMessage {
+  if (!value || typeof value !== 'object') throw new Error('Invalid sender-key envelope');
+  const message = value as Partial<SenderKeyDistributionMessage>;
+  assertExactKeys(message as Record<string, unknown>, ['type', 'protocolVersion', 'recipientPublicKey', 'ciphertext', 'nonce', 'timestamp'], 'sender-key envelope');
+  if (message.type !== MessageType.SenderKeyDistribution || message.protocolVersion !== SENDER_KEY_PROTOCOL_VERSION) throw new Error('Unsupported sender-key distribution version');
+  assertLength(message.recipientPublicKey, 32, 'recipient public key');
+  assertLength(message.nonce, 24, 'sender-key distribution nonce');
+  if (!(message.ciphertext instanceof Uint8Array) || message.ciphertext.length === 0 || message.ciphertext.length > 64 * 1024) throw new Error('Invalid sender-key ciphertext');
+  if (!Number.isSafeInteger(message.timestamp) || message.timestamp! < 0) throw new Error('Invalid sender-key distribution timestamp');
+}
+
 function distributionContext(
   senderPublicKey: Uint8Array,
   recipientPublicKey: Uint8Array,
   timestamp: number,
+  protocolVersion = SENDER_KEY_PROTOCOL_VERSION,
 ): Uint8Array {
   const timestampBytes = new Uint8Array(8);
   new DataView(timestampBytes.buffer).setBigUint64(0, BigInt(timestamp), false);
   return concatBytes(
     new Uint8Array([MessageType.SenderKeyDistribution]),
+    new Uint8Array([protocolVersion]),
     senderPublicKey,
     recipientPublicKey,
     timestampBytes,
@@ -269,12 +303,20 @@ function assertDistributionPayload(
     throw new Error('Invalid sender-key distribution payload');
   }
   const payload = value as Partial<SenderKeyDistributionPayload>;
+  assertExactKeys(payload as Record<string, unknown>, ['protocolVersion', 'groupId', 'generationId', 'sequence', 'chainKey', 'chainIndex', 'signingPublicKey', 'epochVersion', 'epochHash', 'timestamp'], 'sender-key payload');
+  if (payload.protocolVersion !== SENDER_KEY_PROTOCOL_VERSION) {
+    throw new Error('Unsupported sender-key payload version');
+  }
   assertLength(payload.groupId, 32, 'group id');
+  assertLength(payload.generationId, 16, 'sender-key generation id');
   assertLength(payload.chainKey, 32, 'sender chain key');
   assertLength(payload.signingPublicKey, 32, 'signing public key');
   assertLength(payload.epochHash, 32, 'group epoch hash');
   if (!Number.isSafeInteger(payload.chainIndex) || payload.chainIndex! < 0) {
     throw new Error('Invalid sender chain index');
+  }
+  if (!Number.isSafeInteger(payload.sequence) || payload.sequence! < 0) {
+    throw new Error('Invalid sender-key distribution sequence');
   }
   if (!Number.isSafeInteger(payload.epochVersion) || payload.epochVersion! < 0) {
     throw new Error('Invalid group epoch version');
@@ -313,4 +355,9 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     difference |= a[index] ^ b[index];
   }
   return difference === 0;
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: string[], label: string): void {
+  const keys = Object.keys(value);
+  if (keys.length !== allowed.length || keys.some((key) => !allowed.includes(key))) throw new Error(`Invalid ${label} schema`);
 }

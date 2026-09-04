@@ -222,6 +222,8 @@ const payload = SenderKeys.createDistribution(
   signingPublicKey,
   epochVersion,
   epochHash,
+  generationId,
+  nextDistributionSequence,
 );
 const distribution = SenderKeys.encryptDistribution(
   payload,

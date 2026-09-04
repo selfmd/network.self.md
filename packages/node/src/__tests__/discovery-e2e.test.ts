@@ -42,6 +42,15 @@ function waitForSenderKeys(delay: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delay));
 }
 
+async function waitUntil(predicate: () => boolean, message: string, timeout = 10_000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 describe('Network discovery E2E', () => {
   it('two agents discover each other via network topic', async () => {
     testnet = await createTestnet(3);
@@ -102,15 +111,14 @@ describe('Network discovery E2E', () => {
       await agent1.start();
       await agent2.start();
 
-      // Alice creates a group (not public yet) and Bob joins
-      const group = await agent1.createGroup('builders');
+      // Alice creates a public group with a signed genesis authority proof.
+      const group = await agent1.createGroup('builders', { public: true, selfMd: 'We build network.self.md. Ship > discuss.' });
       const groupIdHex = Buffer.from(group.groupId).toString('hex');
-      await agent2.joinGroup(groupIdHex);
 
       // Wait for peers to discover each other
       await waitForPeers(agent1, agent2, 15000);
-
-      // Wait for sender keys to propagate
+      await waitUntil(() => agent2.listDiscoveredGroups().some((candidate) => Buffer.from(candidate.groupId).toString('hex') === groupIdHex), 'Public group announcement timeout');
+      await agent2.joinPublicGroup(groupIdHex);
       await waitForSenderKeys(1000);
 
       // Verify peers are connected
@@ -121,9 +129,6 @@ describe('Network discovery E2E', () => {
       const groups = agent1.listGroups();
       const builders = groups.find(g => g.name === 'builders');
       expect(builders).toBeDefined();
-
-      // Make the group public
-      agent1.makeGroupPublic(groupIdHex, 'We build network.self.md. Ship > discuss.');
 
       // Verify the group is now public with the correct selfMd
       const updatedGroups = agent1.listGroups();

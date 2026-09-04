@@ -45,7 +45,8 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
   noisePublicKey: Uint8Array,    // 32 bytes, Noise key from Hyperswarm
   signature: Uint8Array,         // Ed25519 signature over noisePublicKey
   displayName?: string,          // optional human-readable name
-  protocolVersion: number,       // 1 for V1
+  protocolVersion: 2,
+  capabilities: ["sender-key-v2", "group-epoch-v1"],
   timestamp: number              // unix ms, must be within ±5 min of local time
 }
 ```
@@ -56,7 +57,9 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 3. Verify `timestamp` is within ±300,000 ms of local time
 4. If any check fails, drop the connection
 
-This binds the transport-layer Noise identity to the application-layer Ed25519 identity.
+The version and sorted capability list are covered by the handshake signature. Peers that
+cannot authenticate the v2 capability set are rejected instead of silently receiving a
+legacy sender-key envelope.
 
 ### GroupSync (0x02)
 
@@ -84,6 +87,7 @@ Encrypted to the specific recipient using pairwise X25519.
 ```typescript
 {
   type: 0x03,
+  protocolVersion: 2,
   recipientPublicKey: Uint8Array, // 32-byte recipient Ed25519 key
   ciphertext: Uint8Array,         // encrypted payload below
   nonce: Uint8Array,              // 24 bytes
@@ -92,7 +96,10 @@ Encrypted to the specific recipient using pairwise X25519.
 
 // XChaCha20-Poly1305 plaintext (never exposed on the wire)
 {
+  protocolVersion: 2,
   groupId: Uint8Array,
+  generationId: Uint8Array,      // 16-byte random identifier, replaced on rotation
+  sequence: number,              // durable, strictly increasing per group/sender
   chainKey: Uint8Array,
   chainIndex: number,
   signingPublicKey: Uint8Array,
@@ -105,7 +112,7 @@ Encrypted to the specific recipient using pairwise X25519.
 **Key exchange for distribution:**
 ```
 sharedSecret = x25519(sender.xPrivateKey, recipient.xPublicKey)
-context = type || sender.edPublicKey || recipient.edPublicKey || timestamp
+context = type || protocolVersion || sender.edPublicKey || recipient.edPublicKey || timestamp
 encryptionKey = hkdf(sha256, sharedSecret,
   "networkselfmd-sender-key-distribution-key-v1", context, 32)
 aad = "networkselfmd-sender-key-distribution-aad-v1" || context
@@ -116,7 +123,19 @@ The receiver derives the key from the authenticated session's X25519 key,
 requires `signingPublicKey` to equal `session.peerPublicKey`, and accepts the
 payload only when sender and recipient are members of the referenced latest
 signed epoch. Unknown groups, stale epochs, and nonmembers are rejected without
-storing any sender-key record.
+storing any sender-key record. The receiver durably rejects a sequence that is not newer
+than the stored sequence and rejects a chain-index rollback within one generation.
+
+### NetworkAnnounce (0x09)
+
+Network announcements use a fixed binary signing payload prefixed with
+`network.self.md/NetworkAnnounce/v1\0`. Groups are sorted by their 32-byte ID and all
+strings/blobs use explicit big-endian length prefixes. Each entry includes the exact signed
+genesis epoch (v0, zero previous hash, one creator-admin); the authenticated announcer must
+be that creator. Receivers enforce schema and size limits, ±5 minute freshness, monotonic
+durable replay state, 10 announcements/minute/peer, 64 groups/message, and a bounded
+1,000-row/24-hour discovery cache. An existing group ID can only be updated by the pinned
+creator and genesis hash.
 
 ### GroupMessage (0x04)
 
@@ -222,7 +241,10 @@ epochHash = sha256(cbor(groupId || version || prevHash || members || timestamp |
 ```
 
 **Genesis epoch (version 0):**
-On group creation, the creator produces a genesis epoch with `prevHash = zeros(32)`, a single member entry (the creator as admin), signed with the creator's Ed25519 key.
+On group creation, the creator produces a genesis epoch with `prevHash = zeros(32)`, exactly
+one member entry (the creator as admin), signed with the creator's Ed25519 key. Its creator
+key and hash are pinned before any later epoch is accepted; a conflicting v0 or same-version
+overwrite is rejected.
 
 **Subsequent epochs:**
 Each group mutation creates a new epoch: `version = previous.version + 1`, `prevHash = hash(previous)`, updated member list, signed by the admin performing the action.
@@ -237,8 +259,11 @@ Each group mutation creates a new epoch: `version = previous.version + 1`, `prev
 **Sender key gating:**
 SenderKeyDistribution messages are rejected from peers not present in the latest epoch's member list.
 
-**Backward compatibility:**
-Groups created before epoch support continue to use local DB membership checks. A warning is logged for groups without an epoch chain.
+Invites are persisted as pending and do not mutate membership. The invitee explicitly
+accepts; only then does the admin append the membership epoch and send the full chain.
+On reconnect, members exchange their latest version and synchronize missing epochs offline.
+Legacy local sender-key rows are migrated to a fresh v2 generation; legacy wire envelopes
+are never accepted.
 
 ## Direct Messages
 

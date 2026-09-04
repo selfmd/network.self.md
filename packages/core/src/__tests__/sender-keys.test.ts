@@ -152,6 +152,9 @@ describe('SenderKeys', () => {
     expect(dist.signingPublicKey).toBe(signingKey);
     expect(dist.epochVersion).toBe(3);
     expect(dist.epochHash).toBe(epochHash);
+    expect(dist.protocolVersion).toBe(2);
+    expect(dist.generationId).toHaveLength(16);
+    expect(dist.sequence).toBe(0);
     expect(typeof dist.timestamp).toBe('number');
   });
 
@@ -178,6 +181,7 @@ describe('SenderKeys', () => {
     );
 
     expect(envelope.type).toBe(0x03);
+    expect(envelope.protocolVersion).toBe(2);
     expect(envelope.recipientPublicKey).toEqual(bob.edPublicKey);
     expect(envelope).not.toHaveProperty('groupId');
     expect(envelope).not.toHaveProperty('chainKey');
@@ -194,6 +198,16 @@ describe('SenderKeys', () => {
     expect(decrypted.chainKey).toEqual(state.chainKey);
     expect(decrypted.epochVersion).toBe(4);
     expect(decrypted.epochHash).toEqual(epochHash);
+    expect(decrypted.generationId).toEqual(payload.generationId);
+    expect(decrypted.sequence).toBe(payload.sequence);
+
+    expect(() => SenderKeys.decryptDistribution(
+      { ...envelope, protocolVersion: 1 },
+      bob.xPrivateKey,
+      bob.edPublicKey,
+      alice.xPublicKey,
+      alice.edPublicKey,
+    )).toThrow(/unsupported/i);
   });
 
   it('rejects a distribution relayed over another authenticated session', () => {

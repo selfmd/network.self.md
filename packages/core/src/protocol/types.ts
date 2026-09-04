@@ -22,6 +22,7 @@ export interface IdentityHandshakeMessage {
   signature: Uint8Array;
   displayName?: string;
   protocolVersion: number;
+  capabilities?: string[];
   timestamp: number;
 }
 
@@ -35,6 +36,7 @@ export interface GroupSyncMessage {
 
 export interface SenderKeyDistributionMessage {
   type: typeof MessageType.SenderKeyDistribution;
+  protocolVersion: number;
   recipientPublicKey: Uint8Array;
   ciphertext: Uint8Array;
   nonce: Uint8Array;
@@ -46,6 +48,9 @@ export interface GroupEncryptedMessage {
   groupId: Uint8Array;
   senderFingerprint: string;
   chainIndex: number;
+  generationId: Uint8Array;
+  epochVersion: number;
+  epochHash: Uint8Array;
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
@@ -66,9 +71,15 @@ export interface DirectEncryptedMessage {
 export interface GroupManagementMessage {
   type: typeof MessageType.GroupManagement;
   groupId: Uint8Array;
-  action: 'create' | 'invite' | 'join' | 'leave' | 'kick' | 'promote';
+  action: 'create' | 'invite' | 'accept' | 'sync-request' | 'join' | 'leave' | 'kick' | 'promote';
   targetFingerprint?: string;
   groupName?: string;
+  inviteId?: string;
+  epochVersion?: number;
+  epochHash?: Uint8Array;
+  genesisEpochData?: Uint8Array;
+  genesisSignature?: Uint8Array;
+  genesisHash?: Uint8Array;
   timestamp: number;
 }
 
@@ -89,11 +100,15 @@ export interface TTYAResponseMessage {
 
 export interface NetworkAnnounceMessage {
   type: typeof MessageType.NetworkAnnounce;
+  protocolVersion: number;
   groups: Array<{
     groupId: Uint8Array;
     name: string;
     selfMd: string;
     memberCount: number;
+    genesisEpochData: Uint8Array;
+    genesisSignature: Uint8Array;
+    genesisHash: Uint8Array;
   }>;
   signature: Uint8Array;
   timestamp: number;
