@@ -21,6 +21,9 @@ docker build -t networkselfmd-dashboard .
 docker run --rm \
   -p 127.0.0.1:3001:3001 \
   -v networkselfmd-data:/data \
+  -e DASHBOARD_USERNAME=operator \
+  -e DASHBOARD_PASSWORD_FILE=/run/secrets/dashboard-password \
+  -v /secure/dashboard-password:/run/secrets/dashboard-password:ro \
   networkselfmd-dashboard
 ```
 
@@ -36,6 +39,14 @@ See `.env.example`.
 - `L2S_PASSPHRASE_FILE` — preferred path to a mounted identity passphrase secret
 - `L2S_PASSPHRASE` — identity passphrase fallback when a secret file is unavailable
 - `AGENT_NAME` — display name announced by the dashboard agent
+- `DASHBOARD_USERNAME` — HTTP Basic username; required for non-loopback `HOST`
+- `DASHBOARD_PASSWORD_FILE` — preferred mounted password file (minimum 16 UTF-8 bytes)
+- `DASHBOARD_PASSWORD` — password fallback; do not combine with the file option
+
+The dashboard serves `/healthz` without credentials for container probes. The
+HTML application and every `/api/*` route require Basic authentication whenever
+credentials are configured. Startup fails closed if `HOST` is non-loopback and
+credentials are absent.
 
 ## Health checks
 

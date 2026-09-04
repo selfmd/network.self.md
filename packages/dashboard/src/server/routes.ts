@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -5,6 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Agent } from '@networkselfmd/node';
 import type { ApiStatus, ApiPeer, ApiState, ApiStateDetail, ApiDiscoveredState, ApiJoinResponse, ApiIdentity } from './types.js';
+import type { DashboardBasicAuth } from './config.js';
 
 function bytesToHex(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('hex');
@@ -53,10 +55,42 @@ function isHexId(id: string): boolean {
 
 export interface DashboardAgent {
   agent: Agent;
+  auth?: DashboardBasicAuth;
 }
 
-export async function buildApp({ agent }: DashboardAgent) {
+function credentialDigest(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest();
+}
+
+function basicCredentials(header: string | undefined): string {
+  if (!header) return '';
+  const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/.exec(header);
+  if (!match) return '';
+  try {
+    return Buffer.from(match[1], 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+export async function buildApp({ agent, auth }: DashboardAgent) {
   const app = Fastify();
+
+  if (auth) {
+    const expected = credentialDigest(`${auth.username}:${auth.password}`);
+    app.addHook('onRequest', async (request, reply) => {
+      if (request.url.split('?', 1)[0] === '/healthz') return;
+      const actual = credentialDigest(
+        basicCredentials(request.headers.authorization),
+      );
+      if (!timingSafeEqual(expected, actual)) {
+        await reply
+          .header('WWW-Authenticate', 'Basic realm="network.self.md", charset="UTF-8"')
+          .status(401)
+          .send({ error: { code: 'unauthorized', message: 'Authentication required' } });
+      }
+    });
+  }
 
   await app.register(cors, {
     origin: (origin, callback) => {
