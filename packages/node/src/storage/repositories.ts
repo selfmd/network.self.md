@@ -391,12 +391,35 @@ export class GroupRepository {
   }
 
   join(groupId: Uint8Array, name: string, role: string = 'member', creatorPublicKey?: Uint8Array, genesisHash?: Uint8Array): void {
+    if ((creatorPublicKey === undefined) !== (genesisHash === undefined)) {
+      throw new Error(
+        'Group authority must include both creator key and genesis hash',
+      );
+    }
     const now = Date.now();
     const stmt = this.db.prepare(
       `INSERT INTO groups (group_id, name, role, created_at, joined_at, creator_public_key, genesis_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, joined_at = excluded.joined_at
-       WHERE (groups.genesis_hash IS NULL OR groups.genesis_hash = excluded.genesis_hash)`,
+       ON CONFLICT(group_id) DO UPDATE SET
+         name = excluded.name,
+         joined_at = excluded.joined_at,
+         creator_public_key = COALESCE(groups.creator_public_key, excluded.creator_public_key),
+         genesis_hash = COALESCE(groups.genesis_hash, excluded.genesis_hash)
+       WHERE (
+         groups.creator_public_key IS NULL
+         AND groups.genesis_hash IS NULL
+         AND (
+           (excluded.creator_public_key IS NULL AND excluded.genesis_hash IS NULL)
+           OR (excluded.creator_public_key IS NOT NULL AND excluded.genesis_hash IS NOT NULL)
+         )
+       ) OR (
+         groups.creator_public_key IS NOT NULL
+         AND groups.genesis_hash IS NOT NULL
+         AND excluded.creator_public_key IS NOT NULL
+         AND excluded.genesis_hash IS NOT NULL
+         AND groups.creator_public_key = excluded.creator_public_key
+         AND groups.genesis_hash = excluded.genesis_hash
+       )`,
     );
     const result = stmt.run(Buffer.from(groupId), name, role, now, now, creatorPublicKey ? Buffer.from(creatorPublicKey) : null, genesisHash ? Buffer.from(genesisHash) : null);
     if (result.changes !== 1) throw new Error('Group authority mismatch');
@@ -416,8 +439,17 @@ export class GroupRepository {
 
   pinAuthority(groupId: Uint8Array, creatorPublicKey: Uint8Array, genesisHash: Uint8Array): void {
     const result = this.db.prepare(`UPDATE groups SET creator_public_key = ?, genesis_hash = ?
-      WHERE group_id = ? AND (genesis_hash IS NULL OR genesis_hash = ?)`)
-      .run(Buffer.from(creatorPublicKey), Buffer.from(genesisHash), Buffer.from(groupId), Buffer.from(genesisHash));
+      WHERE group_id = ? AND (
+        (creator_public_key IS NULL AND genesis_hash IS NULL)
+        OR (creator_public_key = ? AND genesis_hash = ?)
+      )`)
+      .run(
+        Buffer.from(creatorPublicKey),
+        Buffer.from(genesisHash),
+        Buffer.from(groupId),
+        Buffer.from(creatorPublicKey),
+        Buffer.from(genesisHash),
+      );
     if (result.changes !== 1) throw new Error('Group authority mismatch');
   }
 

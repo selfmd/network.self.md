@@ -120,6 +120,11 @@ describe('AgentDatabase', () => {
       `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
        VALUES (1, ?, ?, 'LegacyAgent', 1234)`,
     ).run(Buffer.alloc(32, 1), Buffer.alloc(32, 2));
+    legacyDb.prepare(
+      `INSERT INTO discovered_groups
+        (group_id, name, self_md, member_count, announced_by, last_announced)
+       VALUES (?, 'Unauthenticated cache', NULL, 1, ?, 1234)`,
+    ).run(Buffer.alloc(32, 3), Buffer.alloc(32, 4));
     legacyDb.close();
 
     const migrated = new AgentDatabase(legacyDir);
@@ -139,6 +144,11 @@ describe('AgentDatabase', () => {
     expect(row.ed_private_key).toEqual(Buffer.alloc(32, 1));
     expect(row.display_name).toBe('LegacyAgent');
     expect(privateKeyColumn.notnull).toBe(0);
+    expect(
+      migratedDb
+        .prepare('SELECT COUNT(*) AS count FROM discovered_groups')
+        .get(),
+    ).toEqual({ count: 0 });
     migrated.close();
     rmSync(legacyDir, { recursive: true, force: true });
   });
@@ -352,6 +362,46 @@ describe('GroupRepository', () => {
 
     const groups = repo.list();
     expect(groups.length).toBe(2);
+  });
+
+  it('atomically pins an unpinned legacy group and accepts only the exact authority afterwards', () => {
+    const gid = new Uint8Array(32).fill(3);
+    const creator = new Uint8Array(32).fill(4);
+    const genesisHash = new Uint8Array(32).fill(5);
+    repo.create(gid, 'Legacy', 'member');
+
+    repo.join(gid, 'Verified', 'member', creator, genesisHash);
+    const pinned = repo.find(gid)!;
+    expect(new Uint8Array(pinned.creator_public_key!)).toEqual(creator);
+    expect(new Uint8Array(pinned.genesis_hash!)).toEqual(genesisHash);
+
+    repo.join(gid, 'Verified again', 'member', creator, genesisHash);
+
+    expect(() =>
+      repo.join(
+        gid,
+        'Attacker',
+        'member',
+        new Uint8Array(32).fill(6),
+        genesisHash,
+      ),
+    ).toThrow(/authority mismatch/i);
+    expect(repo.find(gid)!.name).toBe('Verified again');
+  });
+
+  it('rejects partial and missing authority updates for an already pinned group', () => {
+    const gid = new Uint8Array(32).fill(7);
+    const creator = new Uint8Array(32).fill(8);
+    const genesisHash = new Uint8Array(32).fill(9);
+    repo.create(gid, 'Pinned', 'member', creator, genesisHash);
+
+    expect(() => repo.join(gid, 'No proof', 'member')).toThrow(
+      /authority mismatch/i,
+    );
+    expect(() => repo.join(gid, 'Partial', 'member', creator)).toThrow(
+      /both creator key and genesis hash/i,
+    );
+    expect(repo.find(gid)!.name).toBe('Pinned');
   });
 
   it('should manage members', () => {

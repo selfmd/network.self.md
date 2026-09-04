@@ -999,15 +999,56 @@ export class GroupManager extends EventEmitter {
       const groupIdHex = Buffer.from(groupId).toString('hex');
       const genesis = this.epochRepo.getEpochByVersion(groupIdHex, 0);
       const latest = this.epochRepo.getLatestEpoch(groupIdHex);
-      if (genesis && verifyGenesisEpoch(genesis, groupIdHex)) {
-        if (!group.creator_public_key || !group.genesis_hash) {
-          this.groupRepo.pinAuthority(groupId, genesis.epoch.createdBy, genesis.hash);
-        }
-        const localKey = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
-        if (latest && this.isMemberInEpoch(latest, this.identity.edPublicKey) && (!localKey || !localKey.generation_id)) {
-          const state = SenderKeys.generate();
-          this.senderKeyRepo.store(groupId, this.identity.edPublicKey, state.chainKey, 0, crypto.getRandomValues(new Uint8Array(16)), localKey?.distribution_sequence ?? -1, latest.epoch.version, latest.hash);
-        }
+      const hasCreator = group.creator_public_key !== null;
+      const hasGenesisHash = group.genesis_hash !== null;
+      let trustedGenesis = false;
+
+      if (genesis && hasCreator && hasGenesisHash) {
+        const creator = new Uint8Array(group.creator_public_key!);
+        trustedGenesis =
+          verifyGenesisEpoch(genesis, groupIdHex, creator) &&
+          buffersEqual(genesis.hash, new Uint8Array(group.genesis_hash!));
+      } else if (
+        genesis &&
+        !hasCreator &&
+        !hasGenesisHash &&
+        group.role === 'admin' &&
+        buffersEqual(genesis.epoch.createdBy, this.identity.edPublicKey) &&
+        verifyGenesisEpoch(genesis, groupIdHex, this.identity.edPublicKey)
+      ) {
+        // A legacy admin group may recover only from a genesis signed by this
+        // local identity. Member groups require a fresh authenticated invite
+        // or verified public announcement before any network participation.
+        this.groupRepo.pinAuthority(
+          groupId,
+          this.identity.edPublicKey,
+          genesis.hash,
+        );
+        trustedGenesis = true;
+      }
+
+      if (!trustedGenesis) continue;
+
+      const localKey = this.senderKeyRepo.load(
+        groupId,
+        this.identity.edPublicKey,
+      );
+      if (
+        latest &&
+        this.isMemberInEpoch(latest, this.identity.edPublicKey) &&
+        (!localKey || !localKey.generation_id)
+      ) {
+        const state = SenderKeys.generate();
+        this.senderKeyRepo.store(
+          groupId,
+          this.identity.edPublicKey,
+          state.chainKey,
+          0,
+          crypto.getRandomValues(new Uint8Array(16)),
+          localKey?.distribution_sequence ?? -1,
+          latest.epoch.version,
+          latest.hash,
+        );
       }
       const topic = deriveKey(groupId, 'networkselfmd-topic-v1', '', 32);
       await this.swarm.join(Buffer.from(topic));

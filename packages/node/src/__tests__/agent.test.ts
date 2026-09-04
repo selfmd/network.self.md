@@ -369,7 +369,10 @@ describe('Agent', () => {
     const privateKey = Buffer.from(legacyAgent.identity.edPrivateKey);
     await legacyAgent.stop();
 
-    const passphrase = 'legacy-passphrase';
+    // Older releases accepted short passphrases. They remain valid for
+    // unlocking existing ciphertext even though new protection requires the
+    // current strength policy.
+    const passphrase = 'tiny';
     const salt = crypto.getRandomValues(new Uint8Array(32));
     const wrappingKey = new Uint8Array(await argon2id({
       password: passphrase,
@@ -392,7 +395,7 @@ describe('Agent', () => {
       code: 'PASSPHRASE_REQUIRED',
     } satisfies Partial<IdentityKeyStorageError>);
     await expect(
-      new Agent({ dataDir, passphrase: 'wrong-legacy-passphrase' }).start(),
+      new Agent({ dataDir, passphrase: 'nope' }).start(),
     ).rejects.toMatchObject({ code: 'UNLOCK_FAILED' } satisfies Partial<IdentityKeyStorageError>);
 
     const upgradedAgent = new Agent({ dataDir, passphrase });
