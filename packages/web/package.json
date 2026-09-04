@@ -1,13 +1,30 @@
 {
   "name": "@networkselfmd/web",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shmlkv/network.self.md.git",
+    "directory": "packages/web"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/**/__tests__/**",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepack": "pnpm run build"
   },
   "dependencies": {
     "@networkselfmd/core": "workspace:*",
@@ -17,7 +34,7 @@
     "@fastify/helmet": "^13.0.0",
     "@fastify/rate-limit": "^10.2.0",
     "hyperswarm": "^4.9.0",
-    "b4a": "^1.6.0",
+    "b4a": "1.6.7",
     "@paralleldrive/cuid2": "^2.2.0"
   },
   "devDependencies": {
