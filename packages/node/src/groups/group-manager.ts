@@ -390,6 +390,81 @@ export class GroupManager extends EventEmitter {
     }
   }
 
+  /**
+   * Send our current sender key only to the authenticated peer that just
+   * connected. Discovery peers that are not in the signed epoch cause no key
+   * sequence update, database write, or group-member network fan-out.
+   */
+  async distributeSenderKeyToPeer(
+    groupId: Uint8Array,
+    session: PeerSession,
+  ): Promise<boolean> {
+    if (!session.peerPublicKey || !session.peerXPublicKey) return false;
+    if (
+      !session.peerFingerprint ||
+      this.swarm.getSession(session.peerFingerprint) !== session
+    ) {
+      return false;
+    }
+    if (!session.peerCapabilities.has(SENDER_KEY_CAPABILITY)) return false;
+
+    const group = this.groupRepo.find(groupId);
+    if (!group) return false;
+    const latestEpoch = this.epochRepo.getLatestEpoch(
+      Buffer.from(groupId).toString('hex'),
+    );
+    if (
+      !latestEpoch ||
+      !this.isMemberInEpoch(latestEpoch, this.identity.edPublicKey) ||
+      !this.isMemberInEpoch(latestEpoch, session.peerPublicKey)
+    ) {
+      return false;
+    }
+
+    const senderKey = this.senderKeyRepo.load(
+      groupId,
+      this.identity.edPublicKey,
+    );
+    if (!senderKey?.generation_id) return false;
+
+    const sequence = senderKey.distribution_sequence + 1;
+    this.senderKeyRepo.store(
+      groupId,
+      this.identity.edPublicKey,
+      new Uint8Array(senderKey.chain_key),
+      senderKey.chain_index,
+      new Uint8Array(senderKey.generation_id),
+      sequence,
+      latestEpoch.epoch.version,
+      latestEpoch.hash,
+    );
+    const payload = SenderKeys.createDistribution(
+      groupId,
+      {
+        chainKey: new Uint8Array(senderKey.chain_key),
+        chainIndex: senderKey.chain_index,
+      },
+      this.identity.edPublicKey,
+      latestEpoch.epoch.version,
+      latestEpoch.hash,
+      new Uint8Array(senderKey.generation_id),
+      sequence,
+    );
+    const message: ProtocolMessage = SenderKeys.encryptDistribution(
+      payload,
+      this.identity.xPrivateKey,
+      this.identity.edPublicKey,
+      session.peerXPublicKey,
+      session.peerPublicKey,
+    );
+    try {
+      session.send(message);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   handleSenderKeyDistribution(
     session: PeerSession,
     message: SenderKeyDistributionMessage,

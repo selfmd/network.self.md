@@ -15,6 +15,8 @@ export type ConnectionState =
   | 'closed';
 
 export const MAX_COALESCED_HANDSHAKE_TAIL_BYTES = 64 * 1024;
+/** Maximum total length-prefixed identity-handshake frame retained pre-auth. */
+export const MAX_IDENTITY_HANDSHAKE_FRAME_SIZE = 8 * 1024;
 
 type SocketHandler = (...args: unknown[]) => void;
 const ignorePostCloseSocketError: SocketHandler = () => undefined;
@@ -88,20 +90,24 @@ export class PeerSession extends EventEmitter {
   private onData(chunk: Buffer): void {
     if (this.state === 'closed') return;
 
-    this.buffer = Buffer.concat([this.buffer, chunk]);
+    if (this.state === 'handshaking') {
+      this.onHandshakeData(chunk);
+      return;
+    }
 
     const maximumBufferedBytes =
       this.state === 'verified'
         ? MAX_COALESCED_HANDSHAKE_TAIL_BYTES
-        : 4 + MAX_FRAME_SIZE + MAX_COALESCED_HANDSHAKE_TAIL_BYTES;
-    if (this.state !== 'ready' && this.buffer.length > maximumBufferedBytes) {
+        : 4 + MAX_FRAME_SIZE;
+    if (this.buffer.length + chunk.length > maximumBufferedBytes) {
       this.protocolViolation(
         this.state === 'verified'
           ? 'Coalesced post-handshake data limit exceeded'
-          : 'Pre-authentication data limit exceeded',
+          : 'Protocol data limit exceeded',
       );
       return;
     }
+    this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (this.buffer.length > 0) {
       try {
@@ -112,30 +118,10 @@ export class PeerSession extends EventEmitter {
         this.buffer = Buffer.from(this.buffer.subarray(bytesConsumed));
 
         if (message.type === MessageType.IdentityHandshake) {
-          if (this.state !== 'handshaking') {
-            this.protocolViolation(
-              'Identity handshake already completed for this connection',
-            );
-            return;
-          }
-
-          this.emit('message', message);
-          const stateAfterHandshake = this.state as ConnectionState;
-          if (stateAfterHandshake === 'closed') return;
-
-          // The handshake listener must validate and freeze the peer identity
-          // synchronously before any following application frame is retained.
-          if (stateAfterHandshake !== 'verified') {
-            this.protocolViolation('Identity handshake was not accepted');
-            return;
-          }
-          if (this.buffer.length > MAX_COALESCED_HANDSHAKE_TAIL_BYTES) {
-            this.protocolViolation(
-              'Coalesced post-handshake data limit exceeded',
-            );
-            return;
-          }
-          continue;
+          this.protocolViolation(
+            'Identity handshake already completed for this connection',
+          );
+          return;
         }
 
         if (this.state === 'verified') {
@@ -167,6 +153,81 @@ export class PeerSession extends EventEmitter {
         );
         return;
       }
+    }
+  }
+
+  /**
+   * Incrementally retains only the handshake frame. Any coalesced bytes are
+   * processed after the identity listener synchronously authenticates them.
+   */
+  private onHandshakeData(chunk: Buffer): void {
+    let offset = 0;
+
+    if (this.buffer.length < 4) {
+      const headerBytes = Math.min(4 - this.buffer.length, chunk.length);
+      this.buffer = Buffer.concat([
+        this.buffer,
+        chunk.subarray(0, headerBytes),
+      ]);
+      offset += headerBytes;
+      if (this.buffer.length < 4) return;
+    }
+
+    const payloadLength = this.buffer.readUInt32BE(0);
+    if (
+      payloadLength === 0 ||
+      payloadLength > MAX_IDENTITY_HANDSHAKE_FRAME_SIZE - 4
+    ) {
+      this.protocolViolation('Identity handshake frame limit exceeded');
+      return;
+    }
+
+    const frameLength = 4 + payloadLength;
+    const bodyBytes = Math.min(
+      frameLength - this.buffer.length,
+      chunk.length - offset,
+    );
+    if (bodyBytes > 0) {
+      this.buffer = Buffer.concat([
+        this.buffer,
+        chunk.subarray(offset, offset + bodyBytes),
+      ]);
+      offset += bodyBytes;
+    }
+    if (this.buffer.length < frameLength) return;
+
+    try {
+      const result = parseFrame(new Uint8Array(this.buffer));
+      this.buffer = Buffer.alloc(0);
+      if (!result || result.bytesConsumed !== frameLength) {
+        this.protocolViolation('Invalid identity handshake frame');
+        return;
+      }
+      if (result.message.type !== MessageType.IdentityHandshake) {
+        this.protocolViolation(
+          'Application frame received before identity authentication',
+        );
+        return;
+      }
+
+      this.emit('message', result.message);
+      const stateAfterHandshake = this.state as ConnectionState;
+      if (stateAfterHandshake === 'closed') return;
+      if (stateAfterHandshake !== 'verified') {
+        this.protocolViolation('Identity handshake was not accepted');
+        return;
+      }
+
+      const tail = chunk.subarray(offset);
+      if (tail.length > MAX_COALESCED_HANDSHAKE_TAIL_BYTES) {
+        this.protocolViolation('Coalesced post-handshake data limit exceeded');
+        return;
+      }
+      if (tail.length > 0) this.onData(tail);
+    } catch (error) {
+      this.protocolViolation(
+        error instanceof Error ? error : new Error('Invalid protocol frame'),
+      );
     }
   }
 

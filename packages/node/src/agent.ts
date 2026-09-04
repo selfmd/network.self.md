@@ -869,13 +869,17 @@ export class Agent extends EventEmitter {
         displayName: result.peerDisplayName,
       });
 
-      // Distribute sender keys for all groups to new peer
+      // A new connection receives only keys for groups where its authenticated
+      // identity appears in the current signed epoch. Rotation remains the
+      // only operation that intentionally fans out to all members.
       const groups = this.groupRepo.list();
       for (const group of groups) {
         const gid = Uint8Array.from(group.group_id);
-        this.groupManager.distributeSenderKeys(gid).catch((err) => {
-          this.emit('error', err);
-        });
+        this.groupManager
+          .distributeSenderKeyToPeer(gid, result.session)
+          .catch((err) => {
+            this.emit('error', err);
+          });
       }
 
       this.groupManager.syncWithPeer(result.session);

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { argon2id } from 'hash-wasm';
-import { encrypt } from '@networkselfmd/core';
+import { SENDER_KEY_CAPABILITY, encrypt } from '@networkselfmd/core';
 import { secretFileProvider } from '../secrets.js';
 
 const mockSwarmState = vi.hoisted(() => ({
@@ -430,6 +430,53 @@ describe('Agent', () => {
     expect(groups[0].role).toBe('admin');
     expect(groups[0].isPublic).toBe(false);
 
+    await agent.stop();
+  });
+
+  it('does not amplify sender-key state or traffic for a discovery-only peer', async () => {
+    const agent = new Agent({ dataDir, displayName: 'GroupBot' });
+    await agent.start();
+    const group = await agent.createGroup('Private group');
+    const database = new Database(join(dataDir, 'agent.db'));
+    const readSequence = () =>
+      (
+        database
+          .prepare(
+            'SELECT distribution_sequence FROM sender_keys WHERE group_id = ? AND public_key = ?',
+          )
+          .get(
+            Buffer.from(group.groupId),
+            Buffer.from(agent.identity.edPublicKey),
+          ) as { distribution_sequence: number }
+      ).distribution_sequence;
+    const sequenceBefore = readSequence();
+    const send = vi.fn();
+    const outsiderPublicKey = new Uint8Array(32).fill(0x51);
+    const outsiderSession = {
+      peerPublicKey: outsiderPublicKey,
+      peerXPublicKey: new Uint8Array(32).fill(0x52),
+      peerCapabilities: new Set([SENDER_KEY_CAPABILITY, 'group-epoch-v1']),
+      send,
+    };
+
+    (
+      agent as unknown as {
+        swarm: { emit(event: string, value: unknown): void };
+      }
+    ).swarm.emit('peer:verified', {
+      session: outsiderSession,
+      peerPublicKey: outsiderPublicKey,
+      peerFingerprint: 'discovery-only-peer',
+      peerCapabilities: [...outsiderSession.peerCapabilities],
+      peerNoisePublicKey: new Uint8Array(32),
+      peerProtocolVersion: 2,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(readSequence()).toBe(sequenceBefore);
+    expect(send).not.toHaveBeenCalled();
+
+    database.close();
     await agent.stop();
   });
 

@@ -149,17 +149,18 @@ describe('TTYA bridge and manager integration', () => {
     expect(bridgeSocket.writes.map(wireType)).toEqual(['ttya-auth-response']);
   });
 
-  it('keeps an incumbent candidate during concurrent connection attempts and reconnects cleanly', () => {
+  it('chooses the first authenticated candidate and reconnects cleanly', () => {
     const [managerSocket, bridgeSocket] = socketPair();
     bridgeSwarm.emit('connection', bridgeSocket, {});
 
     const rogueBridgeSocket = new LocalNoiseSocket(0x43, 0x53);
     bridgeSwarm.emit('connection', rogueBridgeSocket, {});
-    expect(rogueBridgeSocket.destroyed).toBe(true);
+    expect(rogueBridgeSocket.destroyed).toBe(false);
     expect(bridgeSocket.destroyed).toBe(false);
 
     managerSwarm.emit('connection', managerSocket, {});
     expect(bridge.isConnected).toBe(true);
+    expect(rogueBridgeSocket.destroyed).toBe(true);
 
     managerSocket.destroy();
     bridgeSocket.destroy();

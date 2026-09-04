@@ -150,6 +150,13 @@ describe('Sender-key distribution security E2E', () => {
         'Three-agent global discovery timeout',
       );
 
+      // Global/public discovery alone must not advance persistent sender-key
+      // distribution state. Neither connected outsider is a signed member yet.
+      expect(
+        readSenderKey(aliceDir, groupId, alice.identity.edPublicKey)
+          ?.distribution_sequence,
+      ).toBe(aliceInitialKey!.distribution_sequence);
+
       const bobEnvelopes: SenderKeyDistributionMessage[] = [];
       const malloryEnvelopes: SenderKeyDistributionMessage[] = [];
       getSwarm(bob).router.on(MessageType.SenderKeyDistribution, (_session, message) => {

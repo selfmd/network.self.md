@@ -24,7 +24,7 @@ vi.mock('hyperswarm', async () => {
   return { default: MockHyperswarm };
 });
 
-import { TTYABridge } from '../bridge.js';
+import { MAX_TTYA_AUTH_CANDIDATES, TTYABridge } from '../bridge.js';
 import type { TTYARequest } from '../types.js';
 
 class MockConnection extends EventEmitter {
@@ -83,6 +83,7 @@ describe('TTYABridge authentication', () => {
 
   afterEach(async () => {
     await bridge.disconnect();
+    vi.useRealTimers();
   });
 
   function begin(connection: MockConnection): TTYAAuthResponseFrame {
@@ -145,13 +146,51 @@ describe('TTYABridge authentication', () => {
     ]);
   });
 
-  it('does not allow a new socket to evict an unauthenticated incumbent', () => {
-    const incumbent = new MockConnection();
-    swarm.emit('connection', incumbent, {});
-    const newcomer = new MockConnection();
-    swarm.emit('connection', newcomer, {});
-    expect(incumbent.destroyed).toBe(false);
-    expect(newcomer.destroyed).toBe(true);
+  it('lets a valid candidate authenticate despite a silent first socket', () => {
+    const silent = new MockConnection();
+    swarm.emit('connection', silent, {});
+    const valid = new MockConnection(0x42, 0x52);
+    const response = begin(valid);
+    finish(valid, response);
+
+    expect(silent.destroyed).toBe(true);
+    expect(valid.destroyed).toBe(false);
+    expect(bridge.isConnected).toBe(true);
+
+    const late = new MockConnection(0x43, 0x53);
+    swarm.emit('connection', late, {});
+    expect(late.destroyed).toBe(true);
+  });
+
+  it('bounds authentication candidates and releases capacity on close', () => {
+    const candidates = Array.from(
+      { length: MAX_TTYA_AUTH_CANDIDATES },
+      (_, index) => new MockConnection(0x40 + index, 0x50 + index),
+    );
+    for (const candidate of candidates) swarm.emit('connection', candidate, {});
+
+    const overflow = new MockConnection(0x70, 0x71);
+    swarm.emit('connection', overflow, {});
+    expect(overflow.destroyed).toBe(true);
+
+    candidates[0].destroy();
+    const replacement = new MockConnection(0x72, 0x73);
+    swarm.emit('connection', replacement, {});
+    expect(replacement.destroyed).toBe(false);
+  });
+
+  it('expires a silent candidate and reconnects with a valid agent', () => {
+    vi.useFakeTimers();
+    const silent = new MockConnection();
+    swarm.emit('connection', silent, {});
+    vi.advanceTimersByTime(5_000);
+    expect(silent.destroyed).toBe(true);
+
+    const valid = new MockConnection(0x42, 0x52);
+    const response = begin(valid);
+    finish(valid, response);
+    expect(valid.destroyed).toBe(false);
+    expect(bridge.isConnected).toBe(true);
   });
 
   it('does not release queued or future requests to a chosen-challenge peer', () => {
