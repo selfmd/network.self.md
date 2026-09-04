@@ -1,25 +1,29 @@
-import {
-  sign,
-  verify,
-  fingerprintFromPublicKey,
-} from '@networkselfmd/core';
+import { sign, verify, fingerprintFromPublicKey } from '@networkselfmd/core';
 import type {
   AgentIdentity,
   IdentityHandshakeMessage,
-  ProtocolMessage,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 
-export const HANDSHAKE_PROTOCOL_VERSION = 1;
+export const HANDSHAKE_PROTOCOL_VERSION = 2;
 export const TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000; // ±5 minutes
 
 const HANDSHAKE_CONTEXT = new TextEncoder().encode(
-  'network.self.md/identity-handshake/v1\0',
+  'network.self.md/identity-handshake/v2\0',
 );
 const KEY_LENGTH = 32;
 const SIGNATURE_LENGTH = 64;
 const HANDSHAKE_HASH_LENGTH = 64;
+const VERSION_LENGTH = 4;
+const TIMESTAMP_LENGTH = 8;
+export const HANDSHAKE_TRANSCRIPT_LENGTH =
+  HANDSHAKE_CONTEXT.length +
+  VERSION_LENGTH +
+  KEY_LENGTH +
+  KEY_LENGTH +
+  TIMESTAMP_LENGTH +
+  HANDSHAKE_HASH_LENGTH;
 
 export interface HandshakeResult {
   session: PeerSession;
@@ -27,8 +31,6 @@ export interface HandshakeResult {
   peerFingerprint: string;
   peerDisplayName?: string;
   peerNoisePublicKey: Uint8Array;
-  /** Messages that arrived during the handshake but were not handshake messages */
-  bufferedMessages?: ProtocolMessage[];
 }
 
 export async function performHandshake(
@@ -56,7 +58,7 @@ export async function performHandshake(
       HANDSHAKE_HASH_LENGTH,
     );
   } catch (error) {
-    session.close();
+    session.destroy();
     throw error;
   }
   const timestamp = Date.now();
@@ -70,7 +72,7 @@ export async function performHandshake(
 
   const signature = sign(payload, identity.edPrivateKey);
 
-  const handshakeMessage: ProtocolMessage = {
+  const handshakeMessage: IdentityHandshakeMessage = {
     type: MessageType.IdentityHandshake,
     edPublicKey: identity.edPublicKey,
     xPublicKey: identity.xPublicKey,
@@ -82,17 +84,6 @@ export async function performHandshake(
   };
 
   return new Promise<HandshakeResult>((resolve, reject) => {
-    // Buffer non-handshake messages that arrive during the handshake.
-    // These will be re-emitted after the handshake completes so that
-    // the routing layer can process them.
-    //
-    // Important: we keep the listener attached even after the handshake
-    // message arrives, because multiple messages may arrive in the same
-    // TCP segment. The PeerSession's onData loop emits them synchronously,
-    // so removing the listener mid-loop would cause subsequent messages
-    // in that batch to be lost.
-    const bufferedMessages: ProtocolMessage[] = [];
-    let handshakeCompleted = false;
     let settled = false;
 
     const cleanup = () => {
@@ -102,11 +93,11 @@ export async function performHandshake(
       session.removeListener('close', onClose);
     };
 
-    const fail = (error: Error, closeSession = true) => {
+    const fail = (error: Error, destroySession = true) => {
       if (settled) return;
       settled = true;
       cleanup();
-      if (closeSession) session.close();
+      if (destroySession) session.destroy();
       reject(error);
     };
 
@@ -114,26 +105,25 @@ export async function performHandshake(
     const onClose = () =>
       fail(new Error('Connection closed during handshake'), false);
 
-    const onMessage = (message: ProtocolMessage) => {
-      // After handshake is complete, buffer ALL remaining messages
-      if (handshakeCompleted) {
-        bufferedMessages.push(message);
-        return;
-      }
-
+    const onMessage = (message: IdentityHandshakeMessage) => {
       if (message.type !== MessageType.IdentityHandshake) {
-        bufferedMessages.push(message);
+        fail(
+          new Error(
+            'Application frame received before identity authentication',
+          ),
+        );
         return;
       }
 
-      handshakeCompleted = true;
       clearTimeout(timeout);
 
       try {
         const peerHandshake = message as IdentityHandshakeMessage;
         validateHandshake(peerHandshake, remoteNoisePublicKey, handshakeHash);
 
-        const peerFingerprint = fingerprintFromPublicKey(peerHandshake.edPublicKey);
+        const peerFingerprint = fingerprintFromPublicKey(
+          peerHandshake.edPublicKey,
+        );
 
         session.setVerified(
           peerHandshake.edPublicKey,
@@ -155,12 +145,13 @@ export async function performHandshake(
             peerFingerprint,
             peerDisplayName: peerHandshake.displayName,
             peerNoisePublicKey: peerHandshake.noisePublicKey,
-            bufferedMessages,
           };
           resolve(result);
         });
       } catch (err) {
-        fail(err instanceof Error ? err : new Error('Invalid identity handshake'));
+        fail(
+          err instanceof Error ? err : new Error('Invalid identity handshake'),
+        );
       }
     };
 
@@ -192,26 +183,41 @@ export function createHandshakeSigningPayload(
   timestamp: number,
   handshakeHash: Uint8Array,
 ): Uint8Array {
-  const payload = new Uint8Array(
-    HANDSHAKE_CONTEXT.length +
-      4 +
-      noisePublicKey.length +
-      xPublicKey.length +
-      8 +
-      handshakeHash.length,
+  if (
+    !Number.isInteger(protocolVersion) ||
+    protocolVersion < 0 ||
+    protocolVersion > 0xffffffff
+  ) {
+    throw new Error('Invalid handshake protocol version');
+  }
+  assertByteLength(noisePublicKey, KEY_LENGTH, 'Noise public key');
+  assertByteLength(xPublicKey, KEY_LENGTH, 'X25519 public key');
+  assertByteLength(
+    handshakeHash,
+    HANDSHAKE_HASH_LENGTH,
+    'Noise handshake hash',
   );
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error('Invalid handshake timestamp');
+  }
+
+  const payload = new Uint8Array(HANDSHAKE_TRANSCRIPT_LENGTH);
   let offset = 0;
   payload.set(HANDSHAKE_CONTEXT, offset);
   offset += HANDSHAKE_CONTEXT.length;
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const view = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    payload.byteLength,
+  );
   view.setUint32(offset, protocolVersion, false);
-  offset += 4;
+  offset += VERSION_LENGTH;
   payload.set(noisePublicKey, offset);
-  offset += noisePublicKey.length;
+  offset += KEY_LENGTH;
   payload.set(xPublicKey, offset);
-  offset += xPublicKey.length;
+  offset += KEY_LENGTH;
   view.setBigUint64(offset, BigInt(timestamp), false);
-  offset += 8;
+  offset += TIMESTAMP_LENGTH;
   payload.set(handshakeHash, offset);
   return payload;
 }
@@ -224,7 +230,7 @@ export function validateHandshake(
 ): void {
   if (handshake.protocolVersion !== HANDSHAKE_PROTOCOL_VERSION) {
     throw new Error(
-      `Unsupported handshake protocol version: ${handshake.protocolVersion}`,
+      `Incompatible handshake protocol version: local=${HANDSHAKE_PROTOCOL_VERSION} remote=${String(handshake.protocolVersion)}`,
     );
   }
 
@@ -233,7 +239,11 @@ export function validateHandshake(
   assertByteLength(handshake.noisePublicKey, KEY_LENGTH, 'Noise public key');
   assertByteLength(handshake.signature, SIGNATURE_LENGTH, 'Ed25519 signature');
   assertByteLength(remoteNoisePublicKey, KEY_LENGTH, 'remote Noise public key');
-  assertByteLength(handshakeHash, HANDSHAKE_HASH_LENGTH, 'Noise handshake hash');
+  assertByteLength(
+    handshakeHash,
+    HANDSHAKE_HASH_LENGTH,
+    'Noise handshake hash',
+  );
 
   if (!Number.isSafeInteger(handshake.timestamp) || handshake.timestamp < 0) {
     throw new Error('Invalid handshake timestamp');

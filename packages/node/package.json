@@ -11,14 +11,15 @@
   },
   "dependencies": {
     "@networkselfmd/core": "workspace:*",
-    "hyperswarm": "^4.9.0",
-    "hyperdht": "^6.20.0",
+    "@paralleldrive/cuid2": "^2.2.0",
     "b4a": "^1.6.0",
     "better-sqlite3": "^11.8.0",
     "hash-wasm": "^4.11.0",
-    "@paralleldrive/cuid2": "^2.2.0"
+    "hyperdht": "^6.20.0",
+    "hyperswarm": "^4.9.0"
   },
   "devDependencies": {
+    "@hyperswarm/secret-stream": "^6.9.1",
     "@types/better-sqlite3": "^7.6.0"
   }
 }

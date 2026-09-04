@@ -66,21 +66,18 @@ export class SwarmManager extends EventEmitter {
       try {
         await this.acceptPeerIdentity?.(result);
       } catch (error) {
-        result.session.close();
+        result.session.destroy();
         throw error;
       }
 
       const { session, peerFingerprint } = result;
-
-      // Store session by fingerprint
-      const existingSession = this.sessions.get(peerFingerprint);
-      if (existingSession) {
-        existingSession.close();
+      if (session.state !== 'verified') {
+        session.destroy();
+        throw new Error('Connection closed before peer registration');
       }
-      this.sessions.set(peerFingerprint, session);
 
-      // Set up message routing BEFORE emitting events or replaying
-      // buffered messages, to prevent dropping messages.
+      // Attach lifecycle handlers before publishing the session. A replaced
+      // session may close asynchronously, so it may only delete itself.
       session.on('message', (message) => {
         this.router.route(session, message).catch((err) => {
           this.emit('error', err);
@@ -88,6 +85,7 @@ export class SwarmManager extends EventEmitter {
       });
 
       session.on('close', () => {
+        if (this.sessions.get(peerFingerprint) !== session) return;
         this.sessions.delete(peerFingerprint);
         this.emit('peer:disconnected', {
           peerPublicKey: result.peerPublicKey,
@@ -99,18 +97,15 @@ export class SwarmManager extends EventEmitter {
         this.emit('error', err);
       });
 
+      const existingSession = this.sessions.get(peerFingerprint);
+      this.sessions.set(peerFingerprint, session);
+      if (existingSession && existingSession !== session) {
+        existingSession.close();
+      }
+
       session.setReady();
       this.emit('peer:connected', result);
       this.emit('peer:verified', result);
-
-      // Replay any messages that arrived during the handshake
-      if (result.bufferedMessages) {
-        for (const msg of result.bufferedMessages) {
-          this.router.route(session, msg).catch((err) => {
-            this.emit('error', err);
-          });
-        }
-      }
     } catch (err) {
       this.emit('error', err);
     }
