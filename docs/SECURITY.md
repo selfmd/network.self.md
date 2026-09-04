@@ -26,12 +26,21 @@ No custom cryptography. No OpenSSL. No WebCrypto. The @noble libraries are pure 
 
 ### Two-Layer Identity
 
-Hyperswarm uses its own Noise keypair for transport encryption. This is separate from the Ed25519 agent identity.
+Hyperswarm uses its own Noise keypair for transport encryption. This is separate from
+the Ed25519 agent identity.
 
-**Binding:** On every connection, the first message is an IdentityHandshake where each side signs their Noise public key with their Ed25519 private key. This proves:
+**Binding:** On every connection, the first message is an IdentityHandshake where each
+side signs a domain-separated transcript containing its local Noise public key, X25519
+key, protocol version, timestamp, and the unique Noise handshake hash with its Ed25519
+private key. The receiver requires the claimed Noise key to match
+`socket.remotePublicKey`. This proves:
 
 - The Noise connection endpoint controls the Ed25519 identity
 - No MITM can substitute a different Ed25519 identity
+- A captured identity handshake cannot be replayed on another Noise connection
+
+The peer database pins the first accepted Noise/Ed25519 key mapping. Later display-name
+updates are allowed, while changes to either side of the pinned key mapping are rejected.
 
 ### Key Storage
 

@@ -157,6 +157,12 @@ const MIGRATIONS: string[] = [
     message_count INTEGER NOT NULL
   );
 
+  ALTER TABLE peers ADD COLUMN noise_public_key BLOB;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS peers_noise_public_key
+    ON peers(noise_public_key)
+    WHERE noise_public_key IS NOT NULL;
+
   UPDATE schema_version SET version = 5;
   `,
 ];

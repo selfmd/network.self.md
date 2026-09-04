@@ -1,6 +1,6 @@
 # Protocol Specification
 
-Version: 1.0-draft
+Version: 2.0-draft
 
 ## Wire Format
 
@@ -42,25 +42,50 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 {
   type: 0x01,
   edPublicKey: Uint8Array,       // 32 bytes, Ed25519 public key
+  xPublicKey: Uint8Array,        // 32 bytes, X25519 public key used for DMs
   noisePublicKey: Uint8Array,    // 32 bytes, Noise key from Hyperswarm
-  signature: Uint8Array,         // Ed25519 signature over noisePublicKey
+  signature: Uint8Array,         // Ed25519 signature over the bound transcript
   displayName?: string,          // optional human-readable name
-  protocolVersion: 2,
+  protocolVersion: number,       // 2; other versions are incompatible
   capabilities: ["sender-key-v2", "group-epoch-v1"],
   timestamp: number              // unix ms, must be within ±5 min of local time
 }
 ```
 
 **Verification:**
+Version 2 is intentionally not wire-compatible with version 1. A peer that sends any
+other `protocolVersion` fails the handshake explicitly and its stream is destroyed.
+The v2 capability profile is fixed: peers must advertise exactly `sender-key-v2` and
+`group-epoch-v1`; missing, duplicate, or unknown capabilities fail the handshake.
 
-1. Verify `ed25519.verify(signature, noisePublicKey, edPublicKey)` is true
-2. Verify `noisePublicKey` matches the Noise key from the Hyperswarm connection
+The signature covers exactly 178 canonical bytes; no CBOR encoding, field lengths, or
+optional fields participate in this transcript:
+
+| Offset | Size | Encoding    | Value                                     |
+| ------ | ---- | ----------- | ----------------------------------------- |
+| 0      | 38   | ASCII bytes | `network.self.md/identity-handshake/v2\0` |
+| 38     | 4    | uint32 BE   | `protocolVersion` (= 2)                   |
+| 42     | 32   | raw bytes   | sender's `noisePublicKey`                 |
+| 74     | 32   | raw bytes   | sender's `xPublicKey`                     |
+| 106    | 8    | uint64 BE   | `timestamp` in Unix milliseconds          |
+| 114    | 64   | raw bytes   | connection's Noise `handshakeHash`        |
+
+1. Require protocol version 2 and exact key/signature/transcript field lengths
+2. Verify `noisePublicKey` matches `socket.remotePublicKey`
 3. Verify `timestamp` is within ±300,000 ms of local time
-4. If any check fails, drop the connection
+4. Verify the Ed25519 signature over the full transcript, including `socket.handshakeHash`
+5. Reject a second identity handshake on an already-verified connection
+6. If any check fails, drop the connection
 
-The version and sorted capability list are covered by the handshake signature. Peers that
-cannot authenticate the v2 capability set are rejected instead of silently receiving a
-legacy sender-key envelope.
+Before authentication, any application frame is a protocol violation and destroys the
+stream; such frames are never accumulated for later replay. Once the handshake has been
+validated, a post-handshake tail may arrive before routing is installed (including split
+transport chunks). That tail is bounded to 65,536 framed bytes and released atomically by
+the transition to `ready`; any excess destroys the stream.
+
+This binds the transport-layer Noise identity and DM key to the application-layer
+Ed25519 identity, and prevents a captured handshake from being replayed on another
+Noise connection.
 
 ### GroupSync (0x02)
 

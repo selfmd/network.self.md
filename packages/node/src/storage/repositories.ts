@@ -13,6 +13,7 @@ export interface StoredIdentity {
 
 export interface StoredPeer {
   public_key: Buffer;
+  noise_public_key: Buffer | null;
   fingerprint: string;
   display_name: string | null;
   trusted: number;
@@ -278,6 +279,54 @@ export class IdentityRepository {
 export class PeerRepository {
   constructor(private db: Database.Database) {}
 
+  pinTransportIdentity(
+    publicKey: Uint8Array,
+    fingerprint: string,
+    noisePublicKey: Uint8Array,
+    displayName?: string,
+  ): void {
+    const transaction = this.db.transaction(() => {
+      const existingIdentity = this.find(publicKey);
+      if (
+        existingIdentity?.noise_public_key &&
+        !existingIdentity.noise_public_key.equals(Buffer.from(noisePublicKey))
+      ) {
+        throw new Error(
+          'Peer Noise transport key changed for a pinned identity',
+        );
+      }
+
+      const existingTransport = this.findByNoisePublicKey(noisePublicKey);
+      if (
+        existingTransport &&
+        !existingTransport.public_key.equals(Buffer.from(publicKey))
+      ) {
+        throw new Error(
+          'Noise transport key is already pinned to a different identity',
+        );
+      }
+
+      const stmt = this.db.prepare(
+        `INSERT INTO peers (public_key, noise_public_key, fingerprint, display_name, last_seen)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(public_key) DO UPDATE SET
+           noise_public_key = COALESCE(peers.noise_public_key, excluded.noise_public_key),
+           fingerprint = excluded.fingerprint,
+           display_name = COALESCE(excluded.display_name, peers.display_name),
+           last_seen = excluded.last_seen`,
+      );
+      stmt.run(
+        Buffer.from(publicKey),
+        Buffer.from(noisePublicKey),
+        fingerprint,
+        displayName ?? null,
+        Date.now(),
+      );
+    });
+
+    transaction();
+  }
+
   upsert(
     publicKey: Uint8Array,
     fingerprint: string,
@@ -298,6 +347,12 @@ export class PeerRepository {
     return this.db
       .prepare('SELECT * FROM peers WHERE public_key = ?')
       .get(Buffer.from(publicKey)) as StoredPeer | undefined;
+  }
+
+  findByNoisePublicKey(noisePublicKey: Uint8Array): StoredPeer | undefined {
+    return this.db
+      .prepare('SELECT * FROM peers WHERE noise_public_key = ?')
+      .get(Buffer.from(noisePublicKey)) as StoredPeer | undefined;
   }
 
   list(): StoredPeer[] {
