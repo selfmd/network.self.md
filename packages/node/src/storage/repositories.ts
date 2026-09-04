@@ -5,7 +5,7 @@ import { serializeEpoch, deserializeEpoch, hashEpoch } from '@networkselfmd/core
 // Local types for DB rows
 export interface StoredIdentity {
   id: number;
-  ed_private_key: Buffer;
+  ed_private_key: Buffer | null;
   ed_public_key: Buffer;
   display_name: string | null;
   created_at: number;
@@ -74,16 +74,54 @@ export class IdentityRepository {
     edPublicKey: Uint8Array,
     displayName?: string,
   ): void {
-    const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
-       VALUES (1, ?, ?, ?, ?)`,
-    );
-    stmt.run(
-      Buffer.from(edPrivateKey),
-      Buffer.from(edPublicKey),
-      displayName ?? null,
-      Date.now(),
-    );
+    const savePlaintext = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+         VALUES (1, ?, ?, ?, ?)`,
+      ).run(
+        Buffer.from(edPrivateKey),
+        Buffer.from(edPublicKey),
+        displayName ?? null,
+        Date.now(),
+      );
+      this.db.prepare('DELETE FROM key_storage WHERE id = 1').run();
+    });
+    savePlaintext();
+  }
+
+  saveEncrypted(
+    edPublicKey: Uint8Array,
+    displayName: string | undefined,
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): void {
+    const save = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+         VALUES (1, NULL, ?, ?, ?)`,
+      ).run(Buffer.from(edPublicKey), displayName ?? null, Date.now());
+      this.writeEncryptedKeys(salt, nonce, ciphertext);
+    });
+    save.immediate();
+  }
+
+  migrateToEncrypted(
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): void {
+    const migrate = this.db.transaction(() => {
+      // Store the recoverable encrypted copy before removing the only
+      // plaintext copy. The transaction makes both changes durable together.
+      this.writeEncryptedKeys(salt, nonce, ciphertext);
+      this.db.prepare('UPDATE identity SET ed_private_key = NULL WHERE id = 1').run();
+    });
+    migrate.immediate();
+  }
+
+  removePlaintextPrivateKey(): void {
+    this.db.prepare('UPDATE identity SET ed_private_key = NULL WHERE id = 1').run();
   }
 
   load(): StoredIdentity | undefined {
@@ -93,6 +131,14 @@ export class IdentityRepository {
   }
 
   saveEncryptedKeys(salt: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): void {
+    this.writeEncryptedKeys(salt, nonce, ciphertext);
+  }
+
+  private writeEncryptedKeys(
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): void {
     const stmt = this.db.prepare(
       `INSERT OR REPLACE INTO key_storage (id, salt, nonce, ciphertext)
        VALUES (1, ?, ?, ?)`,

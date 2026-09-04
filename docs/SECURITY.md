@@ -34,7 +34,7 @@ Hyperswarm uses its own Noise keypair for transport encryption. This is separate
 
 ### Key Storage
 
-Private keys are encrypted at rest:
+When a passphrase is configured, private keys are encrypted at rest:
 
 ```
 salt = random(32 bytes)
@@ -43,6 +43,12 @@ nonce = random(24 bytes)
 ciphertext = xchacha20poly1305(wrappingKey, nonce).encrypt(edPrivateKey)
 stored = (salt, nonce, ciphertext)
 ```
+
+The identity row then contains only the public key and metadata. Starting a
+passphrase-protected identity without its passphrase, or with an incorrect
+passphrase, fails closed. Existing plaintext identities are upgraded in a
+single SQLite transaction that stores the authenticated encrypted copy before
+clearing plaintext; no-passphrase mode remains available when explicitly used.
 
 ## Encryption Layers
 

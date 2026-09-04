@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATIONS: string[] = [
   `
@@ -108,6 +108,23 @@ const MIGRATIONS: string[] = [
 
   UPDATE schema_version SET version = 4;
   `,
+  `
+  CREATE TABLE identity_v5 (
+    id INTEGER PRIMARY KEY,
+    ed_private_key BLOB,
+    ed_public_key BLOB NOT NULL,
+    display_name TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  INSERT INTO identity_v5 (id, ed_private_key, ed_public_key, display_name, created_at)
+    SELECT id, ed_private_key, ed_public_key, display_name, created_at FROM identity;
+
+  DROP TABLE identity;
+  ALTER TABLE identity_v5 RENAME TO identity;
+
+  UPDATE schema_version SET version = 5;
+  `,
 ];
 
 export class AgentDatabase {
@@ -122,6 +139,9 @@ export class AgentDatabase {
     if (process.platform !== 'win32') {
       chmodSync(dbPath, 0o600);
     }
+    // Ensure key bytes removed by migrations/updates are overwritten rather
+    // than retained in SQLite freelist pages.
+    this.db.pragma('secure_delete = ON');
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
   }
@@ -155,6 +175,12 @@ export class AgentDatabase {
 
   getDb(): Database.Database {
     return this.db;
+  }
+
+  checkpoint(): void {
+    // A migrated plaintext key can otherwise remain in the pre-WAL database
+    // page until SQLite decides to checkpoint it later.
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
   }
 
   close(): void {
