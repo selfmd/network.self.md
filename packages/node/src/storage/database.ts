@@ -131,6 +131,14 @@ const MIGRATIONS: string[] = [
   ALTER TABLE discovered_groups ADD COLUMN genesis_epoch_data BLOB;
   ALTER TABLE discovered_groups ADD COLUMN genesis_signature BLOB;
 
+  -- v2 discovery rows were unauthenticated metadata. Do not let a NULL proof
+  -- row pin or block a later verified announcement after this migration.
+  DELETE FROM discovered_groups
+    WHERE authority_key IS NULL
+       OR genesis_hash IS NULL
+       OR genesis_epoch_data IS NULL
+       OR genesis_signature IS NULL;
+
   ALTER TABLE sender_keys ADD COLUMN generation_id BLOB;
   ALTER TABLE sender_keys ADD COLUMN distribution_sequence INTEGER NOT NULL DEFAULT -1;
   ALTER TABLE sender_keys ADD COLUMN epoch_version INTEGER NOT NULL DEFAULT 0;

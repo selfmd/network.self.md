@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { argon2id } from 'hash-wasm';
 import {
   generateIdentity,
@@ -144,6 +146,12 @@ export class Agent extends EventEmitter {
     if (this.isRunning) return;
 
     const passphrase = await this.resolvePassphrase();
+    if (
+      passphrase !== undefined &&
+      !existsSync(join(this.options.dataDir, 'agent.db'))
+    ) {
+      this.assertStrongPassphrase(passphrase);
+    }
 
     try {
       // Init database
@@ -622,6 +630,7 @@ export class Agent extends EventEmitter {
       }
 
       if (!stored) {
+        if (passphrase !== undefined) this.assertStrongPassphrase(passphrase);
         const identity = generateIdentity(this.options.displayName);
         const created = passphrase
           ? await this.createProtectedIdentity(identity, passphrase)
@@ -678,6 +687,7 @@ export class Agent extends EventEmitter {
         return;
       }
 
+      this.assertStrongPassphrase(passphrase);
       const salt = crypto.getRandomValues(new Uint8Array(32));
       const wrappingKey = await deriveWrappingKey(passphrase, salt);
       const { ciphertext, nonce } = encrypt(wrappingKey, privateKey);
@@ -720,19 +730,29 @@ export class Agent extends EventEmitter {
       }
     }
     if (passphrase === undefined) return undefined;
-    if (passphrase.length < 12 || new Set(passphrase).size < 4) {
+    if (passphrase.length === 0) {
       throw new IdentityKeyStorageError(
-        'Passphrase must be at least 12 characters and contain at least 4 distinct characters',
+        'Passphrase must not be empty',
         'INVALID_PASSPHRASE',
       );
     }
     return passphrase;
   }
 
+  private assertStrongPassphrase(passphrase: string): void {
+    if (passphrase.length < 12 || new Set(passphrase).size < 4) {
+      throw new IdentityKeyStorageError(
+        'Passphrase must be at least 12 characters and contain at least 4 distinct characters',
+        'INVALID_PASSPHRASE',
+      );
+    }
+  }
+
   private async createProtectedIdentity(
     identity: AgentIdentity,
     passphrase: string,
   ): Promise<boolean> {
+    this.assertStrongPassphrase(passphrase);
     const salt = crypto.getRandomValues(new Uint8Array(32));
     const wrappingKey = await deriveWrappingKey(passphrase, salt);
     const { ciphertext, nonce } = encrypt(wrappingKey, identity.edPrivateKey);
