@@ -13,7 +13,10 @@ describe('SenderKeys', () => {
   it('encrypt/decrypt roundtrip', () => {
     const state = SenderKeys.generate();
     const plaintext = new TextEncoder().encode('group message');
-    const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(state, plaintext);
+    const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(
+      state,
+      plaintext,
+    );
 
     expect(chainIndex).toBe(0);
     expect(nextState.chainIndex).toBe(1);
@@ -24,7 +27,12 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const { plaintext: decrypted } = SenderKeys.decrypt(record, chainIndex, nonce, ciphertext);
+    const { plaintext: decrypted } = SenderKeys.decrypt(
+      record,
+      chainIndex,
+      nonce,
+      ciphertext,
+    );
     expect(decrypted).toEqual(plaintext);
   });
 
@@ -36,7 +44,11 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const messages: Array<{ ciphertext: Uint8Array; nonce: Uint8Array; chainIndex: number }> = [];
+    const messages: Array<{
+      ciphertext: Uint8Array;
+      nonce: Uint8Array;
+      chainIndex: number;
+    }> = [];
 
     for (let i = 0; i < 5; i++) {
       const plaintext = new TextEncoder().encode(`message ${i}`);
@@ -53,7 +65,7 @@ describe('SenderKeys', () => {
         currentRecord,
         messages[i].chainIndex,
         messages[i].nonce,
-        messages[i].ciphertext
+        messages[i].ciphertext,
       );
       expect(new TextDecoder().decode(plaintext)).toBe(`message ${i}`);
       currentRecord = nextRecord;
@@ -68,7 +80,11 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const messages: Array<{ ciphertext: Uint8Array; nonce: Uint8Array; chainIndex: number }> = [];
+    const messages: Array<{
+      ciphertext: Uint8Array;
+      nonce: Uint8Array;
+      chainIndex: number;
+    }> = [];
 
     for (let i = 0; i < 3; i++) {
       const plaintext = new TextEncoder().encode(`msg-${i}`);
@@ -82,7 +98,7 @@ describe('SenderKeys', () => {
       record,
       messages[2].chainIndex,
       messages[2].nonce,
-      messages[2].ciphertext
+      messages[2].ciphertext,
     );
     expect(new TextDecoder().decode(p2)).toBe('msg-2');
     expect(r1.skippedKeys.size).toBe(2); // keys 0 and 1 cached
@@ -92,7 +108,7 @@ describe('SenderKeys', () => {
       r1,
       messages[0].chainIndex,
       messages[0].nonce,
-      messages[0].ciphertext
+      messages[0].ciphertext,
     );
     expect(new TextDecoder().decode(p0)).toBe('msg-0');
     expect(r2.skippedKeys.size).toBe(1); // key 1 still cached
@@ -102,7 +118,7 @@ describe('SenderKeys', () => {
       r2,
       messages[1].chainIndex,
       messages[1].nonce,
-      messages[1].ciphertext
+      messages[1].ciphertext,
     );
     expect(new TextDecoder().decode(p1)).toBe('msg-1');
     expect(r3.skippedKeys.size).toBe(0);
@@ -125,14 +141,13 @@ describe('SenderKeys', () => {
 
     const { ciphertext, nonce, chainIndex } = SenderKeys.encrypt(
       advancedState,
-      new TextEncoder().encode('too far')
+      new TextEncoder().encode('too far'),
     );
 
     expect(() =>
-      SenderKeys.decrypt(record, chainIndex, nonce, ciphertext)
+      SenderKeys.decrypt(record, chainIndex, nonce, ciphertext),
     ).toThrow(/too many skipped/i);
   });
-
   it('createDistribution produces valid message', () => {
     const state = SenderKeys.generate();
     const groupId = new Uint8Array(32);

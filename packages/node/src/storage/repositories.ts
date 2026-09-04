@@ -1,6 +1,10 @@
 import type Database from 'better-sqlite3';
 import type { DoubleRatchetState, SignedGroupEpoch } from '@networkselfmd/core';
-import { serializeEpoch, deserializeEpoch, hashEpoch } from '@networkselfmd/core';
+import {
+  serializeEpoch,
+  deserializeEpoch,
+  hashEpoch,
+} from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -248,9 +252,9 @@ export class IdentityRepository {
   }
 
   load(): StoredIdentity | undefined {
-    return this.db
-      .prepare('SELECT * FROM identity WHERE id = 1')
-      .get() as StoredIdentity | undefined;
+    return this.db.prepare('SELECT * FROM identity WHERE id = 1').get() as
+      | StoredIdentity
+      | undefined;
   }
 
   saveEncryptedKeys(salt: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): void {
@@ -270,9 +274,9 @@ export class IdentityRepository {
   }
 
   loadEncryptedKeys(): StoredKeyData | undefined {
-    return this.db
-      .prepare('SELECT * FROM key_storage WHERE id = 1')
-      .get() as StoredKeyData | undefined;
+    return this.db.prepare('SELECT * FROM key_storage WHERE id = 1').get() as
+      | StoredKeyData
+      | undefined;
   }
 }
 
@@ -340,7 +344,12 @@ export class PeerRepository {
          display_name = COALESCE(excluded.display_name, peers.display_name),
          last_seen = excluded.last_seen`,
     );
-    stmt.run(Buffer.from(publicKey), fingerprint, displayName ?? null, Date.now());
+    stmt.run(
+      Buffer.from(publicKey),
+      fingerprint,
+      displayName ?? null,
+      Date.now(),
+    );
   }
 
   find(publicKey: Uint8Array): StoredPeer | undefined {
@@ -356,7 +365,9 @@ export class PeerRepository {
   }
 
   list(): StoredPeer[] {
-    return this.db.prepare('SELECT * FROM peers ORDER BY last_seen DESC').all() as StoredPeer[];
+    return this.db
+      .prepare('SELECT * FROM peers ORDER BY last_seen DESC')
+      .all() as StoredPeer[];
   }
 
   trust(publicKey: Uint8Array): void {
@@ -426,9 +437,15 @@ export class GroupRepository {
   }
 
   leave(groupId: Uint8Array): void {
-    this.db.prepare('DELETE FROM groups WHERE group_id = ?').run(Buffer.from(groupId));
-    this.db.prepare('DELETE FROM group_members WHERE group_id = ?').run(Buffer.from(groupId));
-    this.db.prepare('DELETE FROM sender_keys WHERE group_id = ?').run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM groups WHERE group_id = ?')
+      .run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM group_members WHERE group_id = ?')
+      .run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM sender_keys WHERE group_id = ?')
+      .run(Buffer.from(groupId));
   }
 
   find(groupId: Uint8Array): StoredGroup | undefined {
@@ -454,10 +471,16 @@ export class GroupRepository {
   }
 
   list(): StoredGroup[] {
-    return this.db.prepare('SELECT * FROM groups ORDER BY joined_at DESC').all() as StoredGroup[];
+    return this.db
+      .prepare('SELECT * FROM groups ORDER BY joined_at DESC')
+      .all() as StoredGroup[];
   }
 
-  addMember(groupId: Uint8Array, publicKey: Uint8Array, role: string = 'member'): void {
+  addMember(
+    groupId: Uint8Array,
+    publicKey: Uint8Array,
+    role: string = 'member',
+  ): void {
     const stmt = this.db.prepare(
       `INSERT OR REPLACE INTO group_members (group_id, public_key, role)
        VALUES (?, ?, ?)`,
@@ -467,7 +490,9 @@ export class GroupRepository {
 
   removeMember(groupId: Uint8Array, publicKey: Uint8Array): void {
     this.db
-      .prepare('DELETE FROM group_members WHERE group_id = ? AND public_key = ?')
+      .prepare(
+        'DELETE FROM group_members WHERE group_id = ? AND public_key = ?',
+      )
       .run(Buffer.from(groupId), Buffer.from(publicKey));
   }
 
@@ -486,7 +511,9 @@ export class GroupRepository {
       throw new Error('Only admin can change group visibility');
     }
     this.db
-      .prepare('UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?')
+      .prepare(
+        'UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?',
+      )
       .run(isPublic ? 1 : 0, selfMd ?? null, Buffer.from(groupId));
   }
 
@@ -535,7 +562,10 @@ export class MessageRepository {
 
     if (options.peerPublicKey) {
       conditions.push('(sender_public_key = ? OR peer_public_key = ?)');
-      params.push(Buffer.from(options.peerPublicKey), Buffer.from(options.peerPublicKey));
+      params.push(
+        Buffer.from(options.peerPublicKey),
+        Buffer.from(options.peerPublicKey),
+      );
     }
 
     if (options.before) {
@@ -543,11 +573,14 @@ export class MessageRepository {
       params.push(options.before);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
 
     return this.db
-      .prepare(`SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`)
+      .prepare(
+        `SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`,
+      )
       .all(...params, limit) as StoredMessage[];
   }
 }
@@ -609,7 +642,9 @@ export class DiscoveredGroupRepository {
   }
 
   remove(groupId: Uint8Array): void {
-    this.db.prepare('DELETE FROM discovered_groups WHERE group_id = ?').run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM discovered_groups WHERE group_id = ?')
+      .run(Buffer.from(groupId));
   }
 
   prune(now = Date.now(), maxRows = 1000, maxAgeMs = 24 * 60 * 60 * 1000): void {
@@ -618,6 +653,60 @@ export class DiscoveredGroupRepository {
       SELECT group_id FROM discovered_groups ORDER BY last_announced DESC LIMIT -1 OFFSET ?
     )`).run(maxRows);
   }
+}
+
+export interface StoredGroupBootstrap {
+  group_id: Buffer;
+  group_name: string;
+  inviter_public_key: Buffer;
+  genesis_epoch_data: Buffer;
+  genesis_signature: Buffer;
+  genesis_hash: Buffer;
+  received_at: number;
+}
+
+export class GroupBootstrapRepository {
+  constructor(private db: Database.Database) {}
+
+  save(value: {
+    groupId: Uint8Array;
+    groupName: string;
+    inviterPublicKey: Uint8Array;
+    genesisEpochData: Uint8Array;
+    genesisSignature: Uint8Array;
+    genesisHash: Uint8Array;
+    receivedAt?: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO group_bootstraps
+           (group_id, group_name, inviter_public_key, genesis_epoch_data,
+            genesis_signature, genesis_hash, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Buffer.from(value.groupId),
+        value.groupName,
+        Buffer.from(value.inviterPublicKey),
+        Buffer.from(value.genesisEpochData),
+        Buffer.from(value.genesisSignature),
+        Buffer.from(value.genesisHash),
+        value.receivedAt ?? Date.now(),
+      );
+  }
+
+  find(groupId: Uint8Array): StoredGroupBootstrap | undefined {
+    return this.db
+      .prepare('SELECT * FROM group_bootstraps WHERE group_id = ?')
+      .get(Buffer.from(groupId)) as StoredGroupBootstrap | undefined;
+  }
+
+  delete(groupId: Uint8Array): void {
+    this.db
+      .prepare('DELETE FROM group_bootstraps WHERE group_id = ?')
+      .run(Buffer.from(groupId));
+  }
+
 }
 
 export class SenderKeyRepository {
@@ -649,10 +738,17 @@ export class SenderKeyRepository {
     })();
   }
 
-  load(groupId: Uint8Array, publicKey: Uint8Array): StoredSenderKey | undefined {
+  load(
+    groupId: Uint8Array,
+    publicKey: Uint8Array,
+  ): StoredSenderKey | undefined {
     return this.db
-      .prepare('SELECT * FROM sender_keys WHERE group_id = ? AND public_key = ?')
-      .get(Buffer.from(groupId), Buffer.from(publicKey)) as StoredSenderKey | undefined;
+      .prepare(
+        'SELECT * FROM sender_keys WHERE group_id = ? AND public_key = ?',
+      )
+      .get(Buffer.from(groupId), Buffer.from(publicKey)) as
+      | StoredSenderKey
+      | undefined;
   }
 
   delete(groupId: Uint8Array, publicKey: Uint8Array): void {
@@ -778,14 +874,21 @@ function serializeRatchetState(state: DoubleRatchetState): string {
   const serialized: SerializedRatchetState = {
     rootKey: toHex(state.rootKey),
     sendChainKey: state.sendChainKey ? toHex(state.sendChainKey) : null,
-    receiveChainKey: state.receiveChainKey ? toHex(state.receiveChainKey) : null,
+    receiveChainKey: state.receiveChainKey
+      ? toHex(state.receiveChainKey)
+      : null,
     sendRatchetPrivate: toHex(state.sendRatchetPrivate),
     sendRatchetPublic: toHex(state.sendRatchetPublic),
-    receiveRatchetPublic: state.receiveRatchetPublic ? toHex(state.receiveRatchetPublic) : null,
+    receiveRatchetPublic: state.receiveRatchetPublic
+      ? toHex(state.receiveRatchetPublic)
+      : null,
     sendMessageNumber: state.sendMessageNumber,
     receiveMessageNumber: state.receiveMessageNumber,
     previousChainLength: state.previousChainLength,
-    skippedKeys: Array.from(state.skippedKeys.entries()).map(([k, v]) => [k, toHex(v)]),
+    skippedKeys: Array.from(state.skippedKeys.entries()).map(([k, v]) => [
+      k,
+      toHex(v),
+    ]),
   };
   return JSON.stringify(serialized);
 }
@@ -798,7 +901,9 @@ function deserializeRatchetState(json: string): DoubleRatchetState {
     receiveChainKey: s.receiveChainKey ? fromHex(s.receiveChainKey) : null,
     sendRatchetPrivate: fromHex(s.sendRatchetPrivate),
     sendRatchetPublic: fromHex(s.sendRatchetPublic),
-    receiveRatchetPublic: s.receiveRatchetPublic ? fromHex(s.receiveRatchetPublic) : null,
+    receiveRatchetPublic: s.receiveRatchetPublic
+      ? fromHex(s.receiveRatchetPublic)
+      : null,
     sendMessageNumber: s.sendMessageNumber,
     receiveMessageNumber: s.receiveMessageNumber,
     previousChainLength: s.previousChainLength,
@@ -819,7 +924,9 @@ export class RatchetStateRepository {
 
   load(peerFingerprint: string): DoubleRatchetState | null {
     const row = this.db
-      .prepare('SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?')
+      .prepare(
+        'SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?',
+      )
       .get(peerFingerprint) as { state_json: string } | undefined;
     if (!row) return null;
     return deserializeRatchetState(row.state_json);
@@ -829,6 +936,122 @@ export class RatchetStateRepository {
     this.db
       .prepare('DELETE FROM dm_ratchet_states WHERE peer_fingerprint = ?')
       .run(peerFingerprint);
+  }
+}
+
+export const PROTOCOL_REPLAY_TTL_MS = 10 * 60 * 1000;
+export const PROTOCOL_REPLAY_PER_SENDER_CAP = 2048;
+export const PROTOCOL_REPLAY_GLOBAL_CAP = 100_000;
+
+export interface ReplayReservation {
+  messageId: Uint8Array;
+  senderFingerprint: string;
+  messageType: number;
+  receivedAt: number;
+}
+
+export interface ProtocolReplayOptions {
+  ttlMs?: number;
+  perSenderCap?: number;
+  globalCap?: number;
+}
+
+export class ProtocolReplayRepository {
+  private readonly ttlMs: number;
+  private readonly perSenderCap: number;
+  private readonly globalCap: number;
+
+  constructor(
+    private db: Database.Database,
+    options: ProtocolReplayOptions = {},
+  ) {
+    this.ttlMs = options.ttlMs ?? PROTOCOL_REPLAY_TTL_MS;
+    this.perSenderCap = options.perSenderCap ?? PROTOCOL_REPLAY_PER_SENDER_CAP;
+    this.globalCap = options.globalCap ?? PROTOCOL_REPLAY_GLOBAL_CAP;
+  }
+
+  /**
+   * Reserves replay identity and commits it in the same SQLite transaction as
+   * the caller's state mutation. A throw (including decrypt failure or crash)
+   * rolls both changes back, so retrying the authentic frame remains possible.
+   */
+  accept<T>(reservation: ReplayReservation, mutate: () => T): T {
+    return this.db.transaction(() => {
+      this.prune(reservation.receivedAt);
+
+      if (this.has(reservation.messageId, reservation.receivedAt)) {
+        throw new Error('Rejected authenticated message: replay detected');
+      }
+
+      const senderCount = this.db
+        .prepare(
+          'SELECT COUNT(*) AS count FROM protocol_replay WHERE sender_fingerprint = ?',
+        )
+        .get(reservation.senderFingerprint) as { count: number };
+      if (senderCount.count >= this.perSenderCap) {
+        throw new Error(
+          'Rejected authenticated message: per-sender replay capacity exceeded',
+        );
+      }
+
+      const globalCount = this.db
+        .prepare('SELECT COUNT(*) AS count FROM protocol_replay')
+        .get() as { count: number };
+      if (globalCount.count >= this.globalCap) {
+        throw new Error(
+          'Rejected authenticated message: global replay capacity exceeded',
+        );
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO protocol_replay
+             (message_id, sender_fingerprint, message_type, state, received_at, expires_at)
+           VALUES (?, ?, ?, 'reserved', ?, ?)`,
+        )
+        .run(
+          Buffer.from(reservation.messageId),
+          reservation.senderFingerprint,
+          reservation.messageType,
+          reservation.receivedAt,
+          reservation.receivedAt + this.ttlMs,
+        );
+
+      const result = mutate();
+      this.db
+        .prepare(
+          `UPDATE protocol_replay SET state = 'accepted' WHERE message_id = ?`,
+        )
+        .run(Buffer.from(reservation.messageId));
+      return result;
+    })();
+  }
+
+  prune(now: number = Date.now()): number {
+    return this.db
+      .prepare('DELETE FROM protocol_replay WHERE expires_at <= ?')
+      .run(now).changes;
+  }
+
+  has(messageId: Uint8Array, now: number = Date.now()): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM protocol_replay
+           WHERE message_id = ? AND expires_at > ?`,
+        )
+        .get(Buffer.from(messageId), now) !== undefined
+    );
+  }
+
+  count(): number {
+    return (
+      this.db
+        .prepare('SELECT COUNT(*) AS count FROM protocol_replay')
+        .get() as {
+        count: number;
+      }
+    ).count;
   }
 }
 
@@ -849,8 +1072,20 @@ export class GroupEpochRepository {
 
   saveEpoch(signed: SignedGroupEpoch): void {
     const serialized = serializeEpoch(signed.epoch);
+    const createdAt = (
+      signed.epoch as typeof signed.epoch & {
+        createdAt?: number;
+        timestamp?: number;
+      }
+    ).createdAt ?? (
+      signed.epoch as typeof signed.epoch & { timestamp?: number }
+    ).timestamp;
+    if (!Number.isSafeInteger(createdAt) || createdAt! < 0) {
+      throw new Error('Refusing to persist group epoch without a valid creation time');
+    }
     const stmt = this.db.prepare(
-      `INSERT INTO group_epochs (group_id, version, prev_hash, epoch_data, signature, hash, created_by, created_at)
+      `INSERT INTO group_epochs
+         (group_id, version, prev_hash, epoch_data, signature, hash, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(group_id, version) DO NOTHING`,
     );
@@ -862,19 +1097,39 @@ export class GroupEpochRepository {
       Buffer.from(signed.signature),
       Buffer.from(signed.hash),
       Buffer.from(signed.epoch.createdBy),
-      signed.epoch.timestamp,
+      createdAt,
     );
     if (result.changes === 0) {
-      const existing = this.getEpochByVersion(signed.epoch.groupId, signed.epoch.version);
-      if (!existing || !Buffer.from(existing.hash).equals(Buffer.from(signed.hash))) {
-        throw new Error('Conflicting group epoch overwrite');
+      const existing = this.db
+        .prepare(
+          `SELECT epoch_data, signature, hash, created_at FROM group_epochs
+           WHERE group_id = ? AND version = ?`,
+        )
+        .get(signed.epoch.groupId, signed.epoch.version) as
+        | {
+            epoch_data: Buffer;
+            signature: Buffer;
+            hash: Buffer;
+            created_at: number;
+          }
+        | undefined;
+      if (
+        !existing ||
+        !existing.epoch_data.equals(Buffer.from(serialized)) ||
+        !existing.signature.equals(Buffer.from(signed.signature)) ||
+        !existing.hash.equals(Buffer.from(signed.hash)) ||
+        existing.created_at !== createdAt
+      ) {
+        throw new Error('Conflicting immutable group epoch');
       }
     }
   }
 
   getLatestEpoch(groupId: string): SignedGroupEpoch | null {
     const row = this.db
-      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version DESC LIMIT 1')
+      .prepare(
+        'SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version DESC LIMIT 1',
+      )
       .get(groupId) as StoredGroupEpochRow | undefined;
     if (!row) return null;
     return this.rowToSignedEpoch(row);
@@ -882,7 +1137,9 @@ export class GroupEpochRepository {
 
   getEpochChain(groupId: string): SignedGroupEpoch[] {
     const rows = this.db
-      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version ASC')
+      .prepare(
+        'SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version ASC',
+      )
       .all(groupId) as StoredGroupEpochRow[];
     return rows.map((r) => this.rowToSignedEpoch(r));
   }

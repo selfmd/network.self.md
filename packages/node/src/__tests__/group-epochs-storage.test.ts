@@ -53,6 +53,21 @@ describe('GroupEpochRepository', () => {
     expect(repo.getLatestEpoch('nonexistent')).toBeNull();
   });
 
+  it('never replaces an existing epoch version or its createdAt', () => {
+    const admin = generateKeypair();
+    const original = createSignedEpoch(
+      createGenesisEpoch('g1', admin.publicKey, 100),
+      admin.privateKey,
+    );
+    repo.saveEpoch(original);
+    const fork = createSignedEpoch(
+      createGenesisEpoch('g1', admin.publicKey, 200),
+      admin.privateKey,
+    );
+    expect(() => repo.saveEpoch(fork)).toThrow(/immutable/i);
+    expect(repo.getEpochByVersion('g1', 0)?.epoch.createdAt).toBe(100);
+  });
+
   it('getLatestEpoch returns highest version', () => {
     const admin = generateKeypair();
     const member = generateKeypair();
@@ -69,7 +84,7 @@ describe('GroupEpochRepository', () => {
         { publicKey: admin.publicKey, role: 'admin' },
         { publicKey: member.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s1 = createSignedEpoch(e1, admin.privateKey);
@@ -92,7 +107,7 @@ describe('GroupEpochRepository', () => {
       prevHash: s0.hash,
       groupId: 'g1',
       members: [{ publicKey: admin.publicKey, role: 'admin' }],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s1 = createSignedEpoch(e1, admin.privateKey);
@@ -103,7 +118,7 @@ describe('GroupEpochRepository', () => {
       prevHash: s1.hash,
       groupId: 'g1',
       members: [{ publicKey: admin.publicKey, role: 'admin' }],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s2 = createSignedEpoch(e2, admin.privateKey);
@@ -128,7 +143,7 @@ describe('GroupEpochRepository', () => {
       prevHash: s0.hash,
       groupId: 'g1',
       members: [{ publicKey: admin.publicKey, role: 'admin' }],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s1 = createSignedEpoch(e1, admin.privateKey);
@@ -162,7 +177,9 @@ describe('GroupEpochRepository', () => {
   it('schema migration creates group_epochs table', () => {
     const db = database.getDb();
     const tables = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+      )
       .all() as { name: string }[];
     const tableNames = tables.map((t) => t.name);
     expect(tableNames).toContain('group_epochs');
@@ -180,15 +197,19 @@ describe('GroupEpochRepository', () => {
         { publicKey: admin.publicKey, role: 'admin' },
         { publicKey: member.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const signed = createSignedEpoch(epoch, admin.privateKey);
     repo.saveEpoch(signed);
 
     const loaded = repo.getLatestEpoch('g1')!;
-    expect(new Uint8Array(loaded.epoch.members[0].publicKey)).toEqual(admin.publicKey);
-    expect(new Uint8Array(loaded.epoch.members[1].publicKey)).toEqual(member.publicKey);
+    expect(new Uint8Array(loaded.epoch.members[0].publicKey)).toEqual(
+      admin.publicKey,
+    );
+    expect(new Uint8Array(loaded.epoch.members[1].publicKey)).toEqual(
+      member.publicKey,
+    );
     expect(new Uint8Array(loaded.epoch.createdBy)).toEqual(admin.publicKey);
   });
 
@@ -196,7 +217,13 @@ describe('GroupEpochRepository', () => {
     const admin = generateKeypair();
     const original = createSignedEpoch(createGenesisEpoch('g1', admin.publicKey), admin.privateKey);
     repo.saveEpoch(original);
-    const conflicting = createSignedEpoch({ ...createGenesisEpoch('g1', admin.publicKey), timestamp: original.epoch.timestamp + 1 }, admin.privateKey);
+    const conflicting = createSignedEpoch(
+      {
+        ...createGenesisEpoch('g1', admin.publicKey),
+        createdAt: original.epoch.createdAt + 1,
+      },
+      admin.privateKey,
+    );
     expect(() => repo.saveEpoch(conflicting)).toThrow(/conflicting/i);
     expect(repo.getEpochByVersion('g1', 0)!.hash).toEqual(original.hash);
   });

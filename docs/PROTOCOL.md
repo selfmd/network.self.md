@@ -29,6 +29,7 @@ Each CBOR payload is a map with a `type` field (uint8) that determines the messa
 | 0x06 | GroupManagement       | Varies               | Group admin operations       |
 | 0x07 | TTYARequest           | TTYA Server → Agent  | Visitor message for approval |
 | 0x08 | TTYAResponse          | Agent → TTYA Server  | Approval decision + reply    |
+| 0x09 | NetworkAnnounce       | Peer → Peer          | Signed public group discovery|
 | 0x0a | GroupEpoch            | Admin → Group peers  | Signed group state snapshot  |
 | 0xFF | Ack                   | Recipient → Sender   | Delivery acknowledgment      |
 
@@ -53,6 +54,7 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 ```
 
 **Verification:**
+
 Version 2 is intentionally not wire-compatible with version 1. A peer that sends any
 other `protocolVersion` fails the handshake explicitly and its stream is destroyed.
 The v2 capability profile is fixed: peers must advertise exactly `sender-key-v2` and
@@ -157,7 +159,7 @@ than the stored sequence and rejects a chain-index rollback within one generatio
 ### NetworkAnnounce (0x09)
 
 Network announcements use a fixed binary signing payload prefixed with
-`network.self.md/NetworkAnnounce/v1\0`. Groups are sorted by their 32-byte ID and all
+`network.self.md/NetworkAnnounce/v2\0`. Groups are sorted by their 32-byte ID and all
 strings/blobs use explicit big-endian length prefixes. Each entry includes the exact signed
 genesis epoch (v0, zero previous hash, one creator-admin); the authenticated announcer must
 be that creator. Receivers enforce schema and size limits, ±5 minute freshness, monotonic
@@ -170,13 +172,15 @@ creator and genesis hash.
 ```typescript
 {
   type: 0x04,
-  id: string,                    // unique message ID (cuid2)
   groupId: Uint8Array,           // 32 bytes
-  senderPublicKey: Uint8Array,   // 32 bytes, Ed25519
+  senderFingerprint: string,     // authenticated session identity
   chainIndex: number,            // sender's chain position
+  generationId: Uint8Array,      // 16-byte current sender-key generation
+  epochVersion: number,          // must equal current epoch
+  epochHash: Uint8Array,         // must equal current epoch hash
   nonce: Uint8Array,             // 24 bytes, random
   ciphertext: Uint8Array,        // XChaCha20-Poly1305
-  signature: Uint8Array,         // Ed25519 over (groupId || chainIndex || nonce || ciphertext)
+  signature: Uint8Array,         // Ed25519 over the domain-separated v2 payload
   timestamp: number              // unix ms
 }
 ```
@@ -184,22 +188,14 @@ creator and genesis hash.
 **Encryption:**
 
 ```
-messageKey = hkdf(sha256, chainKey[chainIndex], "networkselfmd-msg-v1", "", 32)
-chainKey[chainIndex + 1] = hkdf(sha256, chainKey[chainIndex], "networkselfmd-chain-v1", "", 32)
-ciphertext = xchacha20poly1305(messageKey, nonce).encrypt(cbor(payload))
-signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || ciphertext), edPrivateKey)
+{ messageKey, nextChainKey } = advanceChain(chainKey[chainIndex])
+aad = groupId || sender.edPublicKey || generationId || epochVersion || epochHash || chainIndex
+ciphertext = xchacha20poly1305(messageKey, nonce, aad).encrypt(utf8(content))
+signature = ed25519.sign(canonicalAuthenticatedV2Payload, edPrivateKey)
 ```
 
-**Payload (plaintext before encryption):**
-
-```typescript
-{
-  content: string,               // message text
-  contentType: "text/plain",     // MIME type for extensibility
-  replyTo?: string,              // message ID being replied to
-  metadata?: Record<string, string>
-}
-```
+The encrypted plaintext is the UTF-8 message content. The AEAD associated data binds
+the group, authenticated sender key, sender-key generation, epoch, and chain index.
 
 **Decryption:**
 
@@ -215,14 +211,21 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 ```typescript
 {
   type: 0x06,
-  action: "create" | "invite" | "accept" | "kick" | "leave" | "update",
+  action: "create" | "invite" | "accept" | "sync-request" |
+          "join" | "leave" | "kick" | "promote",
   groupId: Uint8Array,
-  actor: Uint8Array,             // Ed25519 public key of who performed the action
-  target?: Uint8Array,           // Ed25519 public key of target (for invite/kick)
-  name?: string,                 // for create/update
-  nonce?: Uint8Array,            // for create (32 random bytes)
+  targetFingerprint?: string,    // required for invite/accept/kick/promote
+  groupName?: string,            // required for invite
+  inviteId?: string,             // required for invite/accept
+  epochVersion?: number,         // required for invite/accept/sync-request
+  epochHash?: Uint8Array,        // required for invite/accept/sync-request
+  genesisEpochData?: Uint8Array, // exact signed v0 anchor; invite only
+  genesisSignature?: Uint8Array,
+  genesisHash?: Uint8Array,
+  senderFingerprint: string,     // authenticated session sender
+  recipientFingerprint: string,  // recipient-bound delivery
   timestamp: number,
-  signature: Uint8Array          // Ed25519 over entire message (excluding signature field)
+  signature: Uint8Array          // Ed25519 over the canonical v2 payload
 }
 ```
 
@@ -234,7 +237,7 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 | accept | Invited agent |
 | kick | Admin only |
 | leave | Any member |
-| update | Admin only |
+| promote | Admin only |
 
 **Group ID derivation:**
 
@@ -255,23 +258,35 @@ A signed snapshot of group state, forming a hash chain. Every group mutation (cr
 ```typescript
 {
   type: 0x0a,
-  groupId: string,
+  protocolVersion: 2,
+  groupId: Uint8Array,
+  epochData: Uint8Array,          // canonical immutable epoch below
+  signature: Uint8Array,          // immutable epoch signature
+  hash: Uint8Array,               // immutable epoch hash
+  senderFingerprint: string,
+  recipientFingerprint: string,
+  envelopeSignature: Uint8Array,  // recipient-bound delivery signature
+  timestamp: number               // fresh delivery time
+}
+
+// Decoded epochData:
+{
   version: number,                 // 0 for genesis, increments by 1
   prevHash: Uint8Array,            // 32 bytes, SHA-256 of previous epoch (zeros for genesis)
+  groupId: string,                 // hex group identifier
   members: Array<{
     publicKey: Uint8Array,         // Ed25519 public key
     role: "admin" | "member"
   }>,
-  timestamp: number,               // unix ms
-  createdBy: Uint8Array,           // 32 bytes, admin's Ed25519 public key
-  signature: Uint8Array            // Ed25519 over CBOR-serialized epoch data (excluding signature)
+  createdAt: number,               // immutable unix ms
+  createdBy: Uint8Array            // 32 bytes, admin's Ed25519 public key
 }
 ```
 
 **Epoch hash:**
 
 ```
-epochHash = sha256(cbor(groupId || version || prevHash || members || timestamp || createdBy))
+epochHash = sha256(canonical("network.self.md/GroupEpoch", 1, groupId, version, prevHash, members, createdAt, createdBy))
 ```
 
 **Genesis epoch (version 0):**

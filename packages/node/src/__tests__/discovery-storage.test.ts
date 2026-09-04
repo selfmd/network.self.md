@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { GroupRepository, DiscoveredGroupRepository, NetworkAnnounceStateRepository } from '../storage/repositories.js';
+import {
+  GroupRepository,
+  DiscoveredGroupRepository,
+  NetworkAnnounceStateRepository,
+} from '../storage/repositories.js';
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -48,13 +52,22 @@ describe('DiscoveredGroupRepository', () => {
   let db: Database.Database;
   let repo: DiscoveredGroupRepository;
 
-  beforeEach(() => { db = createTestDb(); repo = new DiscoveredGroupRepository(db); });
+  beforeEach(() => {
+    db = createTestDb();
+    repo = new DiscoveredGroupRepository(db);
+  });
   afterEach(() => db.close());
+
+  const anchor = [
+    new Uint8Array([1]),
+    new Uint8Array(64).fill(2),
+    new Uint8Array(32).fill(3),
+  ] as const;
 
   it('upserts and lists discovered groups', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'builders', 'We build things.', 3, peer, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32));
+    repo.upsert(gid, 'builders', 'We build things.', 3, peer, ...anchor);
     const list = repo.list();
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('builders');
@@ -65,8 +78,8 @@ describe('DiscoveredGroupRepository', () => {
   it('updates on re-announce', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'builders', 'v1', 2, peer, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32));
-    repo.upsert(gid, 'builders', 'v2', 5, peer, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32));
+    repo.upsert(gid, 'builders', 'v1', 2, peer, ...anchor);
+    repo.upsert(gid, 'builders', 'v2', 5, peer, ...anchor);
     const list = repo.list();
     expect(list).toHaveLength(1);
     expect(list[0].self_md).toBe('v2');
@@ -76,7 +89,7 @@ describe('DiscoveredGroupRepository', () => {
   it('finds and removes', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'test', 'md', 1, peer, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32));
+    repo.upsert(gid, 'test', 'md', 1, peer, ...anchor);
     expect(repo.find(gid)).toBeDefined();
     repo.remove(gid);
     expect(repo.find(gid)).toBeUndefined();
@@ -116,7 +129,10 @@ describe('GroupRepository.setPublic', () => {
   let db: Database.Database;
   let repo: GroupRepository;
 
-  beforeEach(() => { db = createTestDb(); repo = new GroupRepository(db); });
+  beforeEach(() => {
+    db = createTestDb();
+    repo = new GroupRepository(db);
+  });
   afterEach(() => db.close());
 
   it('sets group as public with selfMd', () => {

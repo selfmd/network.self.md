@@ -467,15 +467,22 @@ describe('performHandshake over local sockets', () => {
     const bob = generateIdentity('Bob');
     const [aliceSocket, bobSocket] = localNoiseSocketPair();
     const handshake = performHandshake(aliceSocket, alice);
-    const oversizedTail = sampleAck(
-      'x'.repeat(MAX_COALESCED_HANDSHAKE_TAIL_BYTES),
+    const oversizedTail = Buffer.concat(
+      Array.from(
+        { length: 2_048 },
+        (_, index) => Buffer.from(frameMessage(sampleAck(`tail-${index}`))),
+      ),
     );
 
     bobSocket.write(
-      concatFrames(
-        signedHandshake(bob, TRANSPORT_B, HANDSHAKE_HASH, Date.now()),
+      Buffer.concat([
+        Buffer.from(
+          frameMessage(
+            signedHandshake(bob, TRANSPORT_B, HANDSHAKE_HASH, Date.now()),
+          ),
+        ),
         oversizedTail,
-      ),
+      ]),
     );
 
     await expect(handshake).rejects.toThrow(

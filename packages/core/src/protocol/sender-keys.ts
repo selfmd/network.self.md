@@ -103,15 +103,13 @@ export const SenderKeys = {
 
     if (chainIndex < record.chainIndex) {
       throw new Error(
-        `Cannot decrypt: chain index ${chainIndex} already consumed and not in skipped keys`
+        `Cannot decrypt: chain index ${chainIndex} already consumed and not in skipped keys`,
       );
     }
 
     const skip = chainIndex - record.chainIndex;
     if (skip > MAX_SKIP) {
-      throw new Error(
-        `Too many skipped messages: ${skip} > ${MAX_SKIP}`
-      );
+      throw new Error(`Too many skipped messages: ${skip} > ${MAX_SKIP}`);
     }
 
     // Advance chain, caching skipped keys
@@ -137,7 +135,6 @@ export const SenderKeys = {
       },
     };
   },
-
   createDistribution(
     groupId: Uint8Array,
     state: SenderKeyState,

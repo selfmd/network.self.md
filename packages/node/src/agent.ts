@@ -10,30 +10,31 @@ import {
   encrypt,
   decrypt,
   deriveKey,
-  sign,
-  verify,
   computeSharedSecret,
   DoubleRatchet,
+  sign,
+  verify,
   signAnnounce,
   verifyAnnounce,
   copyAndValidateTTYAAuthSecret,
   assertAnnounceShape,
+  networkAnnounceId,
   verifyAnnouncedGroupAuthority,
   NETWORK_ANNOUNCE_VERSION,
   serializeEpoch,
+  verifyGenesisEpoch,
+  signAuthenticatedMessage,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
   PeerInfo,
   GroupInfo,
-  ProtocolMessage,
   DirectEncryptedMessage,
   SenderKeyDistributionMessage,
   GroupEncryptedMessage,
   GroupManagementMessage,
   GroupEpochMessage,
   NetworkAnnounceMessage,
-  DoubleRatchetState,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { createId } from '@paralleldrive/cuid2';
@@ -49,6 +50,8 @@ import {
   GroupEpochRepository,
   GroupInviteRepository,
   NetworkAnnounceStateRepository,
+  ProtocolReplayRepository,
+  GroupBootstrapRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
@@ -56,6 +59,10 @@ import type { HandshakeResult } from './network/handshake.js';
 import { GroupManager } from './groups/group-manager.js';
 import type { SecretProvider } from './secrets.js';
 import { TTYAManager, type TTYAVisitor } from './ttya/ttya-manager.js';
+import {
+  validateAuthenticatedMessage,
+  validateReadySession,
+} from './network/protocol-security.js';
 
 export interface AgentOptions {
   dataDir: string;
@@ -122,6 +129,8 @@ export class Agent extends EventEmitter {
   private groupEpochRepo!: GroupEpochRepository;
   private groupInviteRepo!: GroupInviteRepository;
   private announceStateRepo!: NetworkAnnounceStateRepository;
+  private protocolReplayRepo!: ProtocolReplayRepository;
+  private groupBootstrapRepo!: GroupBootstrapRepository;
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
   private ttyaManager: TTYAManager | null = null;
@@ -169,6 +178,8 @@ export class Agent extends EventEmitter {
       this.groupEpochRepo = new GroupEpochRepository(db);
       this.groupInviteRepo = new GroupInviteRepository(db);
       this.announceStateRepo = new NetworkAnnounceStateRepository(db);
+      this.protocolReplayRepo = new ProtocolReplayRepository(db);
+      this.groupBootstrapRepo = new GroupBootstrapRepository(db);
 
       // Load or generate identity. Startup cleanup below closes the database
       // on an unlock failure so callers can retry with a fresh Agent instance.
@@ -198,6 +209,8 @@ export class Agent extends EventEmitter {
         peers: this.peerRepo,
         epochs: this.groupEpochRepo,
         invites: this.groupInviteRepo,
+        replay: this.protocolReplayRepo,
+        bootstraps: this.groupBootstrapRepo,
       });
 
       // Wire up events
@@ -425,17 +438,20 @@ export class Agent extends EventEmitter {
     this.ratchetStateRepo.save(peerFingerprint, encrypted.nextState);
 
     const messageId = createId();
-    const message: ProtocolMessage = {
-      type: MessageType.DirectMessage,
-      senderFingerprint: this.identity.fingerprint,
-      recipientFingerprint: peerFingerprint,
-      ratchetPublicKey: encrypted.ratchetPublicKey,
-      previousChainLength: encrypted.previousChainLength,
-      messageNumber: encrypted.messageNumber,
-      ciphertext: encrypted.ciphertext,
-      nonce: encrypted.nonce,
-      timestamp: Date.now(),
-    };
+    const message = signAuthenticatedMessage<DirectEncryptedMessage>(
+      {
+        type: MessageType.DirectMessage,
+        senderFingerprint: this.identity.fingerprint,
+        recipientFingerprint: peerFingerprint,
+        ratchetPublicKey: encrypted.ratchetPublicKey,
+        previousChainLength: encrypted.previousChainLength,
+        messageNumber: encrypted.messageNumber,
+        ciphertext: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+        timestamp: Date.now(),
+      },
+      this.identity.edPrivateKey,
+    );
 
     session.send(message);
 
@@ -514,15 +530,16 @@ export class Agent extends EventEmitter {
     if (new TextEncoder().encode(selfMd).length > 16 * 1024) throw new Error('self.md exceeds 16384 bytes');
     const gid = hexToBytes(groupId);
     const latestEpoch = this.groupEpochRepo.getLatestEpoch(groupId);
-    if (latestEpoch) {
-      const isAdmin = latestEpoch.epoch.members.some(
-        (m) =>
-          m.role === 'admin' &&
-          buffersEqual(m.publicKey, this.identity.edPublicKey),
-      );
-      if (!isAdmin) {
-        throw new Error('Not authorized: not admin in latest epoch');
-      }
+    if (!latestEpoch) {
+      throw new Error('Missing group epoch chain');
+    }
+    const isAdmin = latestEpoch.epoch.members.some(
+      (m) =>
+        m.role === 'admin' &&
+        buffersEqual(m.publicKey, this.identity.edPublicKey),
+    );
+    if (!isAdmin) {
+      throw new Error('Not authorized: not admin in latest epoch');
     }
     this.groupRepo.setPublic(gid, true, selfMd);
     this.announcePublicGroups();
@@ -545,8 +562,15 @@ export class Agent extends EventEmitter {
   async joinPublicGroup(groupId: string): Promise<void> {
     const gid = hexToBytes(groupId);
     const discovered = this.discoveredGroupRepo.find(gid);
-    const name = discovered?.name ?? 'Public Group';
-    if (!discovered) throw new Error('Public group authority not discovered');
+    if (
+      !discovered?.authority_key ||
+      !discovered.genesis_epoch_data ||
+      !discovered.genesis_signature ||
+      !discovered.genesis_hash
+    ) {
+      throw new Error('No authenticated discovery provenance for group');
+    }
+    const name = discovered.name;
     await this.groupManager.joinGroup(gid, name, {
       creatorPublicKey: new Uint8Array(discovered.authority_key),
       genesisEpochData: new Uint8Array(discovered.genesis_epoch_data),
@@ -559,8 +583,17 @@ export class Agent extends EventEmitter {
   // ---- Private ----
 
   private announcePublicGroups(): void {
-    const announce = this.buildPublicAnnounce();
-    if (!announce) return;
+    const groups = this.buildPublicAnnouncementGroups();
+    if (groups.length === 0) return;
+    const timestamp = Date.now();
+
+    const announce: NetworkAnnounceMessage = {
+      type: MessageType.NetworkAnnounce,
+      protocolVersion: NETWORK_ANNOUNCE_VERSION,
+      groups,
+      signature: signAnnounce(groups, timestamp, this.identity.edPrivateKey),
+      timestamp,
+    };
 
     for (const session of this.swarm.getAllSessions()) {
       try {
@@ -571,40 +604,38 @@ export class Agent extends EventEmitter {
     }
   }
 
-  private buildPublicAnnounce(): NetworkAnnounceMessage | null {
-    const groups = this.groupRepo
-      .listPublic()
-      .flatMap((group) => {
-        const groupId = Uint8Array.from(group.group_id);
-        const genesis = this.groupEpochRepo.getEpochByVersion(
-          Buffer.from(groupId).toString('hex'),
-          0,
-        );
-        if (!genesis) return [];
-        return [
-          {
-            groupId,
-            name: group.name,
-            selfMd: group.self_md ?? '',
-            memberCount: this.groupRepo.getMembers(groupId).length,
-            genesisEpochData: serializeEpoch(genesis.epoch),
-            genesisSignature: genesis.signature,
-            genesisHash: genesis.hash,
-          },
-        ];
-      })
-      .sort((a, b) =>
-        Buffer.compare(Buffer.from(a.groupId), Buffer.from(b.groupId)),
-      );
-    if (groups.length === 0) return null;
-    const timestamp = Date.now();
-    return {
-      type: MessageType.NetworkAnnounce,
-      protocolVersion: NETWORK_ANNOUNCE_VERSION,
-      groups,
-      signature: signAnnounce(groups, timestamp, this.identity.edPrivateKey),
-      timestamp,
-    };
+  private buildPublicAnnouncementGroups(): NetworkAnnounceMessage['groups'] {
+    const groups: NetworkAnnounceMessage['groups'] = [];
+    for (const group of this.groupRepo.listPublic()) {
+      const groupId = Uint8Array.from(group.group_id);
+      const groupIdHex = Buffer.from(groupId).toString('hex');
+      const genesis = this.groupEpochRepo.getEpochByVersion(groupIdHex, 0);
+      if (
+        !genesis ||
+        !group.creator_public_key ||
+        !group.genesis_hash ||
+        !buffersEqual(
+          new Uint8Array(group.creator_public_key),
+          this.identity.edPublicKey,
+        ) ||
+        !buffersEqual(new Uint8Array(group.genesis_hash), genesis.hash) ||
+        !verifyGenesisEpoch(genesis, groupIdHex, this.identity.edPublicKey)
+      ) {
+        continue;
+      }
+      groups.push({
+        groupId,
+        name: group.name,
+        selfMd: group.self_md ?? '',
+        memberCount: this.groupRepo.getMembers(groupId).length,
+        genesisEpochData: serializeEpoch(genesis.epoch),
+        genesisSignature: genesis.signature,
+        genesisHash: genesis.hash,
+      });
+    }
+    return groups.sort((left, right) =>
+      Buffer.compare(Buffer.from(left.groupId), Buffer.from(right.groupId)),
+    );
   }
 
   private async loadOrGenerateIdentity(passphrase: string | undefined): Promise<void> {
@@ -885,8 +916,20 @@ export class Agent extends EventEmitter {
       this.groupManager.syncWithPeer(result.session);
 
       // Announce our public groups to new peer
-      const announce = this.buildPublicAnnounce();
-      if (announce) {
+      const announceGroups = this.buildPublicAnnouncementGroups();
+      if (announceGroups.length > 0) {
+        const announceTimestamp = Date.now();
+        const announce: NetworkAnnounceMessage = {
+          type: MessageType.NetworkAnnounce,
+          protocolVersion: NETWORK_ANNOUNCE_VERSION,
+          groups: announceGroups,
+          signature: signAnnounce(
+            announceGroups,
+            announceTimestamp,
+            this.identity.edPrivateKey,
+          ),
+          timestamp: announceTimestamp,
+        };
         result.session.send(announce);
       }
     });
@@ -942,47 +985,62 @@ export class Agent extends EventEmitter {
 
     router.on(MessageType.NetworkAnnounce, (session, message) => {
       const announce = message as NetworkAnnounceMessage;
-      if (!session.peerPublicKey) return;
-      const peerPublicKey = session.peerPublicKey;
-
       try {
+        const senderFingerprint = validateReadySession(session);
         assertAnnounceShape(announce, Date.now());
-      } catch (error) {
-        this.emit('error', new Error(`Rejected NetworkAnnounce: ${(error as Error).message}`));
-        return;
-      }
-      if (!verifyAnnounce(announce.groups, announce.timestamp, announce.signature, peerPublicKey, announce.protocolVersion)) {
-        this.emit('error', new Error('Rejected NetworkAnnounce: invalid canonical signature'));
-        return;
-      }
-      if (!announce.groups.every((group) => verifyAnnouncedGroupAuthority(group, peerPublicKey))) {
-        this.emit('error', new Error('Rejected NetworkAnnounce: invalid group authority proof'));
-        return;
-      }
-      if (!this.announceStateRepo.accept(peerPublicKey, announce.timestamp)) {
-        this.emit('error', new Error('Rejected NetworkAnnounce: replayed or rate limited'));
-        return;
-      }
+        if (
+          !verifyAnnounce(
+            announce.groups,
+            announce.timestamp,
+            announce.signature,
+            session.peerPublicKey!,
+            announce.protocolVersion,
+          ) ||
+          announce.groups.some(
+            (group) =>
+              !verifyAnnouncedGroupAuthority(group, session.peerPublicKey!),
+          )
+        ) {
+          throw new Error('Rejected NetworkAnnounce: invalid signature or provenance');
+        }
 
-      for (const g of announce.groups) {
-        const accepted = this.discoveredGroupRepo.upsert(
-          g.groupId,
-          g.name,
-          g.selfMd,
-          g.memberCount,
-          session.peerPublicKey,
-          g.genesisEpochData,
-          g.genesisSignature,
-          g.genesisHash,
-          announce.timestamp,
+        this.protocolReplayRepo.accept(
+          {
+            messageId: networkAnnounceId(announce),
+            senderFingerprint,
+            messageType: announce.type,
+            receivedAt: Date.now(),
+          },
+          () => {
+            if (!this.announceStateRepo.accept(session.peerPublicKey!, announce.timestamp)) {
+              throw new Error('Rejected NetworkAnnounce: replayed or rate limited');
+            }
+            for (const group of announce.groups) {
+              const accepted = this.discoveredGroupRepo.upsert(
+                group.groupId,
+                group.name,
+                group.selfMd,
+                group.memberCount,
+                session.peerPublicKey!,
+                group.genesisEpochData,
+                group.genesisSignature,
+                group.genesisHash,
+                announce.timestamp,
+              );
+              if (!accepted) {
+                throw new Error('Rejected NetworkAnnounce: same-group authority overwrite');
+              }
+            }
+          },
         );
-        if (!accepted) this.emit('error', new Error('Rejected NetworkAnnounce: same-group authority overwrite'));
-      }
 
-      this.emit('network:announce', {
-        peerFingerprint: session.peerFingerprint,
-        groups: announce.groups,
-      });
+        this.emit('network:announce', {
+          peerFingerprint: session.peerFingerprint,
+          groups: announce.groups,
+        });
+      } catch (error) {
+        this.emit('error', error);
+      }
     });
 
     router.on(MessageType.Ack, (_session, message) => {
@@ -1024,68 +1082,67 @@ export class Agent extends EventEmitter {
     session: PeerSession,
     message: DirectEncryptedMessage,
   ): void {
-    if (!session.peerPublicKey || !session.peerFingerprint) return;
-
-    const senderFingerprint = session.peerFingerprint;
-
-    // Load or initialize Double Ratchet state for this peer
-    let ratchetState = this.ratchetStateRepo.load(senderFingerprint);
-
-    if (!ratchetState) {
-      // First message from this peer — initialize as receiver
-      if (!session.peerXPublicKey) {
-        this.emit(
-          'error',
-          new Error('Peer X25519 public key not available for DM decryption'),
-        );
-        return;
-      }
-      const sharedSecret = computeSharedSecret(
-        this.identity.xPrivateKey,
-        session.peerXPublicKey,
-      );
-      ratchetState = DoubleRatchet.initReceiver(sharedSecret, {
-        privateKey: this.identity.xPrivateKey,
-        publicKey: this.identity.xPublicKey,
-      });
-    }
-
-    // Decrypt with Double Ratchet
-    let decrypted: { plaintext: Uint8Array; nextState: DoubleRatchetState };
+    let reservation;
     try {
-      decrypted = DoubleRatchet.decrypt(
-        ratchetState,
-        message.ratchetPublicKey,
-        message.previousChainLength,
-        message.messageNumber,
-        message.nonce,
-        message.ciphertext,
+      reservation = validateAuthenticatedMessage(
+        session,
+        message,
+        this.identity.fingerprint,
       );
-    } catch {
-      this.emit('error', new Error('Failed to decrypt direct message'));
+    } catch (error) {
+      this.emit('error', error);
       return;
     }
 
-    // Save updated ratchet state
-    this.ratchetStateRepo.save(senderFingerprint, decrypted.nextState);
+    try {
+      const content = this.protocolReplayRepo.accept(reservation, () => {
+        const senderFingerprint = session.peerFingerprint!;
+        let ratchetState = this.ratchetStateRepo.load(senderFingerprint);
+        if (!ratchetState) {
+          if (!session.peerXPublicKey) {
+            throw new Error(
+              'Peer X25519 public key not available for DM decryption',
+            );
+          }
+          const sharedSecret = computeSharedSecret(
+            this.identity.xPrivateKey,
+            session.peerXPublicKey,
+          );
+          ratchetState = DoubleRatchet.initReceiver(sharedSecret, {
+            privateKey: this.identity.xPrivateKey,
+            publicKey: this.identity.xPublicKey,
+          });
+        }
+        const decrypted = DoubleRatchet.decrypt(
+          ratchetState,
+          message.ratchetPublicKey,
+          message.previousChainLength,
+          message.messageNumber,
+          message.nonce,
+          message.ciphertext,
+        );
+        const decoded = new TextDecoder().decode(decrypted.plaintext);
+        this.ratchetStateRepo.save(senderFingerprint, decrypted.nextState);
+        this.messageRepo.insert({
+          id: createId(),
+          senderPublicKey: session.peerPublicKey!,
+          peerPublicKey: session.peerPublicKey!,
+          content: decoded,
+          timestamp: message.timestamp,
+          type: 'direct',
+        });
+        return decoded;
+      });
 
-    const content = new TextDecoder().decode(decrypted.plaintext);
-
-    this.messageRepo.insert({
-      id: createId(),
-      senderPublicKey: session.peerPublicKey,
-      peerPublicKey: session.peerPublicKey,
-      content,
-      timestamp: message.timestamp ?? Date.now(),
-      type: 'direct',
-    });
-
-    this.emit('dm:message', {
-      senderPublicKey: session.peerPublicKey,
-      senderFingerprint: session.peerFingerprint,
-      content,
-      timestamp: message.timestamp,
-    });
+      this.emit('dm:message', {
+        senderPublicKey: session.peerPublicKey!,
+        senderFingerprint: session.peerFingerprint!,
+        content,
+        timestamp: message.timestamp,
+      });
+    } catch {
+      this.emit('error', new Error('Failed to decrypt direct message'));
+    }
   }
 }
 

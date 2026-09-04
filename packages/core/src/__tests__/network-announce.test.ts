@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MessageType,
-  NETWORK_ANNOUNCE_VERSION,
   assertAnnounceShape,
   canonicalAnnouncePayload,
   createGenesisEpoch,
@@ -9,6 +7,8 @@ import {
   decodeMessage,
   encodeMessage,
   generateIdentity,
+  MessageType,
+  NETWORK_ANNOUNCE_VERSION,
   serializeEpoch,
   signAnnounce,
   verifyAnnounce,
@@ -16,69 +16,148 @@ import {
 } from '../index.js';
 import type { AgentIdentity, NetworkAnnounceMessage } from '../index.js';
 
-function announcedGroup(identity: AgentIdentity, fill = 1) {
+function announcedGroup(identity = generateIdentity(), fill = 1) {
   const groupId = new Uint8Array(32).fill(fill);
   const genesis = createSignedEpoch(
-    createGenesisEpoch(Buffer.from(groupId).toString('hex'), identity.edPublicKey),
+    createGenesisEpoch(toHex(groupId), identity.edPublicKey, 1_700_000_000_000),
     identity.edPrivateKey,
   );
   return {
-    groupId,
-    name: 'builders',
-    selfMd: 'We build things.',
-    memberCount: 1,
-    genesisEpochData: serializeEpoch(genesis.epoch),
-    genesisSignature: genesis.signature,
-    genesisHash: genesis.hash,
+    identity,
+    group: {
+      groupId,
+      name: 'builders',
+      selfMd: 'We build things.',
+      memberCount: 1,
+      genesisEpochData: serializeEpoch(genesis.epoch),
+      genesisSignature: genesis.signature,
+      genesisHash: genesis.hash,
+    },
   };
 }
 
 function announce(identity: AgentIdentity): NetworkAnnounceMessage {
-  const groups = [announcedGroup(identity)];
+  const { group } = announcedGroup(identity);
   const timestamp = Date.now();
   return {
     type: MessageType.NetworkAnnounce,
     protocolVersion: NETWORK_ANNOUNCE_VERSION,
-    groups,
-    signature: signAnnounce(groups, timestamp, identity.edPrivateKey),
+    groups: [group],
+    signature: signAnnounce([group], timestamp, identity.edPrivateKey),
     timestamp,
   };
 }
 
-describe('canonical NetworkAnnounce', () => {
-  it('round-trips and verifies its domain-separated, versioned payload', () => {
+describe('NetworkAnnounce canonical authentication', () => {
+  it('round-trips and verifies the exhaustive versioned schema', () => {
     const identity = generateIdentity();
     const message = announce(identity);
-    const decoded = decodeMessage(encodeMessage(message)) as NetworkAnnounceMessage;
-    expect(decoded.protocolVersion).toBe(1);
-    expect(verifyAnnounce(decoded.groups, decoded.timestamp, decoded.signature, identity.edPublicKey, decoded.protocolVersion)).toBe(true);
-    expect(canonicalAnnouncePayload(1, decoded.groups, decoded.timestamp)).toEqual(canonicalAnnouncePayload(1, message.groups, message.timestamp));
+    const decoded = decodeMessage(
+      encodeMessage(message),
+    ) as NetworkAnnounceMessage;
+
+    expect(decoded).toEqual(message);
+    expect(decoded.protocolVersion).toBe(2);
+    expect(
+      verifyAnnounce(
+        decoded.groups,
+        decoded.timestamp,
+        decoded.signature,
+        identity.edPublicKey,
+        decoded.protocolVersion,
+      ),
+    ).toBe(true);
   });
 
-  it('rejects version substitution, tampering, and a different signing key', () => {
-    const identity = generateIdentity();
-    const attacker = generateIdentity();
-    const message = announce(identity);
-    expect(verifyAnnounce(message.groups, message.timestamp, message.signature, attacker.edPublicKey)).toBe(false);
-    expect(verifyAnnounce([{ ...message.groups[0], selfMd: 'hijacked' }], message.timestamp, message.signature, identity.edPublicKey)).toBe(false);
-    expect(verifyAnnounce(message.groups, message.timestamp, message.signature, identity.edPublicKey, 2)).toBe(false);
+  it('binds version, ordered groups, provenance, contents, and timestamp', () => {
+    const { identity, group } = announcedGroup();
+    const timestamp = 1_700_000_000_001;
+    const signature = signAnnounce([group], timestamp, identity.edPrivateKey);
+
+    expect(
+      verifyAnnounce([group], timestamp, signature, identity.edPublicKey),
+    ).toBe(true);
+    expect(
+      verifyAnnounce(
+        [{ ...group, selfMd: 'tampered' }],
+        timestamp,
+        signature,
+        identity.edPublicKey,
+      ),
+    ).toBe(false);
+    expect(
+      verifyAnnounce([group], timestamp + 1, signature, identity.edPublicKey),
+    ).toBe(false);
+    expect(
+      verifyAnnounce([group], timestamp, signature, identity.edPublicKey, 1),
+    ).toBe(false);
+    expect(
+      verifyAnnounce(
+        [group],
+        timestamp,
+        signature,
+        generateIdentity().edPublicKey,
+      ),
+    ).toBe(false);
   });
 
   it('enforces freshness, canonical order, duplicates, and field limits', () => {
-    const identity = generateIdentity();
-    const message = announce(identity);
-    expect(() => assertAnnounceShape(message, message.timestamp + 300_001)).toThrow(/stale/i);
-    const duplicate = { ...message, groups: [message.groups[0], message.groups[0]] };
-    expect(() => assertAnnounceShape(duplicate)).toThrow(/duplicate/i);
-    expect(() => assertAnnounceShape({ ...message, groups: [{ ...message.groups[0], name: 'x'.repeat(129) }] })).toThrow(/name/i);
+    const message = announce(generateIdentity());
+    expect(() =>
+      assertAnnounceShape(message, message.timestamp + 300_001),
+    ).toThrow(/stale/i);
+    expect(() =>
+      assertAnnounceShape({
+        ...message,
+        groups: [message.groups[0], message.groups[0]],
+      }),
+    ).toThrow(/canonical/i);
+    expect(() =>
+      assertAnnounceShape({
+        ...message,
+        groups: [{ ...message.groups[0], name: 'x'.repeat(129) }],
+      }),
+    ).toThrow(/name/i);
+
+    const first = announcedGroup(undefined, 1).group;
+    const second = announcedGroup(undefined, 2).group;
+    expect(() => canonicalAnnouncePayload(2, [second, first], 1)).toThrow(
+      /canonical/i,
+    );
   });
 
-  it('requires an exact signed genesis anchored to the authenticated announcer', () => {
-    const owner = generateIdentity();
-    const attacker = generateIdentity();
-    const group = announcedGroup(owner);
-    expect(verifyAnnouncedGroupAuthority(group, owner.edPublicKey)).toBe(true);
-    expect(verifyAnnouncedGroupAuthority(group, attacker.edPublicKey)).toBe(false);
-    expect(verifyAnnouncedGroupAuthority({ ...group, genesisHash: new Uint8Array(32) }, owner.edPublicKey)).toBe(false);
+  it('requires the exact signed genesis anchored to the announcer', () => {
+    const { identity, group } = announcedGroup();
+    expect(verifyAnnouncedGroupAuthority(group, identity.edPublicKey)).toBe(
+      true,
+    );
+    expect(
+      verifyAnnouncedGroupAuthority(group, generateIdentity().edPublicKey),
+    ).toBe(false);
+    expect(
+      verifyAnnouncedGroupAuthority(
+        { ...group, genesisHash: new Uint8Array(32) },
+        identity.edPublicKey,
+      ),
+    ).toBe(false);
+  });
+
+  it('matches the canonical payload golden vector', () => {
+    const group = {
+      groupId: new Uint8Array(32).fill(1),
+      name: 'g',
+      selfMd: '',
+      memberCount: 1,
+      genesisEpochData: new Uint8Array([0xaa]),
+      genesisSignature: new Uint8Array(64).fill(2),
+      genesisHash: new Uint8Array(32).fill(3),
+    };
+    expect(toHex(canonicalAnnouncePayload(2, [group], 5))).toBe(
+      '6e6574776f726b2e73656c662e6d642f4e6574776f726b416e6e6f756e63652f76320000020000000000000005000101010101010101010101010101010101010101010101010101010101010101010000000167000000000000000100000001aa020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303',
+    );
   });
 });
+
+function toHex(value: Uint8Array): string {
+  return Buffer.from(value).toString('hex');
+}

@@ -54,6 +54,7 @@ export interface GroupEncryptedMessage {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface DirectEncryptedMessage {
@@ -66,6 +67,7 @@ export interface DirectEncryptedMessage {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface GroupManagementMessage {
@@ -80,7 +82,10 @@ export interface GroupManagementMessage {
   genesisEpochData?: Uint8Array;
   genesisSignature?: Uint8Array;
   genesisHash?: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface TTYARequestMessage {
@@ -116,10 +121,16 @@ export interface NetworkAnnounceMessage {
 
 export interface GroupEpochMessage {
   type: typeof MessageType.GroupEpoch;
+  protocolVersion: number;
   groupId: Uint8Array;
   epochData: Uint8Array;
+  /** Signature of the immutable epoch. */
   signature: Uint8Array;
   hash: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
+  /** Signature of this fresh, recipient-bound delivery envelope. */
+  envelopeSignature: Uint8Array;
   timestamp: number;
 }
 

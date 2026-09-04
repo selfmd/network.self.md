@@ -16,7 +16,9 @@ import {
   GroupRepository,
   MessageRepository,
   PeerRepository,
+  ProtocolReplayRepository,
   SenderKeyRepository,
+  GroupBootstrapRepository,
 } from '../storage/index.js';
 
 let dataDir: string;
@@ -51,6 +53,8 @@ function managerFor(
     peers: new PeerRepository(db),
     epochs,
     invites: new GroupInviteRepository(db),
+    replay: new ProtocolReplayRepository(db),
+    bootstraps: new GroupBootstrapRepository(db),
   });
 }
 
