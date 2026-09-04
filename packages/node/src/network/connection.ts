@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   frameMessage,
+  MessageType,
   parseFrame,
 } from '@networkselfmd/core';
 import type { ProtocolMessage } from '@networkselfmd/core';
@@ -13,7 +14,9 @@ export class PeerSession extends EventEmitter {
   peerXPublicKey: Uint8Array | null = null;
   peerFingerprint: string | null = null;
   peerDisplayName: string | null = null;
-  noisePublicKey: Uint8Array | null = null;
+  readonly localNoisePublicKey: Uint8Array | null;
+  readonly remoteNoisePublicKey: Uint8Array | null;
+  readonly handshakeHash: Uint8Array | null;
 
   private buffer: Buffer = Buffer.alloc(0);
 
@@ -24,12 +27,20 @@ export class PeerSession extends EventEmitter {
       destroy: () => void;
       on: (event: string, handler: (...args: unknown[]) => void) => void;
       removeAllListeners: (event?: string) => void;
+      publicKey?: Buffer;
       remotePublicKey?: Buffer;
+      handshakeHash?: Buffer;
     },
   ) {
     super();
-    this.noisePublicKey = socket.remotePublicKey
+    this.localNoisePublicKey = socket.publicKey
+      ? new Uint8Array(socket.publicKey)
+      : null;
+    this.remoteNoisePublicKey = socket.remotePublicKey
       ? new Uint8Array(socket.remotePublicKey)
+      : null;
+    this.handshakeHash = socket.handshakeHash
+      ? new Uint8Array(socket.handshakeHash)
       : null;
 
     this.socket.on('data', ((...args: unknown[]) => {
@@ -73,6 +84,21 @@ export class PeerSession extends EventEmitter {
 
         const { message, bytesConsumed } = result;
         this.buffer = Buffer.from(this.buffer.subarray(bytesConsumed));
+
+        if (
+          message.type === MessageType.IdentityHandshake &&
+          (this.state === 'verified' || this.state === 'ready')
+        ) {
+          const error = new Error(
+            'Identity handshake already completed for this connection',
+          );
+          this.close();
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', error);
+          }
+          return;
+        }
+
         this.emit('message', message);
       } catch (err) {
         // Clear the corrupted buffer so future messages can still be parsed.
@@ -111,6 +137,14 @@ export class PeerSession extends EventEmitter {
     peerDisplayName?: string,
     peerXPublicKey?: Uint8Array,
   ): void {
+    if (
+      this.state !== 'handshaking' ||
+      this.peerPublicKey !== null ||
+      this.peerFingerprint !== null
+    ) {
+      throw new Error('Session identity is immutable after handshake');
+    }
+
     this.peerPublicKey = peerPublicKey;
     this.peerXPublicKey = peerXPublicKey ?? null;
     this.peerFingerprint = peerFingerprint;

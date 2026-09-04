@@ -1,13 +1,16 @@
 import { EventEmitter } from 'node:events';
 import Hyperswarm from 'hyperswarm';
+import { deriveKey } from '@networkselfmd/core';
 import type { AgentIdentity } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 import { performHandshake } from './handshake.js';
+import type { HandshakeResult } from './handshake.js';
 import { MessageRouter } from './router.js';
 
 export interface SwarmManagerOptions {
   identity: AgentIdentity;
   bootstrap?: Array<{ host: string; port: number }>;
+  acceptPeerIdentity?: (result: HandshakeResult) => void | Promise<void>;
 }
 
 export class SwarmManager extends EventEmitter {
@@ -16,12 +19,14 @@ export class SwarmManager extends EventEmitter {
   private topics = new Set<string>();
   private identity: AgentIdentity;
   private bootstrap?: Array<{ host: string; port: number }>;
+  private acceptPeerIdentity?: SwarmManagerOptions['acceptPeerIdentity'];
   readonly router: MessageRouter;
 
   constructor(options: SwarmManagerOptions) {
     super();
     this.identity = options.identity;
     this.bootstrap = options.bootstrap;
+    this.acceptPeerIdentity = options.acceptPeerIdentity;
     this.router = new MessageRouter();
   }
 
@@ -30,6 +35,14 @@ export class SwarmManager extends EventEmitter {
     if (this.bootstrap) {
       swarmOpts.bootstrap = this.bootstrap;
     }
+    swarmOpts.seed = Buffer.from(
+      deriveKey(
+        this.identity.edPrivateKey,
+        'networkselfmd-noise-transport-v1',
+        '',
+        32,
+      ),
+    );
 
     this.swarm = new Hyperswarm(swarmOpts);
 
@@ -49,6 +62,13 @@ export class SwarmManager extends EventEmitter {
         socket as ConstructorParameters<typeof PeerSession>[0],
         this.identity,
       );
+
+      try {
+        await this.acceptPeerIdentity?.(result);
+      } catch (error) {
+        result.session.close();
+        throw error;
+      }
 
       const { session, peerFingerprint } = result;
 

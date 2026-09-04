@@ -53,7 +53,7 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(4);
+    expect(row.version).toBe(5);
   });
 });
 
@@ -134,6 +134,55 @@ describe('PeerRepository', () => {
     repo.updateLastSeen(pk);
     const updated = repo.find(pk)!.last_seen!;
     expect(updated).toBeGreaterThanOrEqual(first);
+  });
+
+  it('pins the Ed25519 identity to its first observed Noise transport key', () => {
+    const publicKey = new Uint8Array(32).fill(10);
+    const noisePublicKey = new Uint8Array(32).fill(20);
+
+    repo.pinTransportIdentity(publicKey, 'abc123', noisePublicKey, 'Old name');
+    repo.pinTransportIdentity(publicKey, 'abc123', noisePublicKey, 'New name');
+
+    const found = repo.find(publicKey)!;
+    expect(new Uint8Array(found.noise_public_key!)).toEqual(noisePublicKey);
+    expect(found.display_name).toBe('New name');
+  });
+
+  it('rejects a changed Noise key without treating a display-name update as a key change', () => {
+    const publicKey = new Uint8Array(32).fill(10);
+    repo.pinTransportIdentity(
+      publicKey,
+      'abc123',
+      new Uint8Array(32).fill(20),
+      'Old name',
+    );
+
+    expect(() =>
+      repo.pinTransportIdentity(
+        publicKey,
+        'abc123',
+        new Uint8Array(32).fill(21),
+        'New name',
+      ),
+    ).toThrow(/transport key changed/i);
+    expect(repo.find(publicKey)!.display_name).toBe('Old name');
+  });
+
+  it('rejects substituting another identity onto a pinned Noise key', () => {
+    const noisePublicKey = new Uint8Array(32).fill(20);
+    repo.pinTransportIdentity(
+      new Uint8Array(32).fill(10),
+      'identity-1',
+      noisePublicKey,
+    );
+
+    expect(() =>
+      repo.pinTransportIdentity(
+        new Uint8Array(32).fill(11),
+        'identity-2',
+        noisePublicKey,
+      ),
+    ).toThrow(/different identity/i);
   });
 });
 

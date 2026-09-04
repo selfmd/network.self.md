@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATIONS: string[] = [
   `
@@ -107,6 +107,15 @@ const MIGRATIONS: string[] = [
   );
 
   UPDATE schema_version SET version = 4;
+  `,
+  `
+  ALTER TABLE peers ADD COLUMN noise_public_key BLOB;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS peers_noise_public_key
+    ON peers(noise_public_key)
+    WHERE noise_public_key IS NOT NULL;
+
+  UPDATE schema_version SET version = 5;
   `,
 ];
 

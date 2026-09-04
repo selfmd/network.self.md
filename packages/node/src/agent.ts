@@ -123,6 +123,14 @@ export class Agent extends EventEmitter {
     this.swarm = new SwarmManager({
       identity: this.identity,
       bootstrap: this.options.bootstrap,
+      acceptPeerIdentity: (result) => {
+        this.peerRepo.pinTransportIdentity(
+          result.peerPublicKey,
+          result.peerFingerprint,
+          result.peerNoisePublicKey,
+          result.peerDisplayName,
+        );
+      },
     });
 
     // Init group manager
@@ -506,13 +514,6 @@ export class Agent extends EventEmitter {
     this.swarm.on('peer:connected', (result: HandshakeResult) => {
       const fp = result.peerFingerprint;
       this.peers.set(fp, result.session);
-
-      // Store peer
-      this.peerRepo.upsert(
-        result.peerPublicKey,
-        fp,
-        result.peerDisplayName,
-      );
 
       this.emit('peer:connected', {
         publicKey: result.peerPublicKey,

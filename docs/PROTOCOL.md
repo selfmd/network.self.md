@@ -42,8 +42,9 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 {
   type: 0x01,
   edPublicKey: Uint8Array,       // 32 bytes, Ed25519 public key
+  xPublicKey: Uint8Array,        // 32 bytes, X25519 public key used for DMs
   noisePublicKey: Uint8Array,    // 32 bytes, Noise key from Hyperswarm
-  signature: Uint8Array,         // Ed25519 signature over noisePublicKey
+  signature: Uint8Array,         // Ed25519 signature over the bound transcript
   displayName?: string,          // optional human-readable name
   protocolVersion: number,       // 1 for V1
   timestamp: number              // unix ms, must be within ±5 min of local time
@@ -51,12 +52,20 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 ```
 
 **Verification:**
-1. Verify `ed25519.verify(signature, noisePublicKey, edPublicKey)` is true
-2. Verify `noisePublicKey` matches the Noise key from the Hyperswarm connection
-3. Verify `timestamp` is within ±300,000 ms of local time
-4. If any check fails, drop the connection
+The signed transcript is domain-separated and contains `protocolVersion`, the sender's
+local `noisePublicKey`, `xPublicKey`, `timestamp`, and the connection's Noise
+`handshakeHash`.
 
-This binds the transport-layer Noise identity to the application-layer Ed25519 identity.
+1. Require protocol version 1 and exact key/signature lengths
+2. Verify `noisePublicKey` matches `socket.remotePublicKey`
+3. Verify `timestamp` is within ±300,000 ms of local time
+4. Verify the Ed25519 signature over the full transcript, including `socket.handshakeHash`
+5. Reject a second identity handshake on an already-verified connection
+6. If any check fails, drop the connection
+
+This binds the transport-layer Noise identity and DM key to the application-layer
+Ed25519 identity, and prevents a captured handshake from being replayed on another
+Noise connection.
 
 ### GroupSync (0x02)
 
