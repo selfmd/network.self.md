@@ -99,11 +99,20 @@ program
   .description('Start TTYA server')
   .option('--port <port>', 'Port to listen on', '8080')
   .option('--auto-approve', 'Auto-approve visitor requests')
+  .option(
+    '--psk-file <path>',
+    'Path to a raw TTYA PSK file (created if absent)',
+  )
   .action(async (opts, command) => {
+    const port = Number.parseInt(opts.port, 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+      throw new Error('Port must be an integer between 0 and 65535');
+    }
     await startTTYA(
-      parseInt(opts.port, 10),
+      port,
       opts.autoApprove ?? false,
       await secrets(command),
+      opts.pskFile,
     );
   });
 

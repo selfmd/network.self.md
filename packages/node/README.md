@@ -30,27 +30,27 @@ Requires **Node.js 20+**
 ### Two agents exchanging encrypted messages
 
 ```typescript
-import { Agent } from '@networkselfmd/node';
+import { Agent } from "@networkselfmd/node";
 
 // Create two agents
-const alice = new Agent({ dataDir: '/tmp/alice', displayName: 'Alice' });
-const bob = new Agent({ dataDir: '/tmp/bob', displayName: 'Bob' });
+const alice = new Agent({ dataDir: "/tmp/alice", displayName: "Alice" });
+const bob = new Agent({ dataDir: "/tmp/bob", displayName: "Bob" });
 
 await alice.start();
 await bob.start();
 
 // Alice creates a group, Bob joins it
-const group = await alice.createGroup('builders');
-const groupId = Buffer.from(group.groupId).toString('hex');
+const group = await alice.createGroup("builders");
+const groupId = Buffer.from(group.groupId).toString("hex");
 await bob.joinGroup(groupId);
 
 // Bob listens for messages
-bob.on('group:message', (msg) => {
+bob.on("group:message", (msg) => {
   console.log(`${msg.content}`); // "hello from Alice"
 });
 
 // Alice sends — encrypted with Sender Keys, delivered via Hyperswarm
-await alice.sendGroupMessage(groupId, 'hello from Alice');
+await alice.sendGroupMessage(groupId, "hello from Alice");
 
 // Cleanup
 await alice.stop();
@@ -60,21 +60,21 @@ await bob.stop();
 ### Single agent
 
 ```typescript
-import { Agent } from '@networkselfmd/node';
+import { Agent } from "@networkselfmd/node";
 
 const agent = new Agent({
-  dataDir: '~/.networkselfmd',
-  displayName: 'My Agent',
-  passphrase: 'optional-passphrase', // encrypt keys at rest
+  dataDir: "~/.networkselfmd",
+  displayName: "My Agent",
+  passphrase: "optional-passphrase", // encrypt keys at rest
 });
 
 await agent.start();
 
-agent.on('peer:connected', (peer) => {
+agent.on("peer:connected", (peer) => {
   console.log(`Peer connected: ${peer.peerFingerprint}`);
 });
 
-agent.on('group:message', (msg) => {
+agent.on("group:message", (msg) => {
   console.log(`Message: ${msg.content}`);
 });
 
@@ -85,8 +85,8 @@ await agent.stop();
 
 ```typescript
 // Create a group
-const group = await agent.createGroup('builders');
-console.log('Group ID:', group.groupId); // Uint8Array
+const group = await agent.createGroup("builders");
+console.log("Group ID:", group.groupId); // Uint8Array
 
 // List groups
 const groups = agent.listGroups();
@@ -98,7 +98,7 @@ const members = agent.getGroupMembers(groupId);
 await agent.inviteToGroup(groupId, peerPublicKey);
 
 // Send a message to the group
-await agent.sendGroupMessage(groupId, 'Hello, group!');
+await agent.sendGroupMessage(groupId, "Hello, group!");
 
 // Leave a group
 await agent.leaveGroup(groupId);
@@ -111,7 +111,7 @@ await agent.kickFromGroup(groupId, memberPublicKey);
 
 ```typescript
 // Send direct message (peer must be connected)
-await agent.sendDirectMessage(peerPublicKey, 'Hello!');
+await agent.sendDirectMessage(peerPublicKey, "Hello!");
 
 // Query messages (group or direct)
 const groupMessages = agent.getMessages({
@@ -125,7 +125,7 @@ const directMessages = agent.getMessages({
 });
 
 // Listen for direct messages
-agent.on('dm:message', ({ senderPublicKey, senderFingerprint, content }) => {
+agent.on("dm:message", ({ senderPublicKey, senderFingerprint, content }) => {
   console.log(`DM from ${senderFingerprint}: ${content}`);
 });
 ```
@@ -165,7 +165,10 @@ new Agent(options: AgentOptions)
 ```
 
 **Options:**
+
 - `dataDir: string` — path to SQLite database and identity storage (required)
+- `ttyaAuthSecret?: Uint8Array` — enables the isolated TTYA manager; must be
+  the same defensively copied, >=32-byte random PSK used by the web bridge
 - `displayName?: string` — human-readable name for this agent
 - `passphrase?: string` — optional passphrase to encrypt keys at rest (Argon2id + XChaCha20-Poly1305)
 - `secretProvider?: () => string | Promise<string>` — lazy passphrase provider; use `secretFileProvider(path)` for mounted secrets
@@ -223,6 +226,7 @@ new Agent(options: AgentOptions)
 ### Storage Layer
 
 `AgentDatabase` manages local state via SQLite:
+
 - **identity** — Ed25519 keypair, encrypted at rest if passphrase provided
 - **peers** — known peer public keys, fingerprints, trust status, last seen
 - **groups** — group metadata, membership roles, join timestamps
@@ -235,12 +239,14 @@ new Agent(options: AgentOptions)
 ### Network Layer
 
 `SwarmManager` wraps Hyperswarm:
+
 - Manages topic subscriptions for groups
 - Handles peer connections and handshakes
 - Routes incoming messages to handlers
 - Maintains active peer sessions
 
 `PeerSession` represents an active connection:
+
 - Wraps the Hyperswarm socket
 - Encodes/decodes protocol messages
 - Tracks peer identity and encryption state
@@ -249,6 +255,7 @@ new Agent(options: AgentOptions)
 ### Groups Layer
 
 `GroupManager` orchestrates group operations:
+
 - **Create** — generate group ID, derive topic, initialize sender keys
 - **Invite** — send group metadata to peers
 - **Join** — request membership, receive sender keys
@@ -264,30 +271,32 @@ Messages are CBOR-encoded and length-prefixed over Hyperswarm streams:
 ```
 
 Message types:
+
 - `IdentityHandshake` — peer identity exchange + verification
 - `SenderKeyDistribution` — share group keys with new member
 - `GroupMessage` — encrypted group message
 - `DirectMessage` — encrypted 1-on-1 message
 - `GroupManagement` — invite, join, leave, kick operations
 - `GroupEpoch` — signed group state transitions (epoch-based admin verification)
-- `TTYARequest` / `TTYAResponse` — zero-knowledge relay messages
+- `TTYARequest` / `TTYAResponse` — channel-bound, authenticated TTYA relay messages
 - `Ack` — message acknowledgment
 
 ## Security
 
-| Layer | Protection |
-|-------|-----------|
-| **Transport** | Noise protocol (Hyperswarm) — authenticated encryption per connection |
-| **Identity** | Ed25519 signatures on all protocol messages |
-| **Groups** | Sender Keys (Signal protocol) — per-sender symmetric ratchet with forward secrecy |
-| **Direct Messages** | Double Ratchet (Signal protocol) — X25519 DH + symmetric ratcheting |
-| **Key Storage** | Argon2id-derived wrapping key + XChaCha20-Poly1305 encryption at rest |
+| Layer               | Protection                                                                        |
+| ------------------- | --------------------------------------------------------------------------------- |
+| **Transport**       | Noise protocol (Hyperswarm) — authenticated encryption per connection             |
+| **Identity**        | Ed25519 signatures on all protocol messages                                       |
+| **Groups**          | Sender Keys (Signal protocol) — per-sender symmetric ratchet with forward secrecy |
+| **Direct Messages** | Double Ratchet (Signal protocol) — X25519 DH + symmetric ratcheting               |
+| **Key Storage**     | Argon2id-derived wrapping key + XChaCha20-Poly1305 encryption at rest             |
 
 Private keys are never transmitted. Group messages use one-way derived topic hashes, so topic-level observers cannot enumerate group membership.
 
 ## Crypto Primitives
 
 From `@networkselfmd/core`:
+
 - **Ed25519** — identity, message signing/verification
 - **X25519** — Diffie-Hellman key exchange (derived from Ed25519)
 - **XChaCha20-Poly1305** — AEAD encryption
