@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SenderKeys, type SenderKeyRecord } from '../protocol/sender-keys.js';
+import { generateIdentity } from '../identity.js';
 
 describe('SenderKeys', () => {
   it('generates initial state with random chain key and index 0', () => {
@@ -134,15 +135,94 @@ describe('SenderKeys', () => {
 
   it('createDistribution produces valid message', () => {
     const state = SenderKeys.generate();
-    const groupId = new Uint8Array(16);
+    const groupId = new Uint8Array(32);
     const signingKey = new Uint8Array(32);
-    const dist = SenderKeys.createDistribution(groupId, state, signingKey);
+    const epochHash = new Uint8Array(32).fill(7);
+    const dist = SenderKeys.createDistribution(
+      groupId,
+      state,
+      signingKey,
+      3,
+      epochHash,
+    );
 
-    expect(dist.type).toBe(0x03);
     expect(dist.groupId).toBe(groupId);
     expect(dist.chainKey).toBe(state.chainKey);
     expect(dist.chainIndex).toBe(state.chainIndex);
     expect(dist.signingPublicKey).toBe(signingKey);
+    expect(dist.epochVersion).toBe(3);
+    expect(dist.epochHash).toBe(epochHash);
     expect(typeof dist.timestamp).toBe('number');
+  });
+
+  it('encrypts a distribution for one authenticated recipient', () => {
+    const alice = generateIdentity('Alice');
+    const bob = generateIdentity('Bob');
+    const groupId = new Uint8Array(32).fill(11);
+    const epochHash = new Uint8Array(32).fill(12);
+    const state = SenderKeys.generate();
+    const payload = SenderKeys.createDistribution(
+      groupId,
+      state,
+      alice.edPublicKey,
+      4,
+      epochHash,
+    );
+
+    const envelope = SenderKeys.encryptDistribution(
+      payload,
+      alice.xPrivateKey,
+      alice.edPublicKey,
+      bob.xPublicKey,
+      bob.edPublicKey,
+    );
+
+    expect(envelope.type).toBe(0x03);
+    expect(envelope.recipientPublicKey).toEqual(bob.edPublicKey);
+    expect(envelope).not.toHaveProperty('groupId');
+    expect(envelope).not.toHaveProperty('chainKey');
+    expect(envelope.ciphertext).not.toEqual(state.chainKey);
+
+    const decrypted = SenderKeys.decryptDistribution(
+      envelope,
+      bob.xPrivateKey,
+      bob.edPublicKey,
+      alice.xPublicKey,
+      alice.edPublicKey,
+    );
+    expect(decrypted.groupId).toEqual(groupId);
+    expect(decrypted.chainKey).toEqual(state.chainKey);
+    expect(decrypted.epochVersion).toBe(4);
+    expect(decrypted.epochHash).toEqual(epochHash);
+  });
+
+  it('rejects a distribution relayed over another authenticated session', () => {
+    const alice = generateIdentity('Alice');
+    const bob = generateIdentity('Bob');
+    const mallory = generateIdentity('Mallory');
+    const payload = SenderKeys.createDistribution(
+      new Uint8Array(32).fill(21),
+      SenderKeys.generate(),
+      alice.edPublicKey,
+      1,
+      new Uint8Array(32).fill(22),
+    );
+    const envelope = SenderKeys.encryptDistribution(
+      payload,
+      alice.xPrivateKey,
+      alice.edPublicKey,
+      bob.xPublicKey,
+      bob.edPublicKey,
+    );
+
+    expect(() =>
+      SenderKeys.decryptDistribution(
+        envelope,
+        bob.xPrivateKey,
+        bob.edPublicKey,
+        mallory.xPublicKey,
+        mallory.edPublicKey,
+      ),
+    ).toThrow();
   });
 });

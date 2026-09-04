@@ -39,6 +39,7 @@ export {
   SenderKeys,
   type SenderKeyState,
   type SenderKeyRecord,
+  type SenderKeyDistributionPayload,
 } from './sender-keys.js';
 
 export {

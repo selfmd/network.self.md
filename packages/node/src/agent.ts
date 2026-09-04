@@ -573,8 +573,9 @@ export class Agent extends EventEmitter {
   private setupRouterHandlers(): void {
     const router = this.swarm.router;
 
-    router.on(MessageType.SenderKeyDistribution, (_session, message) => {
+    router.on(MessageType.SenderKeyDistribution, (session, message) => {
       this.groupManager.handleSenderKeyDistribution(
+        session,
         message as SenderKeyDistributionMessage,
       );
     });

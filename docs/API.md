@@ -215,8 +215,21 @@ const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(state, p
 // Decrypt a message
 const { plaintext, nextRecord } = SenderKeys.decrypt(record, header, ciphertext);
 
-// Create distribution message
-const distribution = SenderKeys.createDistribution(groupId, state, signingPublicKey);
+// Create an epoch-bound plaintext payload, then encrypt it for one recipient
+const payload = SenderKeys.createDistribution(
+  groupId,
+  state,
+  signingPublicKey,
+  epochVersion,
+  epochHash,
+);
+const distribution = SenderKeys.encryptDistribution(
+  payload,
+  senderXPrivateKey,
+  signingPublicKey,
+  recipientXPublicKey,
+  recipientPublicKey,
+);
 ```
 
 ### Messages

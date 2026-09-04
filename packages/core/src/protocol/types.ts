@@ -35,10 +35,9 @@ export interface GroupSyncMessage {
 
 export interface SenderKeyDistributionMessage {
   type: typeof MessageType.SenderKeyDistribution;
-  groupId: Uint8Array;
-  chainKey: Uint8Array;
-  chainIndex: number;
-  signingPublicKey: Uint8Array;
+  recipientPublicKey: Uint8Array;
+  ciphertext: Uint8Array;
+  nonce: Uint8Array;
   timestamp: number;
 }
 

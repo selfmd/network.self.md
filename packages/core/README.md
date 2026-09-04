@@ -245,7 +245,9 @@ if (result) {
 - `SenderKeys.generate(): SenderKeyState`
 - `SenderKeys.encrypt(state, plaintext): { ciphertext, nonce, chainIndex, nextState }`
 - `SenderKeys.decrypt(record, chainIndex, nonce, ciphertext): { plaintext, nextRecord }`
-- `SenderKeys.createDistribution(groupId, state, signingPublicKey): SenderKeyDistributionMessage`
+- `SenderKeys.createDistribution(groupId, state, signingPublicKey, epochVersion, epochHash): SenderKeyDistributionPayload`
+- `SenderKeys.encryptDistribution(payload, senderXPrivateKey, senderPublicKey, recipientXPublicKey, recipientPublicKey): SenderKeyDistributionMessage`
+- `SenderKeys.decryptDistribution(message, recipientXPrivateKey, recipientPublicKey, authenticatedSenderXPublicKey, authenticatedSenderPublicKey): SenderKeyDistributionPayload`
 
 **Double Ratchet:**
 - `DoubleRatchet.initSender(sharedSecret, recipientRatchetPublic): DoubleRatchetState`

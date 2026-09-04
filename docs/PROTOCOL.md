@@ -84,22 +84,39 @@ Encrypted to the specific recipient using pairwise X25519.
 ```typescript
 {
   type: 0x03,
-  groupId: Uint8Array,           // 32 bytes
-  chainKey: Uint8Array,          // 32 bytes, encrypted
-  chainIndex: number,            // current position in chain
-  signingPublicKey: Uint8Array,  // 32 bytes, sender's Ed25519 key
-  encryptedPayload: Uint8Array,  // XChaCha20-Poly1305 ciphertext
-  nonce: Uint8Array,             // 24 bytes
-  ephemeralPublicKey: Uint8Array // 32 bytes, for X25519 key exchange
+  recipientPublicKey: Uint8Array, // 32-byte recipient Ed25519 key
+  ciphertext: Uint8Array,         // encrypted payload below
+  nonce: Uint8Array,              // 24 bytes
+  timestamp: number
+}
+
+// XChaCha20-Poly1305 plaintext (never exposed on the wire)
+{
+  groupId: Uint8Array,
+  chainKey: Uint8Array,
+  chainIndex: number,
+  signingPublicKey: Uint8Array,
+  epochVersion: number,
+  epochHash: Uint8Array,
+  timestamp: number
 }
 ```
 
 **Key exchange for distribution:**
 ```
 sharedSecret = x25519(sender.xPrivateKey, recipient.xPublicKey)
-encryptionKey = hkdf(sha256, sharedSecret, "networkselfmd-skd-v1", "", 32)
-encryptedPayload = xchacha20poly1305(encryptionKey, nonce).encrypt(chainKey || uint32(chainIndex))
+context = type || sender.edPublicKey || recipient.edPublicKey || timestamp
+encryptionKey = hkdf(sha256, sharedSecret,
+  "networkselfmd-sender-key-distribution-key-v1", context, 32)
+aad = "networkselfmd-sender-key-distribution-aad-v1" || context
+ciphertext = xchacha20poly1305(encryptionKey, nonce, aad).encrypt(payload)
 ```
+
+The receiver derives the key from the authenticated session's X25519 key,
+requires `signingPublicKey` to equal `session.peerPublicKey`, and accepts the
+payload only when sender and recipient are members of the referenced latest
+signed epoch. Unknown groups, stale epochs, and nonmembers are rejected without
+storing any sender-key record.
 
 ### GroupMessage (0x04)
 
