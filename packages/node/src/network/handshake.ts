@@ -1,9 +1,9 @@
-import {
-  sign,
-  verify,
-  fingerprintFromPublicKey,
+import { sign, verify, fingerprintFromPublicKey } from '@networkselfmd/core';
+import type {
+  AgentIdentity,
+  IdentityHandshakeMessage,
+  ProtocolMessage,
 } from '@networkselfmd/core';
-import type { AgentIdentity, IdentityHandshakeMessage, ProtocolMessage } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 
@@ -25,15 +25,29 @@ export async function performHandshake(
   const session = new PeerSession(socket);
   session.state = 'handshaking';
 
-  const noisePublicKey = session.noisePublicKey ?? new Uint8Array(32);
+  if (!session.localNoisePublicKey || !session.noisePublicKey) {
+    session.close();
+    throw new Error('Noise transport identity is unavailable');
+  }
+  const noisePublicKey = session.localNoisePublicKey;
   const timestamp = Date.now();
 
   // Build signing payload: noisePublicKey || xPublicKey || timestamp as uint64 BE
-  const payload = new Uint8Array(noisePublicKey.length + identity.xPublicKey.length + 8);
+  const payload = new Uint8Array(
+    noisePublicKey.length + identity.xPublicKey.length + 8,
+  );
   payload.set(noisePublicKey, 0);
   payload.set(identity.xPublicKey, noisePublicKey.length);
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noisePublicKey.length + identity.xPublicKey.length, BigInt(timestamp), false);
+  const view = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    payload.byteLength,
+  );
+  view.setBigUint64(
+    noisePublicKey.length + identity.xPublicKey.length,
+    BigInt(timestamp),
+    false,
+  );
 
   const signature = sign(payload, identity.edPrivateKey);
 
@@ -43,7 +57,7 @@ export async function performHandshake(
     xPublicKey: identity.xPublicKey,
     noisePublicKey: noisePublicKey,
     signature,
-    protocolVersion: 1,
+    protocolVersion: 2,
     timestamp,
     displayName: identity.displayName,
   };
@@ -76,7 +90,9 @@ export async function performHandshake(
       }
 
       if (message.type !== MessageType.IdentityHandshake) {
-        bufferedMessages.push(message);
+        clearTimeout(timeout);
+        session.close();
+        reject(new Error('Protocol message received before IdentityHandshake'));
         return;
       }
 
@@ -85,9 +101,11 @@ export async function performHandshake(
 
       try {
         const peerHandshake = message as IdentityHandshakeMessage;
-        validateHandshake(peerHandshake);
+        validateHandshake(peerHandshake, session.noisePublicKey);
 
-        const peerFingerprint = fingerprintFromPublicKey(peerHandshake.edPublicKey);
+        const peerFingerprint = fingerprintFromPublicKey(
+          peerHandshake.edPublicKey,
+        );
 
         session.setVerified(
           peerHandshake.edPublicKey,
@@ -132,6 +150,7 @@ export async function performHandshake(
 
 function validateHandshake(
   handshake: IdentityHandshakeMessage,
+  transportNoisePublicKey: Uint8Array | null,
 ): void {
   // Check timestamp
   const now = Date.now();
@@ -142,6 +161,15 @@ function validateHandshake(
     );
   }
 
+  if (
+    !transportNoisePublicKey ||
+    !bytesEqual(handshake.noisePublicKey, transportNoisePublicKey)
+  ) {
+    throw new Error(
+      'Handshake Noise public key does not match transport identity',
+    );
+  }
+
   // Reconstruct the payload the peer signed:
   // noisePublicKey || xPublicKey || timestamp as uint64 BE
   const noiseKey = handshake.noisePublicKey;
@@ -149,11 +177,26 @@ function validateHandshake(
   const payload = new Uint8Array(noiseKey.length + xKey.length + 8);
   payload.set(noiseKey, 0);
   payload.set(xKey, noiseKey.length);
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noiseKey.length + xKey.length, BigInt(handshake.timestamp), false);
+  const view = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    payload.byteLength,
+  );
+  view.setBigUint64(
+    noiseKey.length + xKey.length,
+    BigInt(handshake.timestamp),
+    false,
+  );
 
   const valid = verify(handshake.signature, payload, handshake.edPublicKey);
   if (!valid) {
     throw new Error('Invalid handshake signature');
   }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
 }

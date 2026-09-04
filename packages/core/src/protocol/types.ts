@@ -39,7 +39,10 @@ export interface SenderKeyDistributionMessage {
   chainKey: Uint8Array;
   chainIndex: number;
   signingPublicKey: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface GroupEncryptedMessage {
@@ -50,6 +53,7 @@ export interface GroupEncryptedMessage {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface DirectEncryptedMessage {
@@ -62,6 +66,7 @@ export interface DirectEncryptedMessage {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface GroupManagementMessage {
@@ -70,7 +75,10 @@ export interface GroupManagementMessage {
   action: 'create' | 'invite' | 'join' | 'leave' | 'kick' | 'promote';
   targetFingerprint?: string;
   groupName?: string;
+  senderFingerprint: string;
+  recipientFingerprint: string;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface TTYARequestMessage {

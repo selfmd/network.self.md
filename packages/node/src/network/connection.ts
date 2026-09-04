@@ -1,11 +1,13 @@
 import { EventEmitter } from 'node:events';
-import {
-  frameMessage,
-  parseFrame,
-} from '@networkselfmd/core';
+import { frameMessage, parseFrame } from '@networkselfmd/core';
 import type { ProtocolMessage } from '@networkselfmd/core';
 
-export type ConnectionState = 'connecting' | 'handshaking' | 'verified' | 'ready' | 'closed';
+export type ConnectionState =
+  | 'connecting'
+  | 'handshaking'
+  | 'verified'
+  | 'ready'
+  | 'closed';
 
 export class PeerSession extends EventEmitter {
   state: ConnectionState = 'connecting';
@@ -14,6 +16,7 @@ export class PeerSession extends EventEmitter {
   peerFingerprint: string | null = null;
   peerDisplayName: string | null = null;
   noisePublicKey: Uint8Array | null = null;
+  localNoisePublicKey: Uint8Array | null = null;
 
   private buffer: Buffer = Buffer.alloc(0);
 
@@ -25,11 +28,15 @@ export class PeerSession extends EventEmitter {
       on: (event: string, handler: (...args: unknown[]) => void) => void;
       removeAllListeners: (event?: string) => void;
       remotePublicKey?: Buffer;
+      publicKey?: Buffer;
     },
   ) {
     super();
     this.noisePublicKey = socket.remotePublicKey
       ? new Uint8Array(socket.remotePublicKey)
+      : null;
+    this.localNoisePublicKey = socket.publicKey
+      ? new Uint8Array(socket.publicKey)
       : null;
 
     this.socket.on('data', ((...args: unknown[]) => {
@@ -75,11 +82,11 @@ export class PeerSession extends EventEmitter {
         this.buffer = Buffer.from(this.buffer.subarray(bytesConsumed));
         this.emit('message', message);
       } catch (err) {
-        // Clear the corrupted buffer so future messages can still be parsed.
-        // Without this, the bad data stays in the buffer and every subsequent
-        // onData call fails immediately.
         this.buffer = Buffer.alloc(0);
-        this.emit('error', err);
+        this.socket.destroy();
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', err);
+        }
         return;
       }
     }

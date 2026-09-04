@@ -27,13 +27,19 @@ export {
   decodeMessage,
   frameMessage,
   parseFrame,
+  validateProtocolMessage,
   MAX_FRAME_SIZE,
 } from './messages.js';
 
 export {
-  signAnnounce,
-  verifyAnnounce,
-} from './announce-signature.js';
+  authenticatedMessagePayload,
+  authenticatedMessageId,
+  signAuthenticatedMessage,
+  verifyAuthenticatedMessage,
+  type AuthenticatedProtocolMessage,
+} from './message-auth.js';
+
+export { signAnnounce, verifyAnnounce } from './announce-signature.js';
 
 export {
   SenderKeys,
@@ -41,10 +47,7 @@ export {
   type SenderKeyRecord,
 } from './sender-keys.js';
 
-export {
-  DoubleRatchet,
-  type DoubleRatchetState,
-} from './double-ratchet.js';
+export { DoubleRatchet, type DoubleRatchetState } from './double-ratchet.js';
 
 export {
   type GroupMemberEntry,

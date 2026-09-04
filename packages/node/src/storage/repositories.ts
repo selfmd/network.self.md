@@ -1,6 +1,10 @@
 import type Database from 'better-sqlite3';
 import type { DoubleRatchetState, SignedGroupEpoch } from '@networkselfmd/core';
-import { serializeEpoch, deserializeEpoch, hashEpoch } from '@networkselfmd/core';
+import {
+  serializeEpoch,
+  deserializeEpoch,
+  hashEpoch,
+} from '@networkselfmd/core';
 
 // Local types for DB rows
 export interface StoredIdentity {
@@ -87,12 +91,16 @@ export class IdentityRepository {
   }
 
   load(): StoredIdentity | undefined {
-    return this.db
-      .prepare('SELECT * FROM identity WHERE id = 1')
-      .get() as StoredIdentity | undefined;
+    return this.db.prepare('SELECT * FROM identity WHERE id = 1').get() as
+      | StoredIdentity
+      | undefined;
   }
 
-  saveEncryptedKeys(salt: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): void {
+  saveEncryptedKeys(
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): void {
     const stmt = this.db.prepare(
       `INSERT OR REPLACE INTO key_storage (id, salt, nonce, ciphertext)
        VALUES (1, ?, ?, ?)`,
@@ -101,9 +109,9 @@ export class IdentityRepository {
   }
 
   loadEncryptedKeys(): StoredKeyData | undefined {
-    return this.db
-      .prepare('SELECT * FROM key_storage WHERE id = 1')
-      .get() as StoredKeyData | undefined;
+    return this.db.prepare('SELECT * FROM key_storage WHERE id = 1').get() as
+      | StoredKeyData
+      | undefined;
   }
 }
 
@@ -123,7 +131,12 @@ export class PeerRepository {
          display_name = COALESCE(excluded.display_name, peers.display_name),
          last_seen = excluded.last_seen`,
     );
-    stmt.run(Buffer.from(publicKey), fingerprint, displayName ?? null, Date.now());
+    stmt.run(
+      Buffer.from(publicKey),
+      fingerprint,
+      displayName ?? null,
+      Date.now(),
+    );
   }
 
   find(publicKey: Uint8Array): StoredPeer | undefined {
@@ -133,7 +146,9 @@ export class PeerRepository {
   }
 
   list(): StoredPeer[] {
-    return this.db.prepare('SELECT * FROM peers ORDER BY last_seen DESC').all() as StoredPeer[];
+    return this.db
+      .prepare('SELECT * FROM peers ORDER BY last_seen DESC')
+      .all() as StoredPeer[];
   }
 
   trust(publicKey: Uint8Array): void {
@@ -177,9 +192,15 @@ export class GroupRepository {
   }
 
   leave(groupId: Uint8Array): void {
-    this.db.prepare('DELETE FROM groups WHERE group_id = ?').run(Buffer.from(groupId));
-    this.db.prepare('DELETE FROM group_members WHERE group_id = ?').run(Buffer.from(groupId));
-    this.db.prepare('DELETE FROM sender_keys WHERE group_id = ?').run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM groups WHERE group_id = ?')
+      .run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM group_members WHERE group_id = ?')
+      .run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM sender_keys WHERE group_id = ?')
+      .run(Buffer.from(groupId));
   }
 
   find(groupId: Uint8Array): StoredGroup | undefined {
@@ -189,10 +210,16 @@ export class GroupRepository {
   }
 
   list(): StoredGroup[] {
-    return this.db.prepare('SELECT * FROM groups ORDER BY joined_at DESC').all() as StoredGroup[];
+    return this.db
+      .prepare('SELECT * FROM groups ORDER BY joined_at DESC')
+      .all() as StoredGroup[];
   }
 
-  addMember(groupId: Uint8Array, publicKey: Uint8Array, role: string = 'member'): void {
+  addMember(
+    groupId: Uint8Array,
+    publicKey: Uint8Array,
+    role: string = 'member',
+  ): void {
     const stmt = this.db.prepare(
       `INSERT OR REPLACE INTO group_members (group_id, public_key, role)
        VALUES (?, ?, ?)`,
@@ -202,7 +229,9 @@ export class GroupRepository {
 
   removeMember(groupId: Uint8Array, publicKey: Uint8Array): void {
     this.db
-      .prepare('DELETE FROM group_members WHERE group_id = ? AND public_key = ?')
+      .prepare(
+        'DELETE FROM group_members WHERE group_id = ? AND public_key = ?',
+      )
       .run(Buffer.from(groupId), Buffer.from(publicKey));
   }
 
@@ -221,7 +250,9 @@ export class GroupRepository {
       throw new Error('Only admin can change group visibility');
     }
     this.db
-      .prepare('UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?')
+      .prepare(
+        'UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?',
+      )
       .run(isPublic ? 1 : 0, selfMd ?? null, Buffer.from(groupId));
   }
 
@@ -270,7 +301,10 @@ export class MessageRepository {
 
     if (options.peerPublicKey) {
       conditions.push('(sender_public_key = ? OR peer_public_key = ?)');
-      params.push(Buffer.from(options.peerPublicKey), Buffer.from(options.peerPublicKey));
+      params.push(
+        Buffer.from(options.peerPublicKey),
+        Buffer.from(options.peerPublicKey),
+      );
     }
 
     if (options.before) {
@@ -278,11 +312,14 @@ export class MessageRepository {
       params.push(options.before);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
 
     return this.db
-      .prepare(`SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`)
+      .prepare(
+        `SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`,
+      )
       .all(...params, limit) as StoredMessage[];
   }
 }
@@ -316,7 +353,14 @@ export class DiscoveredGroupRepository {
          announced_by = excluded.announced_by,
          last_announced = excluded.last_announced`,
     );
-    stmt.run(Buffer.from(groupId), name, selfMd ?? null, memberCount, Buffer.from(announcedBy), Date.now());
+    stmt.run(
+      Buffer.from(groupId),
+      name,
+      selfMd ?? null,
+      memberCount,
+      Buffer.from(announcedBy),
+      Date.now(),
+    );
   }
 
   list(): StoredDiscoveredGroup[] {
@@ -332,7 +376,9 @@ export class DiscoveredGroupRepository {
   }
 
   remove(groupId: Uint8Array): void {
-    this.db.prepare('DELETE FROM discovered_groups WHERE group_id = ?').run(Buffer.from(groupId));
+    this.db
+      .prepare('DELETE FROM discovered_groups WHERE group_id = ?')
+      .run(Buffer.from(groupId));
   }
 }
 
@@ -349,13 +395,25 @@ export class SenderKeyRepository {
       `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index)
        VALUES (?, ?, ?, ?)`,
     );
-    stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex);
+    stmt.run(
+      Buffer.from(groupId),
+      Buffer.from(publicKey),
+      Buffer.from(chainKey),
+      chainIndex,
+    );
   }
 
-  load(groupId: Uint8Array, publicKey: Uint8Array): StoredSenderKey | undefined {
+  load(
+    groupId: Uint8Array,
+    publicKey: Uint8Array,
+  ): StoredSenderKey | undefined {
     return this.db
-      .prepare('SELECT * FROM sender_keys WHERE group_id = ? AND public_key = ?')
-      .get(Buffer.from(groupId), Buffer.from(publicKey)) as StoredSenderKey | undefined;
+      .prepare(
+        'SELECT * FROM sender_keys WHERE group_id = ? AND public_key = ?',
+      )
+      .get(Buffer.from(groupId), Buffer.from(publicKey)) as
+      | StoredSenderKey
+      | undefined;
   }
 
   delete(groupId: Uint8Array, publicKey: Uint8Array): void {
@@ -410,14 +468,21 @@ function serializeRatchetState(state: DoubleRatchetState): string {
   const serialized: SerializedRatchetState = {
     rootKey: toHex(state.rootKey),
     sendChainKey: state.sendChainKey ? toHex(state.sendChainKey) : null,
-    receiveChainKey: state.receiveChainKey ? toHex(state.receiveChainKey) : null,
+    receiveChainKey: state.receiveChainKey
+      ? toHex(state.receiveChainKey)
+      : null,
     sendRatchetPrivate: toHex(state.sendRatchetPrivate),
     sendRatchetPublic: toHex(state.sendRatchetPublic),
-    receiveRatchetPublic: state.receiveRatchetPublic ? toHex(state.receiveRatchetPublic) : null,
+    receiveRatchetPublic: state.receiveRatchetPublic
+      ? toHex(state.receiveRatchetPublic)
+      : null,
     sendMessageNumber: state.sendMessageNumber,
     receiveMessageNumber: state.receiveMessageNumber,
     previousChainLength: state.previousChainLength,
-    skippedKeys: Array.from(state.skippedKeys.entries()).map(([k, v]) => [k, toHex(v)]),
+    skippedKeys: Array.from(state.skippedKeys.entries()).map(([k, v]) => [
+      k,
+      toHex(v),
+    ]),
   };
   return JSON.stringify(serialized);
 }
@@ -430,7 +495,9 @@ function deserializeRatchetState(json: string): DoubleRatchetState {
     receiveChainKey: s.receiveChainKey ? fromHex(s.receiveChainKey) : null,
     sendRatchetPrivate: fromHex(s.sendRatchetPrivate),
     sendRatchetPublic: fromHex(s.sendRatchetPublic),
-    receiveRatchetPublic: s.receiveRatchetPublic ? fromHex(s.receiveRatchetPublic) : null,
+    receiveRatchetPublic: s.receiveRatchetPublic
+      ? fromHex(s.receiveRatchetPublic)
+      : null,
     sendMessageNumber: s.sendMessageNumber,
     receiveMessageNumber: s.receiveMessageNumber,
     previousChainLength: s.previousChainLength,
@@ -451,7 +518,9 @@ export class RatchetStateRepository {
 
   load(peerFingerprint: string): DoubleRatchetState | null {
     const row = this.db
-      .prepare('SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?')
+      .prepare(
+        'SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?',
+      )
       .get(peerFingerprint) as { state_json: string } | undefined;
     if (!row) return null;
     return deserializeRatchetState(row.state_json);
@@ -461,6 +530,35 @@ export class RatchetStateRepository {
     this.db
       .prepare('DELETE FROM dm_ratchet_states WHERE peer_fingerprint = ?')
       .run(peerFingerprint);
+  }
+}
+
+export class ProtocolReplayRepository {
+  constructor(private db: Database.Database) {}
+
+  /** Atomically records a message. False means it was already accepted before. */
+  claim(
+    messageId: Uint8Array,
+    senderFingerprint: string,
+    messageType: number,
+    receivedAt: number = Date.now(),
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO protocol_replay
+       (message_id, sender_fingerprint, message_type, received_at)
+       VALUES (?, ?, ?, ?)`,
+      )
+      .run(Buffer.from(messageId), senderFingerprint, messageType, receivedAt);
+    return result.changes === 1;
+  }
+
+  has(messageId: Uint8Array): boolean {
+    return (
+      this.db
+        .prepare('SELECT 1 FROM protocol_replay WHERE message_id = ?')
+        .get(Buffer.from(messageId)) !== undefined
+    );
   }
 }
 
@@ -499,7 +597,9 @@ export class GroupEpochRepository {
 
   getLatestEpoch(groupId: string): SignedGroupEpoch | null {
     const row = this.db
-      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version DESC LIMIT 1')
+      .prepare(
+        'SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version DESC LIMIT 1',
+      )
       .get(groupId) as StoredGroupEpochRow | undefined;
     if (!row) return null;
     return this.rowToSignedEpoch(row);
@@ -507,7 +607,9 @@ export class GroupEpochRepository {
 
   getEpochChain(groupId: string): SignedGroupEpoch[] {
     const rows = this.db
-      .prepare('SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version ASC')
+      .prepare(
+        'SELECT * FROM group_epochs WHERE group_id = ? ORDER BY version ASC',
+      )
       .all(groupId) as StoredGroupEpochRow[];
     return rows.map((r) => this.rowToSignedEpoch(r));
   }

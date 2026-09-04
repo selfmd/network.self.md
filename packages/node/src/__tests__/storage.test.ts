@@ -50,10 +50,10 @@ describe('AgentDatabase', () => {
     // Running migrate again should be safe
     database.migrate();
     const db = database.getDb();
-    const row = db
-      .prepare('SELECT version FROM schema_version')
-      .get() as { version: number };
-    expect(row.version).toBe(4);
+    const row = db.prepare('SELECT version FROM schema_version').get() as {
+      version: number;
+    };
+    expect(row.version).toBe(5);
   });
 });
 

@@ -8,6 +8,7 @@ export {
   DiscoveredGroupRepository,
   RatchetStateRepository,
   GroupEpochRepository,
+  ProtocolReplayRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,

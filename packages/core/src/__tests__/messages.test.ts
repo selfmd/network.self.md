@@ -22,7 +22,7 @@ describe('messages (CBOR encoding)', () => {
     noisePublicKey: new Uint8Array(32).fill(2),
     signature: new Uint8Array(64).fill(3),
     displayName: 'agent-1',
-    protocolVersion: 1,
+    protocolVersion: 2,
     timestamp: 1700000000000,
   };
 
@@ -41,11 +41,15 @@ describe('messages (CBOR encoding)', () => {
     const msg = decoded as typeof sampleHandshake;
     expect(msg.edPublicKey).toEqual(new Uint8Array(32).fill(1));
     expect(msg.displayName).toBe('agent-1');
-    expect(msg.protocolVersion).toBe(1);
+    expect(msg.protocolVersion).toBe(2);
   });
 
   it('decodeMessage throws on invalid type', () => {
-    const bad = encodeMessage({ ...sampleAck, type: 0xfe as any });
+    const { Encoder } = require('cbor-x');
+    const bad = new Encoder({ useRecords: false }).encode({
+      ...sampleAck,
+      type: 0xfe,
+    });
     expect(() => decodeMessage(bad)).toThrow(/invalid message type/i);
   });
 
@@ -54,7 +58,7 @@ describe('messages (CBOR encoding)', () => {
     const { Encoder } = require('cbor-x');
     const enc = new Encoder({ useRecords: false });
     const bytes = enc.encode({ foo: 'bar' });
-    expect(() => decodeMessage(bytes)).toThrow(/missing type/i);
+    expect(() => decodeMessage(bytes)).toThrow(/type is required/i);
   });
 });
 
@@ -104,6 +108,6 @@ describe('framing', () => {
       messageId: 'x'.repeat(MAX_FRAME_SIZE),
       timestamp: 0,
     };
-    expect(() => frameMessage(bigMsg)).toThrow(/max_frame_size/i);
+    expect(() => frameMessage(bigMsg)).toThrow(/messageId/i);
   });
 });

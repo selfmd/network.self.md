@@ -3,6 +3,7 @@ import { encrypt, decrypt } from '../crypto/aead.js';
 import { advanceChain } from '../crypto/kdf.js';
 import type { SenderKeyDistributionMessage } from './types.js';
 import { MessageType } from './types.js';
+import { signAuthenticatedMessage } from './message-auth.js';
 
 export interface SenderKeyState {
   chainKey: Uint8Array;
@@ -27,7 +28,7 @@ export const SenderKeys = {
 
   encrypt(
     state: SenderKeyState,
-    plaintext: Uint8Array
+    plaintext: Uint8Array,
   ): {
     ciphertext: Uint8Array;
     nonce: Uint8Array;
@@ -51,7 +52,7 @@ export const SenderKeys = {
     record: SenderKeyRecord,
     chainIndex: number,
     nonce: Uint8Array,
-    ciphertext: Uint8Array
+    ciphertext: Uint8Array,
   ): {
     plaintext: Uint8Array;
     nextRecord: SenderKeyRecord;
@@ -74,15 +75,13 @@ export const SenderKeys = {
 
     if (chainIndex < record.chainIndex) {
       throw new Error(
-        `Cannot decrypt: chain index ${chainIndex} already consumed and not in skipped keys`
+        `Cannot decrypt: chain index ${chainIndex} already consumed and not in skipped keys`,
       );
     }
 
     const skip = chainIndex - record.chainIndex;
     if (skip > MAX_SKIP) {
-      throw new Error(
-        `Too many skipped messages: ${skip} > ${MAX_SKIP}`
-      );
+      throw new Error(`Too many skipped messages: ${skip} > ${MAX_SKIP}`);
     }
 
     // Advance chain, caching skipped keys
@@ -112,15 +111,23 @@ export const SenderKeys = {
   createDistribution(
     groupId: Uint8Array,
     state: SenderKeyState,
-    signingPublicKey: Uint8Array
+    signingPublicKey: Uint8Array,
+    senderFingerprint: string,
+    recipientFingerprint: string,
+    signingPrivateKey: Uint8Array,
   ): SenderKeyDistributionMessage {
-    return {
-      type: MessageType.SenderKeyDistribution,
-      groupId,
-      chainKey: state.chainKey,
-      chainIndex: state.chainIndex,
-      signingPublicKey,
-      timestamp: Date.now(),
-    };
+    return signAuthenticatedMessage<SenderKeyDistributionMessage>(
+      {
+        type: MessageType.SenderKeyDistribution,
+        groupId,
+        chainKey: state.chainKey,
+        chainIndex: state.chainIndex,
+        signingPublicKey,
+        senderFingerprint,
+        recipientFingerprint,
+        timestamp: Date.now(),
+      },
+      signingPrivateKey,
+    );
   },
 };

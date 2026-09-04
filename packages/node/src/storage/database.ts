@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync } from 'node:fs';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATIONS: string[] = [
   `
@@ -107,6 +107,19 @@ const MIGRATIONS: string[] = [
   );
 
   UPDATE schema_version SET version = 4;
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS protocol_replay (
+    message_id BLOB PRIMARY KEY,
+    sender_fingerprint TEXT NOT NULL,
+    message_type INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS protocol_replay_received_at
+    ON protocol_replay(received_at);
+
+  UPDATE schema_version SET version = 5;
   `,
 ];
 
