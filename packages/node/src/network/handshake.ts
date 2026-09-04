@@ -5,15 +5,20 @@ import {
 } from '@networkselfmd/core';
 import type { AgentIdentity, IdentityHandshakeMessage, ProtocolMessage } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
+import { SENDER_KEY_CAPABILITY } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 
 const TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000; // ±5 minutes
+const PROTOCOL_VERSION = 2;
+const CAPABILITIES = [SENDER_KEY_CAPABILITY, 'group-epoch-v1'];
 
 export interface HandshakeResult {
   session: PeerSession;
   peerPublicKey: Uint8Array;
   peerFingerprint: string;
   peerDisplayName?: string;
+  peerProtocolVersion: number;
+  peerCapabilities: string[];
   /** Messages that arrived during the handshake but were not handshake messages */
   bufferedMessages?: ProtocolMessage[];
 }
@@ -29,11 +34,7 @@ export async function performHandshake(
   const timestamp = Date.now();
 
   // Build signing payload: noisePublicKey || xPublicKey || timestamp as uint64 BE
-  const payload = new Uint8Array(noisePublicKey.length + identity.xPublicKey.length + 8);
-  payload.set(noisePublicKey, 0);
-  payload.set(identity.xPublicKey, noisePublicKey.length);
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noisePublicKey.length + identity.xPublicKey.length, BigInt(timestamp), false);
+  const payload = buildHandshakePayload(noisePublicKey, identity.xPublicKey, timestamp, PROTOCOL_VERSION, CAPABILITIES);
 
   const signature = sign(payload, identity.edPrivateKey);
 
@@ -43,7 +44,8 @@ export async function performHandshake(
     xPublicKey: identity.xPublicKey,
     noisePublicKey: noisePublicKey,
     signature,
-    protocolVersion: 1,
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: CAPABILITIES,
     timestamp,
     displayName: identity.displayName,
   };
@@ -94,6 +96,8 @@ export async function performHandshake(
           peerFingerprint,
           peerHandshake.displayName,
           peerHandshake.xPublicKey,
+          peerHandshake.protocolVersion,
+          peerHandshake.capabilities,
         );
 
         // Use queueMicrotask to resolve after the current synchronous
@@ -106,6 +110,8 @@ export async function performHandshake(
             peerPublicKey: peerHandshake.edPublicKey,
             peerFingerprint,
             peerDisplayName: peerHandshake.displayName,
+            peerProtocolVersion: peerHandshake.protocolVersion,
+            peerCapabilities: peerHandshake.capabilities ?? [],
             bufferedMessages,
           };
           resolve(result);
@@ -133,6 +139,13 @@ export async function performHandshake(
 function validateHandshake(
   handshake: IdentityHandshakeMessage,
 ): void {
+  if (handshake.protocolVersion !== PROTOCOL_VERSION || !Array.isArray(handshake.capabilities) || handshake.capabilities.length > 16 || new Set(handshake.capabilities).size !== handshake.capabilities.length || !handshake.capabilities.every((capability: unknown) => typeof capability === 'string' && capability.length > 0 && capability.length <= 64)) {
+    throw new Error('Unsupported handshake protocol capabilities');
+  }
+  if (!Number.isSafeInteger(handshake.timestamp) || handshake.timestamp < 0 || (handshake.displayName !== undefined && (typeof handshake.displayName !== 'string' || new TextEncoder().encode(handshake.displayName).length > 128))) throw new Error('Invalid handshake schema');
+  for (const [value, size, label] of [[handshake.edPublicKey, 32, 'Ed25519 key'], [handshake.xPublicKey, 32, 'X25519 key'], [handshake.noisePublicKey, 32, 'Noise key'], [handshake.signature, 64, 'signature']] as const) {
+    if (!(value instanceof Uint8Array) || value.length !== size) throw new Error(`Invalid handshake ${label}`);
+  }
   // Check timestamp
   const now = Date.now();
   const diff = Math.abs(now - handshake.timestamp);
@@ -146,14 +159,24 @@ function validateHandshake(
   // noisePublicKey || xPublicKey || timestamp as uint64 BE
   const noiseKey = handshake.noisePublicKey;
   const xKey = handshake.xPublicKey;
-  const payload = new Uint8Array(noiseKey.length + xKey.length + 8);
-  payload.set(noiseKey, 0);
-  payload.set(xKey, noiseKey.length);
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setBigUint64(noiseKey.length + xKey.length, BigInt(handshake.timestamp), false);
+  const payload = buildHandshakePayload(noiseKey, xKey, handshake.timestamp, handshake.protocolVersion, handshake.capabilities);
 
   const valid = verify(handshake.signature, payload, handshake.edPublicKey);
   if (!valid) {
     throw new Error('Invalid handshake signature');
   }
+}
+
+function buildHandshakePayload(noiseKey: Uint8Array, xKey: Uint8Array, timestamp: number, protocolVersion: number, capabilities: string[]): Uint8Array {
+  const capabilityBytes = new TextEncoder().encode([...capabilities].sort().join('\0'));
+  const payload = new Uint8Array(noiseKey.length + xKey.length + 8 + 2 + 2 + capabilityBytes.length);
+  payload.set(noiseKey, 0);
+  payload.set(xKey, noiseKey.length);
+  const view = new DataView(payload.buffer);
+  let offset = noiseKey.length + xKey.length;
+  view.setBigUint64(offset, BigInt(timestamp), false); offset += 8;
+  view.setUint16(offset, protocolVersion, false); offset += 2;
+  view.setUint16(offset, capabilityBytes.length, false); offset += 2;
+  payload.set(capabilityBytes, offset);
+  return payload;
 }

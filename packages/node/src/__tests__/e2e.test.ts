@@ -86,15 +86,15 @@ describe('Agent E2E', () => {
       const group = await agent1.createGroup('test-e2e');
       const groupIdHex = Buffer.from(group.groupId).toString('hex');
 
-      // Bob joins the same group (using the groupId)
-      await agent2.joinGroup(groupIdHex);
-
       // Wait for peers to discover each other and complete handshake
       await waitForPeers(agent1, agent2, 15000);
 
-      // Alice invites Bob so he's in the epoch (required for sender key distribution)
+      const invitation = waitForMessage(agent2, 'group:invited', 10000);
       const bobPkHex = Buffer.from(agent2.identity.edPublicKey).toString('hex');
       await agent1.inviteToGroup(groupIdHex, bobPkHex);
+      await invitation;
+      expect(agent2.listGroups()).toHaveLength(0);
+      await agent2.joinGroup(groupIdHex);
 
       // Wait for sender key distribution to complete
       await waitForSenderKeys(1000);

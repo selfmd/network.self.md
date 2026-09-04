@@ -7,6 +7,7 @@ import {
   hashEpoch,
   createSignedEpoch,
   verifyEpoch,
+  verifyGenesisEpoch,
   createGenesisEpoch,
   type GroupEpoch,
   type SignedGroupEpoch,
@@ -178,6 +179,19 @@ describe('createGenesisEpoch', () => {
     expect(new Uint8Array(epoch.members[0].publicKey)).toEqual(admin.publicKey);
     expect(new Uint8Array(epoch.createdBy)).toEqual(admin.publicKey);
     expect(epoch.timestamp).toBeGreaterThan(0);
+  });
+
+  it('rejects a signed v0 that is not the exact one-admin trust anchor', () => {
+    const admin = generateKeypair();
+    const member = generateKeypair();
+    const forgedV0: GroupEpoch = {
+      ...createGenesisEpoch('g1', admin.publicKey),
+      members: [
+        { publicKey: admin.publicKey, role: 'admin' },
+        { publicKey: member.publicKey, role: 'member' },
+      ],
+    };
+    expect(verifyGenesisEpoch(createSignedEpoch(forgedV0, admin.privateKey), 'g1', admin.publicKey)).toBe(false);
   });
 });
 

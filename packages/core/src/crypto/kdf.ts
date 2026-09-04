@@ -5,7 +5,7 @@ import { x25519 } from '@noble/curves/ed25519';
 export function deriveKey(
   ikm: Uint8Array,
   salt: string | Uint8Array,
-  info: string,
+  info: string | Uint8Array,
   length: number
 ): Uint8Array {
   return hkdf(sha256, ikm, salt, info, length);

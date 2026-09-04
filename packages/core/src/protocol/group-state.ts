@@ -26,8 +26,10 @@ export interface SignedGroupEpoch {
 }
 
 const ZERO_HASH = new Uint8Array(32);
+const MAX_GROUP_MEMBERS = 1024;
 
 export function serializeEpoch(epoch: GroupEpoch): Uint8Array {
+  assertEpoch(epoch);
   const serializable = {
     version: epoch.version,
     prevHash: epoch.prevHash,
@@ -43,18 +45,31 @@ export function serializeEpoch(epoch: GroupEpoch): Uint8Array {
 }
 
 export function deserializeEpoch(data: Uint8Array): GroupEpoch {
-  const obj = decoder.decode(data);
-  return {
-    version: obj.version,
-    prevHash: new Uint8Array(obj.prevHash),
-    groupId: obj.groupId,
-    members: obj.members.map((m: { publicKey: Uint8Array; role: string }) => ({
-      publicKey: new Uint8Array(m.publicKey),
-      role: m.role as 'admin' | 'member',
+  if (!(data instanceof Uint8Array) || data.length === 0 || data.length > 256 * 1024) {
+    throw new Error('Invalid group epoch encoding');
+  }
+  const obj = decoder.decode(data) as unknown;
+  if (!obj || typeof obj !== 'object') throw new Error('Invalid group epoch');
+  const value = obj as Record<string, unknown>;
+  const keys = Object.keys(value);
+  const expectedKeys = ['version', 'prevHash', 'groupId', 'members', 'timestamp', 'createdBy'];
+  if (keys.length !== expectedKeys.length || keys.some((key) => !expectedKeys.includes(key)) || !Array.isArray(value.members)) throw new Error('Invalid group epoch schema');
+  for (const member of value.members) {
+    if (!member || typeof member !== 'object' || Object.keys(member).length !== 2 || !('publicKey' in member) || !('role' in member)) throw new Error('Invalid group member schema');
+  }
+  const epoch: GroupEpoch = {
+    version: value.version as number,
+    prevHash: value.prevHash as Uint8Array,
+    groupId: value.groupId as string,
+    members: (value.members as Array<{ publicKey: Uint8Array; role: 'admin' | 'member' }>).map((m) => ({
+      publicKey: m.publicKey,
+      role: m.role,
     })),
-    timestamp: obj.timestamp,
-    createdBy: new Uint8Array(obj.createdBy),
+    timestamp: value.timestamp as number,
+    createdBy: value.createdBy as Uint8Array,
   };
+  assertEpoch(epoch);
+  return epoch;
 }
 
 export function hashEpoch(serialized: Uint8Array): Uint8Array {
@@ -75,7 +90,16 @@ export function verifyEpoch(
   signed: SignedGroupEpoch,
   expectedPrevHash: Uint8Array,
 ): boolean {
-  const serialized = serializeEpoch(signed.epoch);
+  try {
+    const serialized = serializeEpoch(signed.epoch);
+
+  if (
+    !(signed.signature instanceof Uint8Array) || signed.signature.length !== 64 ||
+    !(signed.hash instanceof Uint8Array) || signed.hash.length !== 32 ||
+    !bytesEqual(hashEpoch(serialized), signed.hash)
+  ) {
+    return false;
+  }
 
   if (!verify(signed.signature, serialized, signed.epoch.createdBy)) {
     return false;
@@ -92,7 +116,35 @@ export function verifyEpoch(
     return false;
   }
 
-  return true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Verify the exact, pinned trust anchor for a group. */
+export function verifyGenesisEpoch(
+  signed: SignedGroupEpoch,
+  expectedGroupId: string,
+  expectedCreator?: Uint8Array,
+): boolean {
+  try {
+    const { epoch } = signed;
+    if (
+      epoch.version !== 0 ||
+      epoch.groupId !== expectedGroupId ||
+      !bytesEqual(epoch.prevHash, ZERO_HASH) ||
+      epoch.members.length !== 1 ||
+      epoch.members[0].role !== 'admin' ||
+      !bytesEqual(epoch.members[0].publicKey, epoch.createdBy) ||
+      (expectedCreator && !bytesEqual(epoch.createdBy, expectedCreator))
+    ) {
+      return false;
+    }
+    return verifyEpoch(signed, ZERO_HASH);
+  } catch {
+    return false;
+  }
 }
 
 export function createGenesisEpoch(
@@ -115,4 +167,37 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function assertEpoch(epoch: GroupEpoch): void {
+  if (!Number.isSafeInteger(epoch.version) || epoch.version < 0) {
+    throw new Error('Invalid group epoch version');
+  }
+  if (!(epoch.prevHash instanceof Uint8Array) || epoch.prevHash.length !== 32) {
+    throw new Error('Invalid group epoch previous hash');
+  }
+  if (typeof epoch.groupId !== 'string' || epoch.groupId.length === 0 || epoch.groupId.length > 128) {
+    throw new Error('Invalid group epoch group id');
+  }
+  if (!Array.isArray(epoch.members) || epoch.members.length === 0 || epoch.members.length > MAX_GROUP_MEMBERS) {
+    throw new Error('Invalid group epoch members');
+  }
+  const seen = new Set<string>();
+  for (const member of epoch.members) {
+    if (!(member.publicKey instanceof Uint8Array) || member.publicKey.length !== 32) {
+      throw new Error('Invalid group member public key');
+    }
+    if (member.role !== 'admin' && member.role !== 'member') {
+      throw new Error('Invalid group member role');
+    }
+    const key = Array.from(member.publicKey, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    if (seen.has(key)) throw new Error('Duplicate group member');
+    seen.add(key);
+  }
+  if (!Number.isSafeInteger(epoch.timestamp) || epoch.timestamp < 0) {
+    throw new Error('Invalid group epoch timestamp');
+  }
+  if (!(epoch.createdBy instanceof Uint8Array) || epoch.createdBy.length !== 32) {
+    throw new Error('Invalid group epoch creator');
+  }
 }

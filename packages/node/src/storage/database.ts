@@ -123,6 +123,40 @@ const MIGRATIONS: string[] = [
   DROP TABLE identity;
   ALTER TABLE identity_v5 RENAME TO identity;
 
+  ALTER TABLE groups ADD COLUMN creator_public_key BLOB;
+  ALTER TABLE groups ADD COLUMN genesis_hash BLOB;
+
+  ALTER TABLE discovered_groups ADD COLUMN authority_key BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_hash BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_epoch_data BLOB;
+  ALTER TABLE discovered_groups ADD COLUMN genesis_signature BLOB;
+
+  ALTER TABLE sender_keys ADD COLUMN generation_id BLOB;
+  ALTER TABLE sender_keys ADD COLUMN distribution_sequence INTEGER NOT NULL DEFAULT -1;
+  ALTER TABLE sender_keys ADD COLUMN epoch_version INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sender_keys ADD COLUMN epoch_hash BLOB;
+
+  CREATE TABLE IF NOT EXISTS group_invites (
+    invite_id TEXT PRIMARY KEY,
+    group_id BLOB NOT NULL,
+    group_name TEXT NOT NULL,
+    inviter_public_key BLOB NOT NULL,
+    invitee_public_key BLOB NOT NULL,
+    genesis_epoch_data BLOB NOT NULL,
+    genesis_signature BLOB NOT NULL,
+    genesis_hash BLOB NOT NULL,
+    direction TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS group_invites_group_id ON group_invites(group_id);
+
+  CREATE TABLE IF NOT EXISTS network_announce_state (
+    peer_public_key BLOB PRIMARY KEY,
+    last_timestamp INTEGER NOT NULL,
+    window_started INTEGER NOT NULL,
+    message_count INTEGER NOT NULL
+  );
+
   UPDATE schema_version SET version = 5;
   `,
 ];

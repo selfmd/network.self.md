@@ -30,7 +30,16 @@ export {
   MAX_FRAME_SIZE,
 } from './messages.js';
 
-export { signAnnounce, verifyAnnounce } from './announce-signature.js';
+export {
+  signAnnounce,
+  verifyAnnounce,
+  canonicalAnnouncePayload,
+  assertAnnounceShape,
+  verifyAnnouncedGroupAuthority,
+  NETWORK_ANNOUNCE_VERSION,
+  MAX_ANNOUNCE_GROUPS,
+  MAX_ANNOUNCE_AGE_MS,
+} from './announce-signature.js';
 
 export {
   TTYA_AUTH_PROTOCOL,
@@ -64,6 +73,10 @@ export {
   SenderKeys,
   type SenderKeyState,
   type SenderKeyRecord,
+  type SenderKeyDistributionPayload,
+  SENDER_KEY_PROTOCOL_VERSION,
+  SENDER_KEY_CAPABILITY,
+  assertSenderKeyDistributionMessage,
 } from './sender-keys.js';
 
 export { DoubleRatchet, type DoubleRatchetState } from './double-ratchet.js';
@@ -77,5 +90,6 @@ export {
   hashEpoch,
   createSignedEpoch,
   verifyEpoch,
+  verifyGenesisEpoch,
   createGenesisEpoch,
 } from './group-state.js';

@@ -8,6 +8,8 @@ export {
   DiscoveredGroupRepository,
   RatchetStateRepository,
   GroupEpochRepository,
+  GroupInviteRepository,
+  NetworkAnnounceStateRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,
@@ -19,4 +21,5 @@ export type {
   StoredKeyData,
   StoredDiscoveredGroup,
   MessageQueryOptions,
+  StoredGroupInvite,
 } from './repositories.js';

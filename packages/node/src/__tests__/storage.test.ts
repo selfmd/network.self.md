@@ -82,6 +82,30 @@ describe('AgentDatabase', () => {
         display_name TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE groups (
+        group_id BLOB PRIMARY KEY,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        created_at INTEGER NOT NULL,
+        joined_at INTEGER,
+        is_public INTEGER DEFAULT 0,
+        self_md TEXT
+      );
+      CREATE TABLE discovered_groups (
+        group_id BLOB PRIMARY KEY,
+        name TEXT NOT NULL,
+        self_md TEXT,
+        member_count INTEGER DEFAULT 0,
+        announced_by BLOB NOT NULL,
+        last_announced INTEGER NOT NULL
+      );
+      CREATE TABLE sender_keys (
+        group_id BLOB NOT NULL,
+        public_key BLOB NOT NULL,
+        chain_key BLOB NOT NULL,
+        chain_index INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (group_id, public_key)
+      );
       CREATE TABLE schema_version (version INTEGER NOT NULL);
       INSERT INTO schema_version (version) VALUES (4);
     `);
@@ -430,5 +454,17 @@ describe('SenderKeyRepository', () => {
 
     expect(repo.load(gid, new Uint8Array(32).fill(10))).toBeUndefined();
     expect(repo.load(gid, new Uint8Array(32).fill(20))).toBeUndefined();
+  });
+
+  it('durably rejects replayed or rolled-back distributions', () => {
+    const gid = new Uint8Array(32).fill(4);
+    const pk = new Uint8Array(32).fill(5);
+    const generation = new Uint8Array(16).fill(6);
+    const epochHash = new Uint8Array(32).fill(7);
+    expect(repo.storeIfNewer(gid, pk, new Uint8Array(32).fill(1), 10, generation, 8, 3, epochHash)).toBe(true);
+    const reopened = new SenderKeyRepository(database.getDb());
+    expect(reopened.storeIfNewer(gid, pk, new Uint8Array(32).fill(2), 10, generation, 8, 3, epochHash)).toBe(false);
+    expect(reopened.storeIfNewer(gid, pk, new Uint8Array(32).fill(3), 9, generation, 9, 3, epochHash)).toBe(false);
+    expect(new Uint8Array(reopened.load(gid, pk)!.chain_key)).toEqual(new Uint8Array(32).fill(1));
   });
 });
