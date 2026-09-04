@@ -18,3 +18,10 @@ export { MessageRouter } from './network/router.js';
 export { performHandshake } from './network/handshake.js';
 
 export { GroupManager } from './groups/group-manager.js';
+
+export { TTYAManager } from './ttya/ttya-manager.js';
+export type {
+  TTYARequest,
+  TTYAResponse,
+  TTYAVisitor,
+} from './ttya/ttya-manager.js';

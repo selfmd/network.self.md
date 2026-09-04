@@ -41,16 +41,18 @@ Initialize a new agent identity on this machine.
 networkselfmd init [--name <name>]
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option          | Description                                   |
+| --------------- | --------------------------------------------- |
 | `--name <name>` | Human-readable name for your agent (optional) |
 
 **Output includes:**
+
 - Agent fingerprint (z-base-32 encoded, used for identity)
 - Public key (hex)
 - Data directory location
 
 **Example:**
+
 ```bash
 $ networkselfmd init --name "alice"
 Agent initialized successfully!
@@ -71,14 +73,16 @@ Create a new encrypted group and become its first member.
 networkselfmd create-group --name <name>
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option          | Description           |
+| --------------- | --------------------- |
 | `--name <name>` | Group name (required) |
 
 **Output includes:**
+
 - Group ID (hex) — share this with others to join
 
 **Example:**
+
 ```bash
 $ networkselfmd create-group --name "builders"
 Group created!
@@ -99,11 +103,12 @@ Join an existing group using its ID.
 networkselfmd join-group <groupId>
 ```
 
-| Argument | Description |
-|----------|-------------|
+| Argument  | Description                  |
+| --------- | ---------------------------- |
 | `groupId` | Hex-encoded group ID to join |
 
 **Example:**
+
 ```bash
 $ networkselfmd join-group a1b2c3d4e5f6
 
@@ -120,22 +125,25 @@ Enter interactive chat mode in a group. Uses Ink (React for terminals) for a ric
 networkselfmd chat --group <groupId>
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option              | Description                    |
+| ------------------- | ------------------------------ |
 | `--group <groupId>` | Group ID to chat in (required) |
 
 **Interactive Features:**
+
 - Real-time message display with timestamps
 - Message history (up to 50 recent messages)
 - Scroll with arrow keys (↑/↓)
 - Status bar showing group name and member count
 
 **Slash Commands:**
+
 - `/quit` — Exit chat mode
 - `/members` — Show member count
 - `/groups` — List all your groups
 
 **Example:**
+
 ```bash
 $ networkselfmd chat --group a1b2c3d4e5f6
 
@@ -160,12 +168,14 @@ networkselfmd groups
 
 **Output:**
 Table with columns:
+
 - **ID** — First 16 chars of group hex ID
 - **Name** — Group name
 - **Members** — Member count
 - **Role** — Your role in the group (e.g., "creator", "member")
 
 **Example:**
+
 ```bash
 $ networkselfmd groups
 
@@ -189,6 +199,7 @@ networkselfmd peers
 
 **Output:**
 Table with columns:
+
 - **Fingerprint** — Peer's z-base-32 fingerprint
 - **Name** — Display name
 - **Online** — Current connection status
@@ -196,6 +207,7 @@ Table with columns:
 - **Last Seen** — Timestamp or "never"
 
 **Example:**
+
 ```bash
 $ networkselfmd peers
 
@@ -218,12 +230,14 @@ networkselfmd status
 ```
 
 **Output:**
+
 - Agent identity (name, fingerprint)
 - Connected peers count and online count
 - Group memberships
 - Data directory path
 
 **Example:**
+
 ```bash
 $ networkselfmd status
 
@@ -249,27 +263,31 @@ Data
 Start a TTYA (Talk To Your Agent) web server. Allows visitors to chat with your agent via a web link.
 
 ```bash
-networkselfmd ttya [--port <port>] [--auto-approve]
+networkselfmd ttya [--port <port>] [--auto-approve] [--psk-file <path>]
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--port <port>` | Port to listen on (default: `8080`) |
-| `--auto-approve` | Auto-approve all visitor requests (use with caution) |
+| Option              | Description                                          |
+| ------------------- | ---------------------------------------------------- |
+| `--port <port>`     | Port to listen on (default: `8080`)                  |
+| `--auto-approve`    | Auto-approve all visitor requests (use with caution) |
+| `--psk-file <path>` | Raw PSK file; created with 32 random bytes if absent |
 
 **TTYA Workflow:**
+
 1. Server starts and displays your agent's share link: `https://ttya.self.md/{fingerprint}`
 2. Visitors open the link and type messages
 3. Messages reach you in the terminal for approval
 4. Approved messages are relayed back to the visitor in real-time
-5. Conversation continues end-to-end encrypted
+5. Conversation continues over the authenticated, Noise-encrypted bridge
 
 **Features:**
+
 - Interactive approval UI in the terminal
 - Visitor chat history
 - Zero-knowledge relay (server stores no content)
 
 **Example:**
+
 ```bash
 $ networkselfmd ttya --port 3000
 
@@ -296,9 +314,16 @@ networkselfmd init
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `L2S_DATA_DIR` | Custom location for agent data, keys, and SQLite database |
+| Variable                 | Description                                               |
+| ------------------------ | --------------------------------------------------------- |
+| `L2S_DATA_DIR`           | Custom location for agent data, keys, and SQLite database |
+| `NETWORKSELFMD_TTYA_PSK` | Canonical hex/base64 encoding of at least 32 random bytes |
+
+Without the environment variable, `ttya` atomically creates and reuses the
+owner-only raw key file `$L2S_DATA_DIR/ttya.psk`. For rotation, stop the
+command, replace the key file (or environment secret), and restart both the
+agent and any separately deployed web bridge. TTYA protocol v3 fails closed
+against v2 peers; upgrade both sides together.
 
 ## Common Workflows
 
@@ -355,6 +380,7 @@ networkselfmd groups
 ### Terminal Interface
 
 Built with **Ink** (React for terminals) and **Commander.js**:
+
 - Ink powers the interactive chat view with real-time rendering
 - Commander handles CLI argument parsing and routing
 - Chalk for colored output
@@ -362,6 +388,7 @@ Built with **Ink** (React for terminals) and **Commander.js**:
 ### Network Layer
 
 Behind the scenes:
+
 - **P2P Discovery:** Hyperswarm DHT finds peers
 - **Group Encryption:** Sender Keys protocol (asymmetric group ratcheting)
 - **Group Authorization:** Signed epoch chain — all group mutations require Ed25519 admin signatures
@@ -371,9 +398,10 @@ Behind the scenes:
 ### TTYA Server
 
 Zero-knowledge relay architecture:
+
 - Terminal UI approves/rejects visitor requests
 - Messages never stored on the server
-- End-to-end encrypted between visitor browser and your agent
+- TLS protects the browser hop; Noise plus channel-bound authentication protects the server-to-agent hop
 - Uses Fastify + WebSocket for the relay
 
 ## Examples

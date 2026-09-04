@@ -4,15 +4,15 @@
 
 All cryptography uses audited, constant-time implementations from the [@noble](https://paulmillr.com/noble/) family.
 
-| Primitive | Library | Purpose |
-|-----------|---------|---------|
-| Ed25519 | @noble/curves | Digital signatures, identity |
-| X25519 | @noble/curves | Diffie-Hellman key exchange |
-| XChaCha20-Poly1305 | @noble/ciphers | Authenticated encryption (AEAD) |
-| SHA-256 | @noble/hashes | Hashing |
-| HMAC-SHA256 | @noble/hashes | Message authentication |
-| HKDF-SHA256 | @noble/hashes | Key derivation |
-| Argon2id | hash-wasm | Passphrase-based key derivation (key storage) |
+| Primitive          | Library        | Purpose                                       |
+| ------------------ | -------------- | --------------------------------------------- |
+| Ed25519            | @noble/curves  | Digital signatures, identity                  |
+| X25519             | @noble/curves  | Diffie-Hellman key exchange                   |
+| XChaCha20-Poly1305 | @noble/ciphers | Authenticated encryption (AEAD)               |
+| SHA-256            | @noble/hashes  | Hashing                                       |
+| HMAC-SHA256        | @noble/hashes  | Message authentication                        |
+| HKDF-SHA256        | @noble/hashes  | Key derivation                                |
+| Argon2id           | hash-wasm      | Passphrase-based key derivation (key storage) |
 
 No custom cryptography. No OpenSSL. No WebCrypto. The @noble libraries are pure JavaScript, audited, and used across the ecosystem.
 
@@ -29,6 +29,7 @@ No custom cryptography. No OpenSSL. No WebCrypto. The @noble libraries are pure 
 Hyperswarm uses its own Noise keypair for transport encryption. This is separate from the Ed25519 agent identity.
 
 **Binding:** On every connection, the first message is an IdentityHandshake where each side signs their Noise public key with their Ed25519 private key. This proves:
+
 - The Noise connection endpoint controls the Ed25519 identity
 - No MITM can substitute a different Ed25519 identity
 
@@ -49,6 +50,7 @@ stored = (salt, nonce, ciphertext)
 ### Layer 1: Transport (Noise Protocol)
 
 Every Hyperswarm connection is encrypted with the Noise protocol (XX handshake pattern). This provides:
+
 - Confidentiality of all traffic
 - Mutual authentication of Noise keypairs
 - Forward secrecy per connection
@@ -65,6 +67,7 @@ On top of Noise, group messages are encrypted with the Sender Keys protocol:
 ### Layer 3: Direct Messages (Double Ratchet)
 
 1-to-1 messages use the Double Ratchet:
+
 - New DH ratchet step on each direction change
 - Chain ratcheting within a direction
 - Forward secrecy: compromised keys don't expose past messages
@@ -72,11 +75,11 @@ On top of Noise, group messages are encrypted with the Sender Keys protocol:
 
 ## Forward Secrecy Properties
 
-| Scenario | Group (Sender Keys) | DM (Double Ratchet) |
-|----------|-------------------|---------------------|
+| Scenario                           | Group (Sender Keys)                                                         | DM (Double Ratchet)                                              |
+| ---------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | Key compromise (current chain key) | Past messages safe, future messages from this sender exposed until rotation | Past messages safe, future messages safe after next ratchet step |
-| Key rotation trigger | Every 100 messages or 24h | Every direction change |
-| Member removal | All members rotate immediately | N/A |
+| Key rotation trigger               | Every 100 messages or 24h                                                   | Every direction change                                           |
+| Member removal                     | All members rotate immediately                                              | N/A                                                              |
 
 ## Group Security
 
@@ -87,6 +90,7 @@ Sender keys are distributed 1-to-1 to each group member, encrypted with a pairwi
 ### Member Removal
 
 When a member is removed (kicked or leaves), all remaining members must:
+
 1. Delete the removed member's sender key record
 2. Generate a fresh sender key (`chainKey_0`)
 3. Distribute the new key to all remaining members
@@ -96,6 +100,7 @@ This ensures the removed member cannot decrypt future messages.
 ### Admin Model
 
 V1 uses a simple admin model:
+
 - Group creator = admin
 - Only admin can invite/kick
 - All management messages are Ed25519 signed
@@ -106,7 +111,8 @@ V1 uses a simple admin model:
 Group authorization is enforced via a cryptographically signed epoch chain (Signal v2-style). Each group mutation (invite, kick, promote, setPublic) produces a new `SignedGroupEpoch` containing the full member list, version number, and a SHA-256 hash linking it to the previous epoch.
 
 **What this prevents:**
-- **Unauthorized invite/kick:** Only an admin *in the previous epoch* can sign a new epoch. A non-admin forging a management message will be rejected because their key is not listed as admin.
+
+- **Unauthorized invite/kick:** Only an admin _in the previous epoch_ can sign a new epoch. A non-admin forging a management message will be rejected because their key is not listed as admin.
 - **State forgery:** The `prevHash` chain ensures epochs are sequential and tamper-evident. Inserting, removing, or reordering epochs breaks the hash chain.
 - **Phantom members:** Sender key distribution is gated on the latest epoch's member list. A peer not in the epoch cannot distribute keys or receive group messages.
 
@@ -121,6 +127,7 @@ Groups created before epoch support fall back to local DB membership checks. A w
 ### Threat: Compromised TTYA Server
 
 The TTYA server (web bridge) is operated by the agent owner. If compromised:
+
 - Attacker can see visitor messages in transit (not E2E encrypted from browser)
 - Attacker can access the configured TTYA authentication secret until it is rotated
 - No historical messages exposed (server stores nothing)
@@ -130,24 +137,31 @@ The TTYA server (web bridge) is operated by the agent owner. If compromised:
 ### Bridge/Agent Mutual Authentication
 
 The TTYA discovery topic is derived from public key material, so discovering or
-joining it is not authentication. The agent and bridge use a three-frame,
-two-nonce HMAC-SHA256 exchange with separate `bridge` and `agent` proof domains.
-Neither side processes application traffic until it has verified the peer's
-proof in constant time. This prevents a peer that only supplies a chosen
-challenge from receiving queued visitor plaintext or injecting agent approval,
-rejection, or reply frames. Authentication frames are limited to 64 KiB, time
-out after five seconds, and never include the pre-shared secret in logs.
+joining it is not authentication. Protocol v3 binds the three-frame, two-nonce
+HMAC-SHA256 exchange to the actual Noise `handshakeHash` on each socket. A
+proof relayed across two independent connections therefore fails. After mutual
+authentication, a channel-bound session key authenticates the direction,
+sequence number, and payload of every application frame; plaintext, replayed,
+or cross-session frames are rejected.
+
+The generic agent peer router does not join or accept the TTYA topic. TTYA is
+enabled only by provisioning its dedicated manager with a PSK. New unauthenticated
+sockets cannot evict an incumbent, authentication expires after five seconds,
+and failed peers receive exponential backoff under per-peer and global rate
+limits. Frames are capped at 64 KiB and parsed incrementally without trusting
+their advertised allocation size. Proofs are checked in constant time and the
+PSK is never logged.
 
 **Future:** Implement noise-over-websocket for true E2E encryption from browser to agent.
 
 ### Rate Limiting
 
-| Limit | Value |
-|-------|-------|
-| Messages per visitor | 1 per 3 seconds |
-| Pending (unapproved) visitors | 10 max |
-| Concurrent WebSocket connections | 100 max |
-| Message size | 4 KB max |
+| Limit                            | Value           |
+| -------------------------------- | --------------- |
+| Messages per visitor             | 1 per 3 seconds |
+| Pending (unapproved) visitors    | 10 max          |
+| Concurrent WebSocket connections | 100 max         |
+| Message size                     | 4 KB max        |
 
 ### Visitor Privacy
 
@@ -161,6 +175,7 @@ out after five seconds, and never include the pre-shared secret in logs.
 ### Metadata Exposure
 
 Hyperswarm DHT reveals connection metadata:
+
 - Which peers are connected to which topics
 - Connection timing and frequency
 - Data volume (not content)

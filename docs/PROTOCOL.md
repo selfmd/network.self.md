@@ -19,18 +19,18 @@ Maximum frame size: 1 MB (1,048,576 bytes). Frames exceeding this are rejected a
 
 Each CBOR payload is a map with a `type` field (uint8) that determines the message structure.
 
-| Type | Name | Direction | Description |
-|------|------|-----------|-------------|
-| 0x01 | IdentityHandshake | Bidirectional | Exchange Ed25519 identities |
-| 0x02 | GroupSync | Bidirectional | Share group membership |
-| 0x03 | SenderKeyDistribution | Sender → Recipient | Deliver group encryption key |
-| 0x04 | GroupMessage | Sender → Group peers | Encrypted group message |
-| 0x05 | DirectMessage | Sender → Recipient | Encrypted 1-to-1 message |
-| 0x06 | GroupManagement | Varies | Group admin operations |
-| 0x07 | TTYARequest | TTYA Server → Agent | Visitor message for approval |
-| 0x08 | TTYAResponse | Agent → TTYA Server | Approval decision + reply |
-| 0x0a | GroupEpoch | Admin → Group peers | Signed group state snapshot |
-| 0xFF | Ack | Recipient → Sender | Delivery acknowledgment |
+| Type | Name                  | Direction            | Description                  |
+| ---- | --------------------- | -------------------- | ---------------------------- |
+| 0x01 | IdentityHandshake     | Bidirectional        | Exchange Ed25519 identities  |
+| 0x02 | GroupSync             | Bidirectional        | Share group membership       |
+| 0x03 | SenderKeyDistribution | Sender → Recipient   | Deliver group encryption key |
+| 0x04 | GroupMessage          | Sender → Group peers | Encrypted group message      |
+| 0x05 | DirectMessage         | Sender → Recipient   | Encrypted 1-to-1 message     |
+| 0x06 | GroupManagement       | Varies               | Group admin operations       |
+| 0x07 | TTYARequest           | TTYA Server → Agent  | Visitor message for approval |
+| 0x08 | TTYAResponse          | Agent → TTYA Server  | Approval decision + reply    |
+| 0x0a | GroupEpoch            | Admin → Group peers  | Signed group state snapshot  |
+| 0xFF | Ack                   | Recipient → Sender   | Delivery acknowledgment      |
 
 ## Connection Handshake
 
@@ -51,6 +51,7 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
 ```
 
 **Verification:**
+
 1. Verify `ed25519.verify(signature, noisePublicKey, edPublicKey)` is true
 2. Verify `noisePublicKey` matches the Noise key from the Hyperswarm connection
 3. Verify `timestamp` is within ±300,000 ms of local time
@@ -71,6 +72,7 @@ Sent immediately after both sides complete IdentityHandshake.
 ```
 
 **Processing:**
+
 1. Each side compares received hashes against their own group membership
 2. Intersection = shared groups
 3. For each shared group, exchange SenderKeyDistribution if the peer doesn't have our latest chain key
@@ -95,6 +97,7 @@ Encrypted to the specific recipient using pairwise X25519.
 ```
 
 **Key exchange for distribution:**
+
 ```
 sharedSecret = x25519(sender.xPrivateKey, recipient.xPublicKey)
 encryptionKey = hkdf(sha256, sharedSecret, "networkselfmd-skd-v1", "", 32)
@@ -118,6 +121,7 @@ encryptedPayload = xchacha20poly1305(encryptionKey, nonce).encrypt(chainKey || u
 ```
 
 **Encryption:**
+
 ```
 messageKey = hkdf(sha256, chainKey[chainIndex], "networkselfmd-msg-v1", "", 32)
 chainKey[chainIndex + 1] = hkdf(sha256, chainKey[chainIndex], "networkselfmd-chain-v1", "", 32)
@@ -126,6 +130,7 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 ```
 
 **Payload (plaintext before encryption):**
+
 ```typescript
 {
   content: string,               // message text
@@ -136,6 +141,7 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 ```
 
 **Decryption:**
+
 1. Look up sender's SenderKeyRecord for this group
 2. If `chainIndex > record.chainIndex`: advance chain, cache skipped keys (max 256)
 3. Derive messageKey from the correct chainKey position
@@ -170,11 +176,13 @@ signature = ed25519.sign(sha256(groupId || uint32(chainIndex) || nonce || cipher
 | update | Admin only |
 
 **Group ID derivation:**
+
 ```
 groupId = sha256(creator.edPublicKey || uint64(timestamp) || nonce)
 ```
 
 **Topic derivation:**
+
 ```
 topic = hkdf(sha256, groupId, "networkselfmd-topic-v1", "", 32)
 ```
@@ -200,6 +208,7 @@ A signed snapshot of group state, forming a hash chain. Every group mutation (cr
 ```
 
 **Epoch hash:**
+
 ```
 epochHash = sha256(cbor(groupId || version || prevHash || members || timestamp || createdBy))
 ```
@@ -211,6 +220,7 @@ On group creation, the creator produces a genesis epoch with `prevHash = zeros(3
 Each group mutation creates a new epoch: `version = previous.version + 1`, `prevHash = hash(previous)`, updated member list, signed by the admin performing the action.
 
 **Verification rules:**
+
 1. Verify `ed25519.verify(signature, cbor(epochData), createdBy)` is true
 2. Verify `createdBy` is an admin in the previous epoch (or is the creator for genesis)
 3. Verify `prevHash` matches `sha256(cbor(previousEpoch))`
@@ -247,10 +257,12 @@ Uses Double Ratchet for forward secrecy.
 
 **Session initialization:**
 On first connection between two peers (after IdentityHandshake), both derive a shared secret:
+
 ```
 sharedSecret = x25519(myXPrivateKey, peer.xPublicKey)
 rootKey = hkdf(sha256, sharedSecret, "networkselfmd-dm-v1", "", 32)
 ```
+
 The peer with the lexicographically smaller Ed25519 public key initiates the first DH ratchet step.
 
 ## TTYA Protocol
@@ -258,7 +270,9 @@ The peer with the lexicographically smaller Ed25519 public key initiates the fir
 TTYA uses length-prefixed JSON frames on its dedicated Hyperswarm connection.
 Each frame has a 4-byte big-endian payload length and a maximum payload of 64
 KiB. Before either side accepts an application frame, the bridge and agent
-complete this mutual HMAC-SHA256 handshake:
+complete this mutual HMAC-SHA256 handshake. `channelBinding` is the local
+`@hyperswarm/secret-stream` Noise `handshakeHash`; it is never accepted from
+the peer:
 
 ```text
 Agent  -> Bridge: challenge(agentNonce)
@@ -266,8 +280,9 @@ Bridge -> Agent:  response(agentNonce, bridgeNonce, bridgeProof)
 Agent  -> Bridge: confirmation(agentNonce, bridgeNonce, agentProof)
 
 transcript(role) =
-  "networkselfmd-ttya-auth-v2" || 0x00 || role || 0x00 ||
-  hex_decode(agentNonce) || hex_decode(bridgeNonce)
+  "networkselfmd-ttya-auth-v3" || 0x00 || "proof" || 0x00 || role || 0x00 ||
+  hex_decode(agentNonce) || hex_decode(bridgeNonce) ||
+  uint16be(len(channelBinding)) || channelBinding
 
 bridgeProof = HMAC-SHA256(authSecret, transcript("bridge"))
 agentProof  = HMAC-SHA256(authSecret, transcript("agent"))
@@ -279,7 +294,25 @@ handshake must finish within five seconds. The agent accepts no requests before
 verifying `bridgeProof`; the bridge releases no queued or future visitor
 requests, and accepts no approve/reject/reply responses, before verifying
 `agentProof`. Authentication state and partial frames are discarded on every
-disconnect.
+disconnect. Because independent Noise connections have different transcript
+hashes, an attacker cannot relay the challenge and proofs through a second
+socket.
+
+After confirmation, both sides derive a session key with HMAC-SHA256 over the
+same nonces and channel binding under the `session-key` domain. Every
+TTYARequest and TTYAResponse is then wrapped in a `ttya-data` frame containing
+an exact-direction label, a monotonically increasing uint64 sequence, the
+base64 JSON payload, and an HMAC made with that session key. Replays,
+out-of-order frames, unwrapped application messages, and messages copied to a
+different Noise connection close the socket.
+
+The length parser is incremental: split headers and payloads are retained,
+coalesced frames are drained in order, and a zero or greater-than-64-KiB
+advertised length is rejected before allocating the body. Authentication must
+finish in five seconds. An incumbent socket, including one still
+authenticating, is never displaced by a new candidate; failed authentication
+is subject to per-Noise-key exponential backoff plus a global sliding-window
+limit.
 
 ### TTYARequest (0x07)
 
@@ -336,6 +369,7 @@ Every 100 messages or 24 hours (whichever comes first), a sender generates a new
 When a member is kicked or leaves a group, ALL remaining members must rotate their sender keys immediately. This ensures the departed member cannot decrypt future messages (they knew everyone's chain keys up to the point of departure).
 
 **Rotation protocol:**
+
 1. Admin sends `GroupManagement.kick` to all members
 2. Each member generates new `chainKey_0`
 3. Each member sends `SenderKeyDistribution` to all remaining members
@@ -343,14 +377,14 @@ When a member is kicked or leaves a group, ALL remaining members must rotate the
 
 ## Error Handling
 
-| Condition | Action |
-|-----------|--------|
-| Unknown message type | Log warning, ignore message |
-| Failed signature verification | Drop message, log alert |
-| Unknown group | Ignore message (not a member) |
-| Unknown sender in group | Ignore message (not in membership list) |
-| Chain index too far ahead (>256 skip) | Request SenderKeyDistribution re-send |
-| Decryption failure | Log error, request key re-distribution |
-| Frame too large (>1MB) | Drop connection |
-| Handshake timeout (>10s) | Drop connection |
-| Timestamp drift (>5min) | Reject message |
+| Condition                             | Action                                  |
+| ------------------------------------- | --------------------------------------- |
+| Unknown message type                  | Log warning, ignore message             |
+| Failed signature verification         | Drop message, log alert                 |
+| Unknown group                         | Ignore message (not a member)           |
+| Unknown sender in group               | Ignore message (not in membership list) |
+| Chain index too far ahead (>256 skip) | Request SenderKeyDistribution re-send   |
+| Decryption failure                    | Log error, request key re-distribution  |
+| Frame too large (>1MB)                | Drop connection                         |
+| Handshake timeout (>10s)              | Drop connection                         |
+| Timestamp drift (>5min)               | Reject message                          |

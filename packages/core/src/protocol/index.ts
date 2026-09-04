@@ -30,25 +30,33 @@ export {
   MAX_FRAME_SIZE,
 } from './messages.js';
 
-export {
-  signAnnounce,
-  verifyAnnounce,
-} from './announce-signature.js';
+export { signAnnounce, verifyAnnounce } from './announce-signature.js';
 
 export {
   TTYA_AUTH_PROTOCOL,
   TTYA_AUTH_VERSION,
   TTYA_AUTH_NONCE_BYTES,
   TTYA_AUTH_PROOF_BYTES,
+  TTYA_AUTH_SECRET_MIN_BYTES,
+  TTYA_CHANNEL_BINDING_MIN_BYTES,
+  TTYA_CHANNEL_BINDING_MAX_BYTES,
   MAX_TTYA_FRAME_SIZE,
   isTTYAAuthChallengeFrame,
   isTTYAAuthResponseFrame,
   isTTYAAuthConfirmationFrame,
+  isTTYADataFrame,
+  copyAndValidateTTYAAuthSecret,
+  copyAndValidateTTYAChannelBinding,
   buildTTYAAuthProofPayload,
+  buildTTYASessionKeyPayload,
+  buildTTYADataProofPayload,
+  TTYAFrameDecoder,
   type TTYAAuthRole,
+  type TTYADataDirection,
   type TTYAAuthChallengeFrame,
   type TTYAAuthResponseFrame,
   type TTYAAuthConfirmationFrame,
+  type TTYADataFrame,
   type TTYAAuthFrame,
 } from './ttya-auth.js';
 
@@ -58,10 +66,7 @@ export {
   type SenderKeyRecord,
 } from './sender-keys.js';
 
-export {
-  DoubleRatchet,
-  type DoubleRatchetState,
-} from './double-ratchet.js';
+export { DoubleRatchet, type DoubleRatchetState } from './double-ratchet.js';
 
 export {
   type GroupMemberEntry,

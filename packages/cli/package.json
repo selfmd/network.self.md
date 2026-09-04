@@ -13,7 +13,9 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
+    "@networkselfmd/core": "workspace:*",
     "@networkselfmd/node": "workspace:*",
+    "@networkselfmd/web": "workspace:*",
     "ink": "^5.1.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.0",

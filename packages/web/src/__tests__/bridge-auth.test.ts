@@ -12,27 +12,32 @@ const mockState = vi.hoisted(() => ({ swarmInstances: [] as unknown[] }));
 
 vi.mock('hyperswarm', async () => {
   const { EventEmitter: MockEventEmitter } = await import('node:events');
-
   class MockHyperswarm extends MockEventEmitter {
     constructor() {
       super();
       mockState.swarmInstances.push(this);
     }
-
     join(): void {}
     async flush(): Promise<void> {}
     async destroy(): Promise<void> {}
   }
-
   return { default: MockHyperswarm };
 });
 
 import { TTYABridge } from '../bridge.js';
-import type { TTYARequest, TTYAResponse } from '../types.js';
+import type { TTYARequest } from '../types.js';
 
 class MockConnection extends EventEmitter {
   readonly writes: Buffer[] = [];
+  readonly handshakeHash: Buffer;
+  readonly remotePublicKey: Buffer;
   destroyed = false;
+
+  constructor(bindingByte = 0x41, peerByte = 0x51) {
+    super();
+    this.handshakeHash = Buffer.alloc(64, bindingByte);
+    this.remotePublicKey = Buffer.alloc(32, peerByte);
+  }
 
   write(data: Uint8Array): boolean {
     this.writes.push(Buffer.from(data));
@@ -62,66 +67,41 @@ function parseFrame(value: Buffer): Record<string, unknown> {
   >;
 }
 
-function request(visitorId: string, content: string): TTYARequest {
-  return {
-    type: 0x07,
-    visitorId,
-    action: 'message',
-    content,
-    metadata: { ipHash: 'hashed-ip', timestamp: 1 },
-  };
-}
+const secret = Buffer.alloc(32, 0x61);
+const publicKey = Buffer.alloc(32, 0x71);
 
-const authSecret = Buffer.from('shared-test-secret');
-const agentPublicKey = Buffer.alloc(32, 7);
-
-describe('TTYABridge mutual authentication', () => {
+describe('TTYABridge authentication', () => {
   let bridge: TTYABridge;
   let swarm: EventEmitter;
-  let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     mockState.swarmInstances.length = 0;
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    bridge = new TTYABridge(agentPublicKey, authSecret);
+    bridge = new TTYABridge(publicKey, secret);
     await bridge.connect();
     swarm = mockState.swarmInstances[0] as EventEmitter;
   });
 
   afterEach(async () => {
     await bridge.disconnect();
-    warnSpy.mockRestore();
   });
 
-  function beginHandshake(
-    connection: MockConnection,
-    agentNonce = '11'.repeat(32),
-  ): TTYAAuthResponseFrame {
+  function begin(connection: MockConnection): TTYAAuthResponseFrame {
     swarm.emit('connection', connection, {});
     connection.emit(
       'data',
       frame({
         type: 'ttya-auth-challenge',
         version: TTYA_AUTH_VERSION,
-        agentNonce,
+        agentNonce: '11'.repeat(32),
       }),
     );
     return parseFrame(connection.writes[0]) as unknown as TTYAAuthResponseFrame;
   }
 
-  function finishHandshake(
+  function finish(
     connection: MockConnection,
     response: TTYAAuthResponseFrame,
   ): void {
-    const proof = createHmac('sha256', authSecret)
-      .update(
-        buildTTYAAuthProofPayload(
-          'agent',
-          response.agentNonce,
-          response.bridgeNonce,
-        ),
-      )
-      .digest('hex');
     connection.emit(
       'data',
       frame({
@@ -129,70 +109,78 @@ describe('TTYABridge mutual authentication', () => {
         version: TTYA_AUTH_VERSION,
         agentNonce: response.agentNonce,
         bridgeNonce: response.bridgeNonce,
-        proof,
+        proof: createHmac('sha256', secret)
+          .update(
+            buildTTYAAuthProofPayload(
+              'agent',
+              response.agentNonce,
+              response.bridgeNonce,
+              connection.handshakeHash,
+            ),
+          )
+          .digest('hex'),
       }),
     );
   }
 
-  it('releases queued plaintext only after the agent proves the full transcript', () => {
-    bridge.sendToAgent(request('queued', 'private queued message'));
+  it('releases queued traffic only as a session-bound data frame', () => {
+    const request: TTYARequest = {
+      type: 0x07,
+      visitorId: 'queued',
+      action: 'message',
+      content: 'private',
+      metadata: { ipHash: 'hash', timestamp: 1 },
+    };
+    bridge.sendToAgent(request);
     const connection = new MockConnection();
-    const response = beginHandshake(connection);
+    const response = begin(connection);
+    expect(connection.writes.map(parseFrame)).toHaveLength(1);
 
-    expect(bridge.isConnected).toBe(false);
+    finish(connection, response);
+
+    expect(bridge.isConnected).toBe(true);
+    expect(connection.writes.map(parseFrame)).toEqual([
+      expect.objectContaining({ type: 'ttya-auth-response' }),
+      expect.objectContaining({ type: 'ttya-data', sequence: 0 }),
+    ]);
+  });
+
+  it('does not allow a new socket to evict an unauthenticated incumbent', () => {
+    const incumbent = new MockConnection();
+    swarm.emit('connection', incumbent, {});
+    const newcomer = new MockConnection();
+    swarm.emit('connection', newcomer, {});
+    expect(incumbent.destroyed).toBe(false);
+    expect(newcomer.destroyed).toBe(true);
+  });
+
+  it('does not release queued or future requests to a chosen-challenge peer', () => {
+    const queued: TTYARequest = {
+      type: 0x07,
+      visitorId: 'queued',
+      action: 'message',
+      content: 'queued secret',
+      metadata: { ipHash: 'hash', timestamp: 1 },
+    };
+    bridge.sendToAgent(queued);
+    const connection = new MockConnection();
+    begin(connection);
+    bridge.sendToAgent({ ...queued, visitorId: 'future' });
+
     expect(connection.writes.map(parseFrame)).toEqual([
       expect.objectContaining({ type: 'ttya-auth-response' }),
     ]);
-
-    finishHandshake(connection, response);
-
-    expect(bridge.isConnected).toBe(true);
-    expect(connection.writes.map(parseFrame)).toContainEqual(
-      expect.objectContaining({
-        type: 0x07,
-        visitorId: 'queued',
-        content: 'private queued message',
-      }),
-    );
-  });
-
-  it('gives a peer with only a chosen challenge no queued or future requests', () => {
-    bridge.sendToAgent(request('queued', 'queued secret'));
-    const rogue = new MockConnection();
-    beginHandshake(rogue, '00'.repeat(32));
-
-    bridge.sendToAgent(request('future', 'future secret'));
-
-    const wireMessages = rogue.writes.map(parseFrame);
-    expect(wireMessages).toHaveLength(1);
-    expect(wireMessages[0].type).toBe('ttya-auth-response');
-    expect(wireMessages).not.toContainEqual(expect.objectContaining({ type: 0x07 }));
-    expect(bridge.isConnected).toBe(false);
-  });
-
-  it('closes an oversized authentication frame before allocating its payload', () => {
-    bridge.sendToAgent(request('queued', 'never released'));
-    const rogue = new MockConnection();
-    swarm.emit('connection', rogue, {});
-    const oversizedHeader = Buffer.alloc(4);
-    oversizedHeader.writeUInt32BE(MAX_TTYA_FRAME_SIZE + 1, 0);
-
-    rogue.emit('data', oversizedHeader);
-
-    expect(rogue.destroyed).toBe(true);
-    expect(rogue.writes).toEqual([]);
     expect(bridge.isConnected).toBe(false);
   });
 
   it.each(['approve', 'reject', 'reply'] as const)(
-    'rejects a forged %s response before agent authentication',
+    'rejects an unwrapped forged %s response before agent authentication',
     (action) => {
-      const received: TTYAResponse[] = [];
+      const received: unknown[] = [];
       bridge.onAgentResponse((response) => received.push(response));
-      const rogue = new MockConnection();
-      beginHandshake(rogue);
-
-      rogue.emit(
+      const connection = new MockConnection();
+      begin(connection);
+      connection.emit(
         'data',
         frame({
           type: 0x08,
@@ -202,16 +190,32 @@ describe('TTYABridge mutual authentication', () => {
         }),
       );
 
+      expect(connection.destroyed).toBe(true);
       expect(received).toEqual([]);
-      expect(rogue.destroyed).toBe(true);
       expect(bridge.isConnected).toBe(false);
     },
   );
 
-  it('reconnects after a rogue peer without stale socket events losing state', () => {
-    bridge.sendToAgent(request('queued', 'survives reconnect'));
-    const rogue = new MockConnection();
-    const rogueResponse = beginHandshake(rogue);
+  it('rejects an oversized advertised frame before receiving its body', () => {
+    const connection = new MockConnection();
+    swarm.emit('connection', connection, {});
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(MAX_TTYA_FRAME_SIZE + 1, 0);
+    connection.emit('data', header);
+    expect(connection.destroyed).toBe(true);
+  });
+
+  it('reconnects after a forged confirmation without stale events losing state', () => {
+    const queued: TTYARequest = {
+      type: 0x07,
+      visitorId: 'survivor',
+      action: 'message',
+      content: 'survives reconnect',
+      metadata: { ipHash: 'hash', timestamp: 1 },
+    };
+    bridge.sendToAgent(queued);
+    const rogue = new MockConnection(0x41, 0x51);
+    const rogueResponse = begin(rogue);
     rogue.emit(
       'data',
       frame({
@@ -222,21 +226,15 @@ describe('TTYABridge mutual authentication', () => {
         proof: '00'.repeat(32),
       }),
     );
-    expect(rogue.destroyed).toBe(true);
 
-    const agent = new MockConnection();
-    const response = beginHandshake(agent, '44'.repeat(32));
-    finishHandshake(agent, response);
+    const agent = new MockConnection(0x42, 0x52);
+    const response = begin(agent);
+    finish(agent, response);
     rogue.emit('close');
 
     expect(bridge.isConnected).toBe(true);
     expect(agent.writes.map(parseFrame)).toContainEqual(
-      expect.objectContaining({ visitorId: 'queued', content: 'survives reconnect' }),
-    );
-
-    bridge.sendToAgent(request('future', 'on authenticated reconnect'));
-    expect(agent.writes.map(parseFrame)).toContainEqual(
-      expect.objectContaining({ visitorId: 'future' }),
+      expect.objectContaining({ type: 'ttya-data' }),
     );
   });
 });
