@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { argon2id } from 'hash-wasm';
 import {
   generateIdentity,
+  deriveEd25519PublicKey,
   deriveX25519KeyPair,
   fingerprintFromPublicKey,
   encrypt,
@@ -44,12 +45,34 @@ import { SwarmManager } from './network/swarm.js';
 import type { PeerSession } from './network/connection.js';
 import type { HandshakeResult } from './network/handshake.js';
 import { GroupManager } from './groups/group-manager.js';
+import type { SecretProvider } from './secrets.js';
 
 export interface AgentOptions {
   dataDir: string;
   passphrase?: string;
+  secretProvider?: SecretProvider;
   displayName?: string;
   bootstrap?: Array<{ host: string; port: number }>;
+}
+
+export type IdentityKeyStorageErrorCode =
+  | 'PASSPHRASE_REQUIRED'
+  | 'INVALID_PASSPHRASE'
+  | 'SECRET_PROVIDER_FAILED'
+  | 'UNLOCK_FAILED'
+  | 'KEY_STORAGE_ORPHANED'
+  | 'PLAINTEXT_ERASURE_FAILED'
+  | 'KEY_STORAGE_CORRUPT';
+
+export class IdentityKeyStorageError extends Error {
+  constructor(
+    message: string,
+    readonly code: IdentityKeyStorageErrorCode,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'IdentityKeyStorageError';
+  }
 }
 
 export interface MemberInfo {
@@ -102,6 +125,8 @@ export class Agent extends EventEmitter {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
+    const passphrase = await this.resolvePassphrase();
+
     // Init database
     this.database = new AgentDatabase(this.options.dataDir);
     this.database.migrate();
@@ -116,8 +141,14 @@ export class Agent extends EventEmitter {
     this.ratchetStateRepo = new RatchetStateRepository(db);
     this.groupEpochRepo = new GroupEpochRepository(db);
 
-    // Load or generate identity
-    await this.loadOrGenerateIdentity();
+    // Load or generate identity. Close the database on an unlock failure so a
+    // caller can correct the passphrase and retry with a fresh Agent instance.
+    try {
+      await this.loadOrGenerateIdentity(passphrase);
+    } catch (error) {
+      this.database.close();
+      throw error;
+    }
 
     // Init swarm
     this.swarm = new SwarmManager({
@@ -451,54 +482,234 @@ export class Agent extends EventEmitter {
     }
   }
 
-  private async loadOrGenerateIdentity(): Promise<void> {
-    const stored = this.identityRepo.load();
+  private async loadOrGenerateIdentity(passphrase: string | undefined): Promise<void> {
+    // A losing concurrent starter re-reads the winner rather than continuing
+    // from stale plaintext or replacing its encrypted key material.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const stored = this.identityRepo.load();
+      const keyData = this.identityRepo.loadEncryptedKeys();
 
-    if (stored) {
-      let edPrivateKey: Uint8Array = new Uint8Array(stored.ed_private_key);
-      const edPublicKey: Uint8Array = new Uint8Array(stored.ed_public_key);
-
-      // If passphrase-protected, decrypt
-      if (this.options.passphrase) {
-        const keyData = this.identityRepo.loadEncryptedKeys();
-        if (keyData) {
-          const wrappingKey = await deriveWrappingKey(
-            this.options.passphrase,
-            new Uint8Array(keyData.salt),
-          );
-          edPrivateKey = decrypt(
-            wrappingKey,
-            new Uint8Array(keyData.nonce),
-            new Uint8Array(keyData.ciphertext),
+      if (!stored && keyData) {
+        if (!passphrase) {
+          throw new IdentityKeyStorageError(
+            'Encrypted key storage exists without its identity row; a passphrase is required to recover it',
+            'KEY_STORAGE_ORPHANED',
           );
         }
+        const privateKey = await this.unlockEncryptedKey(keyData, passphrase);
+        const publicKey = deriveEd25519PublicKey(privateKey);
+        if (!this.identityRepo.recoverOrphanedIdentity(keyData, publicKey)) continue;
+        await this.ensurePlaintextErased(privateKey);
+        this.setIdentity(privateKey, publicKey, this.options.displayName);
+        return;
       }
 
-      // Derive X25519 keys from Ed25519 keys using proper curve conversion
-      const { xPrivateKey, xPublicKey } = deriveX25519KeyPair(edPrivateKey);
-
-      this.identity = {
-        edPublicKey,
-        edPrivateKey,
-        xPrivateKey,
-        xPublicKey,
-        fingerprint: fingerprintFromPublicKey(edPublicKey),
-        displayName: stored.display_name ?? this.options.displayName,
-      };
-    } else {
-      const identity = generateIdentity(this.options.displayName);
-
-      this.identity = identity;
-
-      this.identityRepo.save(identity.edPrivateKey, identity.edPublicKey, this.options.displayName);
-
-      // Encrypt at rest if passphrase given
-      if (this.options.passphrase) {
-        const salt = crypto.getRandomValues(new Uint8Array(32));
-        const wrappingKey = await deriveWrappingKey(this.options.passphrase, salt);
-        const { ciphertext, nonce } = encrypt(wrappingKey, identity.edPrivateKey);
-        this.identityRepo.saveEncryptedKeys(salt, nonce, ciphertext);
+      if (!stored) {
+        const identity = generateIdentity(this.options.displayName);
+        const created = passphrase
+          ? await this.createProtectedIdentity(identity, passphrase)
+          : this.identityRepo.createPlaintext(
+              identity.edPrivateKey,
+              identity.edPublicKey,
+              this.options.displayName,
+            );
+        if (!created) continue;
+        this.identity = identity;
+        this.database.enforcePermissions();
+        return;
       }
+
+      const publicKey = new Uint8Array(stored.ed_public_key);
+      if (publicKey.length !== 32) {
+        this.corrupt('Stored identity public key has an invalid length');
+      }
+
+      if (keyData) {
+        if (!passphrase) {
+          throw new IdentityKeyStorageError(
+            'Identity is passphrase-protected; a passphrase is required',
+            'PASSPHRASE_REQUIRED',
+          );
+        }
+        const privateKey = await this.unlockEncryptedKey(keyData, passphrase);
+        this.assertPrivateKeyMatchesPublicKey(privateKey, publicKey);
+
+        if (stored.ed_private_key !== null) {
+          const plaintext = new Uint8Array(stored.ed_private_key);
+          if (!buffersEqual(plaintext, privateKey)) {
+            this.corrupt('Plaintext and encrypted identity keys do not match');
+          }
+          if (!this.identityRepo.removePlaintextPrivateKey(plaintext, publicKey)) continue;
+          await this.ensurePlaintextErased(privateKey, true);
+        } else {
+          // Recovers a prior startup that committed the migration but could not
+          // truncate a busy WAL before failing closed.
+          await this.ensurePlaintextErased(privateKey);
+        }
+        this.setIdentity(privateKey, publicKey, stored.display_name ?? this.options.displayName);
+        return;
+      }
+
+      if (stored.ed_private_key === null) {
+        this.corrupt('Identity key storage is incomplete');
+      }
+      const privateKey = new Uint8Array(stored.ed_private_key);
+      this.assertPrivateKeyMatchesPublicKey(privateKey, publicKey);
+
+      if (!passphrase) {
+        this.setIdentity(privateKey, publicKey, stored.display_name ?? this.options.displayName);
+        return;
+      }
+
+      const salt = crypto.getRandomValues(new Uint8Array(32));
+      const wrappingKey = await deriveWrappingKey(passphrase, salt);
+      const { ciphertext, nonce } = encrypt(wrappingKey, privateKey);
+      const result = this.identityRepo.migrateToEncrypted(
+        privateKey,
+        publicKey,
+        salt,
+        nonce,
+        ciphertext,
+      );
+      if (result !== 'migrated') continue;
+      await this.ensurePlaintextErased(privateKey, true);
+      this.setIdentity(privateKey, publicKey, stored.display_name ?? this.options.displayName);
+      return;
+    }
+
+    throw new IdentityKeyStorageError(
+      'Identity changed repeatedly during startup',
+      'KEY_STORAGE_CORRUPT',
+    );
+  }
+
+  private async resolvePassphrase(): Promise<string | undefined> {
+    if (this.options.passphrase !== undefined && this.options.secretProvider) {
+      throw new IdentityKeyStorageError(
+        'Configure either passphrase or secretProvider, not both',
+        'INVALID_PASSPHRASE',
+      );
+    }
+    let passphrase = this.options.passphrase;
+    if (this.options.secretProvider) {
+      try {
+        passphrase = await this.options.secretProvider();
+      } catch (cause) {
+        throw new IdentityKeyStorageError(
+          'Unable to read the identity passphrase from the configured secret provider',
+          'SECRET_PROVIDER_FAILED',
+          { cause },
+        );
+      }
+    }
+    if (passphrase === undefined) return undefined;
+    if (passphrase.length < 12 || new Set(passphrase).size < 4) {
+      throw new IdentityKeyStorageError(
+        'Passphrase must be at least 12 characters and contain at least 4 distinct characters',
+        'INVALID_PASSPHRASE',
+      );
+    }
+    return passphrase;
+  }
+
+  private async createProtectedIdentity(
+    identity: AgentIdentity,
+    passphrase: string,
+  ): Promise<boolean> {
+    const salt = crypto.getRandomValues(new Uint8Array(32));
+    const wrappingKey = await deriveWrappingKey(passphrase, salt);
+    const { ciphertext, nonce } = encrypt(wrappingKey, identity.edPrivateKey);
+    return this.identityRepo.createEncrypted(
+      identity.edPublicKey,
+      this.options.displayName,
+      salt,
+      nonce,
+      ciphertext,
+    );
+  }
+
+  private async unlockEncryptedKey(
+    keyData: { salt: Buffer; nonce: Buffer; ciphertext: Buffer },
+    passphrase: string,
+  ): Promise<Uint8Array> {
+    if (
+      keyData.salt.length !== 32 ||
+      keyData.nonce.length !== 24 ||
+      keyData.ciphertext.length !== 48
+    ) {
+      this.corrupt('Encrypted identity key data has invalid lengths');
+    }
+    try {
+      const wrappingKey = await deriveWrappingKey(passphrase, new Uint8Array(keyData.salt));
+      const privateKey = decrypt(
+        wrappingKey,
+        new Uint8Array(keyData.nonce),
+        new Uint8Array(keyData.ciphertext),
+      );
+      if (privateKey.length !== 32) {
+        this.corrupt('Decrypted identity key has an invalid length');
+      }
+      return privateKey;
+    } catch (cause) {
+      if (cause instanceof IdentityKeyStorageError) throw cause;
+      throw new IdentityKeyStorageError(
+        'Unable to unlock identity; the passphrase is incorrect or encrypted key data is corrupt',
+        'UNLOCK_FAILED',
+        { cause },
+      );
+    }
+  }
+
+  private async ensurePlaintextErased(
+    privateKey: Uint8Array,
+    forceCheckpoint = false,
+  ): Promise<void> {
+    try {
+      await this.database.erasePlaintextSnapshots(privateKey, forceCheckpoint);
+    } catch (cause) {
+      throw new IdentityKeyStorageError(
+        'Encrypted identity was saved, but a plaintext database snapshot could not be destroyed',
+        'PLAINTEXT_ERASURE_FAILED',
+        { cause },
+      );
+    }
+  }
+
+  private setIdentity(
+    privateKey: Uint8Array,
+    publicKey: Uint8Array,
+    displayName?: string,
+  ): void {
+    const { xPrivateKey, xPublicKey } = deriveX25519KeyPair(privateKey);
+    this.identity = {
+      edPublicKey: publicKey,
+      edPrivateKey: privateKey,
+      xPrivateKey,
+      xPublicKey,
+      fingerprint: fingerprintFromPublicKey(publicKey),
+      displayName,
+    };
+  }
+
+  private corrupt(message: string): never {
+    throw new IdentityKeyStorageError(message, 'KEY_STORAGE_CORRUPT');
+  }
+
+  private assertPrivateKeyMatchesPublicKey(
+    privateKey: Uint8Array,
+    publicKey: Uint8Array,
+  ): void {
+    try {
+      const probe = new TextEncoder().encode('networkselfmd-identity-key-check-v1');
+      if (privateKey.length !== 32 || !verify(sign(probe, privateKey), probe, publicKey)) {
+        throw new Error('Key pair mismatch');
+      }
+    } catch (cause) {
+      throw new IdentityKeyStorageError(
+        'Identity private key does not match the stored public key',
+        'KEY_STORAGE_CORRUPT',
+        { cause },
+      );
     }
   }
 

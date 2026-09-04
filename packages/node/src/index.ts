@@ -1,5 +1,12 @@
-export { Agent } from './agent.js';
-export type { AgentOptions, MemberInfo, Message } from './agent.js';
+export { Agent, IdentityKeyStorageError } from './agent.js';
+export type {
+  AgentOptions,
+  IdentityKeyStorageErrorCode,
+  MemberInfo,
+  Message,
+} from './agent.js';
+export { secretFileProvider } from './secrets.js';
+export type { SecretProvider } from './secrets.js';
 
 export { AgentDatabase } from './storage/database.js';
 export {

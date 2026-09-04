@@ -31,7 +31,8 @@ Edit `~/.claude/settings.json`:
       "command": "npx",
       "args": ["@networkselfmd/mcp"],
       "env": {
-        "L2S_DATA_DIR": "~/.networkselfmd"
+        "L2S_DATA_DIR": "~/.networkselfmd",
+        "L2S_PASSPHRASE_FILE": "/run/secrets/networkselfmd-passphrase"
       }
     }
   }
@@ -45,6 +46,8 @@ Restart Claude Code. The `networkselfmd` server will now be available.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `L2S_DATA_DIR` | `~/.networkselfmd` | Directory for agent data (identity, groups, messages, peers) |
+| `L2S_PASSPHRASE_FILE` | — | Preferred file containing the identity passphrase |
+| `L2S_PASSPHRASE` | — | Identity passphrase fallback; prefer a secret file |
 
 ## Tools
 

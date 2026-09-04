@@ -1,16 +1,16 @@
-import os from 'node:os';
-import path from 'node:path';
 import { render } from 'ink';
 import React from 'react';
 import { Agent } from '@networkselfmd/node';
 import { TTYAView } from '../components/TTYAView.js';
+import type { AgentOptions } from '@networkselfmd/node';
+import { getDataDir } from '../agent-options.js';
 
-function getDataDir(): string {
-  return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
-}
-
-export async function startTTYA(port: number, autoApprove: boolean): Promise<void> {
-  const agent = new Agent({ dataDir: getDataDir() });
+export async function startTTYA(
+  port: number,
+  autoApprove: boolean,
+  secrets: Pick<AgentOptions, 'passphrase' | 'secretProvider'> = {},
+): Promise<void> {
+  const agent = new Agent({ dataDir: getDataDir(), ...secrets });
   await agent.start();
 
   const { waitUntilExit } = render(

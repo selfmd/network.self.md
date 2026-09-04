@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import {
   AgentDatabase,
   IdentityRepository,
@@ -26,6 +27,20 @@ afterEach(() => {
 });
 
 describe('AgentDatabase', () => {
+  it.skipIf(process.platform === 'win32')('should enforce private permissions on the directory and SQLite files', () => {
+    chmodSync(dataDir, 0o777);
+    database.migrate();
+    database.getDb().prepare('INSERT INTO peers (public_key, fingerprint) VALUES (?, ?)')
+      .run(Buffer.alloc(32), 'permissions-test');
+    database.enforcePermissions();
+
+    expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+    for (const suffix of ['', '-wal', '-shm']) {
+      const path = join(dataDir, `agent.db${suffix}`);
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
+  });
   it('should create database and run migrations', () => {
     const db = database.getDb();
     const tables = db
@@ -53,7 +68,48 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(4);
+    expect(row.version).toBe(5);
+  });
+
+  it('should migrate a populated v4 identity to the nullable encrypted-only schema', () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'nsmd-v4-test-'));
+    const legacyDb = new Database(join(legacyDir, 'agent.db'));
+    legacyDb.exec(`
+      CREATE TABLE identity (
+        id INTEGER PRIMARY KEY,
+        ed_private_key BLOB NOT NULL,
+        ed_public_key BLOB NOT NULL,
+        display_name TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      INSERT INTO schema_version (version) VALUES (4);
+    `);
+    legacyDb.prepare(
+      `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+       VALUES (1, ?, ?, 'LegacyAgent', 1234)`,
+    ).run(Buffer.alloc(32, 1), Buffer.alloc(32, 2));
+    legacyDb.close();
+
+    const migrated = new AgentDatabase(legacyDir);
+    migrated.migrate();
+    const migratedDb = migrated.getDb();
+    const row = migratedDb.prepare('SELECT * FROM identity WHERE id = 1').get() as {
+      ed_private_key: Buffer;
+      display_name: string;
+    };
+    const privateKeyColumn = migratedDb
+      .prepare(`PRAGMA table_info('identity')`)
+      .all()
+      .find((column) => (column as { name: string }).name === 'ed_private_key') as {
+      notnull: number;
+    };
+
+    expect(row.ed_private_key).toEqual(Buffer.alloc(32, 1));
+    expect(row.display_name).toBe('LegacyAgent');
+    expect(privateKeyColumn.notnull).toBe(0);
+    migrated.close();
+    rmSync(legacyDir, { recursive: true, force: true });
   });
 });
 
@@ -69,7 +125,63 @@ describe('IdentityRepository', () => {
     expect(loaded).toBeDefined();
     expect(loaded!.display_name).toBe('TestAgent');
     expect(new Uint8Array(loaded!.ed_public_key)).toEqual(publicKey);
-    expect(new Uint8Array(loaded!.ed_private_key)).toEqual(privateKey);
+    expect(new Uint8Array(loaded!.ed_private_key!)).toEqual(privateKey);
+  });
+
+  it('should atomically store an encrypted-only identity', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const publicKey = new Uint8Array(32).fill(2);
+    const salt = new Uint8Array(32).fill(3);
+    const nonce = new Uint8Array(24).fill(4);
+    const ciphertext = new Uint8Array(48).fill(5);
+
+    repo.saveEncrypted(publicKey, 'EncryptedAgent', salt, nonce, ciphertext);
+
+    const identity = repo.load();
+    const encrypted = repo.loadEncryptedKeys();
+    expect(identity!.ed_private_key).toBeNull();
+    expect(new Uint8Array(identity!.ed_public_key)).toEqual(publicKey);
+    expect(new Uint8Array(encrypted!.ciphertext)).toEqual(ciphertext);
+  });
+
+  it('should write ciphertext before clearing a migrated plaintext key', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const privateKey = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    const salt = new Uint8Array(32).fill(3);
+    const nonce = new Uint8Array(24).fill(4);
+    const ciphertext = new Uint8Array(48).fill(5);
+    repo.save(privateKey, publicKey, 'MigratedAgent');
+
+    repo.migrateToEncrypted(salt, nonce, ciphertext);
+
+    expect(repo.load()!.ed_private_key).toBeNull();
+    expect(new Uint8Array(repo.loadEncryptedKeys()!.ciphertext)).toEqual(ciphertext);
+  });
+
+  it('should retain the plaintext key if encrypted storage cannot be written', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const privateKey = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    repo.save(privateKey, publicKey, 'RollbackAgent');
+    database.getDb().exec(`
+      CREATE TRIGGER reject_encrypted_key
+      BEFORE INSERT ON key_storage
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated encrypted storage failure');
+      END;
+    `);
+
+    expect(() =>
+      repo.migrateToEncrypted(
+        new Uint8Array(32).fill(3),
+        new Uint8Array(24).fill(4),
+        new Uint8Array(48).fill(5),
+      ),
+    ).toThrow('simulated encrypted storage failure');
+
+    expect(new Uint8Array(repo.load()!.ed_private_key!)).toEqual(privateKey);
+    expect(repo.loadEncryptedKeys()).toBeUndefined();
   });
 
   it('should save and load encrypted keys', () => {

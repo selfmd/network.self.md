@@ -33,6 +33,8 @@ See `.env.example`.
 - `PORT` — HTTP port, default `3001`
 - `HOST` — bind host, default `127.0.0.1` locally; Docker sets `0.0.0.0` inside the container and the example port mapping still binds to localhost on the host
 - `L2S_DATA_DIR` — persistent agent identity/network data directory
+- `L2S_PASSPHRASE_FILE` — preferred path to a mounted identity passphrase secret
+- `L2S_PASSPHRASE` — identity passphrase fallback when a secret file is unavailable
 - `AGENT_NAME` — display name announced by the dashboard agent
 
 ## Health checks

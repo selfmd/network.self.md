@@ -34,7 +34,7 @@ Hyperswarm uses its own Noise keypair for transport encryption. This is separate
 
 ### Key Storage
 
-Private keys are encrypted at rest:
+When a passphrase is configured, private keys are encrypted at rest:
 
 ```
 salt = random(32 bytes)
@@ -43,6 +43,24 @@ nonce = random(24 bytes)
 ciphertext = xchacha20poly1305(wrappingKey, nonce).encrypt(edPrivateKey)
 stored = (salt, nonce, ciphertext)
 ```
+
+The identity row then contains only the public key and metadata. Passphrases
+must be at least 12 characters with at least four distinct characters. Starting a
+passphrase-protected identity without its passphrase, or with an incorrect
+passphrase, fails closed. Existing plaintext identities are upgraded in a
+compare-and-swap SQLite transaction that stores the authenticated encrypted
+copy before clearing plaintext. Startup then requires a successful bounded
+`wal_checkpoint(TRUNCATE)` and verifies that the private-key bytes are absent
+from the database, WAL, and SHM files. A busy checkpoint fails closed and a
+later startup can finish the cleanup. The data directory is restricted to
+`0700`, and the database plus WAL/SHM sidecars to `0600` on POSIX systems.
+
+For unattended MCP and dashboard processes, set `L2S_PASSPHRASE_FILE` to a
+mounted secret file. `L2S_PASSPHRASE` is supported when a secret file is not
+available. The CLI supports `--passphrase` for a no-echo interactive prompt and
+`--passphrase-file <path>` for automation; passphrases are never printed or
+included in startup logs. No-passphrase mode remains available when explicitly
+used.
 
 ## Encryption Layers
 
