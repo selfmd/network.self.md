@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { argon2id } from 'hash-wasm';
 import { encrypt } from '@networkselfmd/core';
+import { secretFileProvider } from '../secrets.js';
 
 // Mock external modules that won't be available in test
 vi.mock('hyperswarm', () => {
@@ -134,6 +135,32 @@ describe('Agent', () => {
     } satisfies Partial<IdentityKeyStorageError>);
   });
 
+  it.each(['', 'short', 'aaaaaaaaaaaa'])(
+    'should reject an empty or weak passphrase without creating storage (%j)',
+    async (passphrase) => {
+      await expect(new Agent({ dataDir, passphrase }).start()).rejects.toMatchObject({
+        code: 'INVALID_PASSPHRASE',
+      } satisfies Partial<IdentityKeyStorageError>);
+      expect(() => readFileSync(join(dataDir, 'agent.db'))).toThrow();
+    },
+  );
+
+  it('should obtain a passphrase lazily from a secret file provider', async () => {
+    const secretPath = join(dataDir, 'identity-secret');
+    await import('node:fs/promises').then(({ writeFile }) =>
+      writeFile(secretPath, 'provider-passphrase\n', { mode: 0o600 }),
+    );
+    const first = new Agent({ dataDir, secretProvider: secretFileProvider(secretPath) });
+    await first.start();
+    const fingerprint = first.identity.fingerprint;
+    await first.stop();
+
+    const second = new Agent({ dataDir, secretProvider: secretFileProvider(secretPath) });
+    await second.start();
+    expect(second.identity.fingerprint).toBe(fingerprint);
+    await second.stop();
+  });
+
   it('should safely migrate an existing plaintext identity when opened with a passphrase', async () => {
     const plaintextAgent = new Agent({ dataDir, displayName: 'MigrationBot' });
     await plaintextAgent.start();
@@ -163,6 +190,141 @@ describe('Agent', () => {
     await restartedAgent.start();
     expect(restartedAgent.identity.fingerprint).toBe(fingerprint);
     await restartedAgent.stop();
+  });
+
+  it('should make concurrent plaintext migration starts converge on one encrypted identity', async () => {
+    const plaintext = new Agent({ dataDir });
+    await plaintext.start();
+    const fingerprint = plaintext.identity.fingerprint;
+    await plaintext.stop();
+
+    const first = new Agent({ dataDir, passphrase: 'shared-concurrent-passphrase' });
+    const second = new Agent({ dataDir, passphrase: 'shared-concurrent-passphrase' });
+    await Promise.all([first.start(), second.start()]);
+    expect(first.identity.fingerprint).toBe(fingerprint);
+    expect(second.identity.fingerprint).toBe(fingerprint);
+    await Promise.all([first.stop(), second.stop()]);
+
+    const inspected = new Database(join(dataDir, 'agent.db'), { readonly: true });
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM identity').get()).toEqual({ count: 1 });
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM key_storage').get()).toEqual({ count: 1 });
+    inspected.close();
+  });
+
+  it('should not let a concurrent migration loser replace the winner with another passphrase', async () => {
+    const plaintext = new Agent({ dataDir });
+    await plaintext.start();
+    const fingerprint = plaintext.identity.fingerprint;
+    await plaintext.stop();
+
+    const candidates = [
+      {
+        passphrase: 'first-concurrent-passphrase',
+        agent: new Agent({ dataDir, passphrase: 'first-concurrent-passphrase' }),
+      },
+      {
+        passphrase: 'second-concurrent-passphrase',
+        agent: new Agent({ dataDir, passphrase: 'second-concurrent-passphrase' }),
+      },
+    ];
+    const results = await Promise.allSettled(candidates.map(({ agent }) => agent.start()));
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+
+    const winnerIndex = results.findIndex(({ status }) => status === 'fulfilled');
+    expect(candidates[winnerIndex].agent.identity.fingerprint).toBe(fingerprint);
+    await candidates[winnerIndex].agent.stop();
+
+    const restarted = new Agent({
+      dataDir,
+      passphrase: candidates[winnerIndex].passphrase,
+    });
+    await restarted.start();
+    expect(restarted.identity.fingerprint).toBe(fingerprint);
+    await restarted.stop();
+  });
+
+  it('should fail closed on a busy WAL and recover after the plaintext snapshot can be removed', async () => {
+    const plaintext = new Agent({ dataDir });
+    await plaintext.start();
+    const fingerprint = plaintext.identity.fingerprint;
+    const privateKey = Buffer.from(plaintext.identity.edPrivateKey);
+    await plaintext.stop();
+
+    const dbPath = join(dataDir, 'agent.db');
+    const reader = new Database(dbPath, { readonly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT ed_private_key FROM identity WHERE id = 1').get();
+
+    await expect(
+      new Agent({ dataDir, passphrase: 'busy-wal-passphrase' }).start(),
+    ).rejects.toMatchObject({
+      code: 'PLAINTEXT_ERASURE_FAILED',
+    } satisfies Partial<IdentityKeyStorageError>);
+    expect(readFileSync(dbPath).includes(privateKey)).toBe(true);
+
+    reader.exec('ROLLBACK');
+    reader.close();
+
+    const recovered = new Agent({ dataDir, passphrase: 'busy-wal-passphrase' });
+    await recovered.start();
+    expect(recovered.identity.fingerprint).toBe(fingerprint);
+    await recovered.stop();
+    for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (existsSync(path)) expect(readFileSync(path).includes(privateKey)).toBe(false);
+    }
+  });
+
+  it('should type an orphaned encrypted row and recover it without overwriting ciphertext', async () => {
+    const protectedAgent = new Agent({ dataDir, passphrase: 'orphan-recovery-passphrase' });
+    await protectedAgent.start();
+    const fingerprint = protectedAgent.identity.fingerprint;
+    await protectedAgent.stop();
+
+    const dbPath = join(dataDir, 'agent.db');
+    const db = new Database(dbPath);
+    const before = db.prepare('SELECT * FROM key_storage WHERE id = 1').get() as {
+      salt: Buffer;
+      nonce: Buffer;
+      ciphertext: Buffer;
+    };
+    db.prepare('DELETE FROM identity WHERE id = 1').run();
+    db.close();
+
+    await expect(new Agent({ dataDir }).start()).rejects.toMatchObject({
+      code: 'KEY_STORAGE_ORPHANED',
+    } satisfies Partial<IdentityKeyStorageError>);
+
+    const afterFailure = new Database(dbPath, { readonly: true });
+    const unchanged = afterFailure.prepare('SELECT * FROM key_storage WHERE id = 1').get() as typeof before;
+    afterFailure.close();
+    expect(unchanged.salt).toEqual(before.salt);
+    expect(unchanged.nonce).toEqual(before.nonce);
+    expect(unchanged.ciphertext).toEqual(before.ciphertext);
+
+    const recovered = new Agent({ dataDir, passphrase: 'orphan-recovery-passphrase' });
+    await recovered.start();
+    expect(recovered.identity.fingerprint).toBe(fingerprint);
+    await recovered.stop();
+  });
+
+  it('should type corrupt orphaned key storage without overwriting it', async () => {
+    const db = new (await import('../storage/database.js')).AgentDatabase(dataDir);
+    db.migrate();
+    const sqlite = db.getDb();
+    sqlite.prepare(
+      'INSERT INTO key_storage (id, salt, nonce, ciphertext) VALUES (1, ?, ?, ?)',
+    ).run(Buffer.alloc(1), Buffer.alloc(24), Buffer.alloc(48));
+    db.close();
+
+    await expect(
+      new Agent({ dataDir, passphrase: 'corrupt-row-passphrase' }).start(),
+    ).rejects.toMatchObject({ code: 'KEY_STORAGE_CORRUPT' } satisfies Partial<IdentityKeyStorageError>);
+
+    const inspected = new Database(join(dataDir, 'agent.db'), { readonly: true });
+    expect((inspected.prepare('SELECT length(salt) AS length FROM key_storage').get() as { length: number }).length).toBe(1);
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM identity').get()).toEqual({ count: 0 });
+    inspected.close();
   });
 
   it('should fail closed and then clean up a legacy identity containing both key copies', async () => {

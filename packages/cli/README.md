@@ -294,11 +294,23 @@ export L2S_DATA_DIR=/custom/path
 networkselfmd init
 ```
 
+Protect a new or existing identity with a hidden interactive prompt:
+
+```bash
+networkselfmd --passphrase init --name Alice
+networkselfmd --passphrase status
+```
+
+For automation, use `--passphrase-file <path>` or set
+`L2S_PASSPHRASE_FILE`; the secret is read lazily and is not written to logs or
+command arguments.
+
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `L2S_DATA_DIR` | Custom location for agent data, keys, and SQLite database |
+| `L2S_PASSPHRASE_FILE` | File containing the identity passphrase |
 
 ## Common Workflows
 

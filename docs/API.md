@@ -7,11 +7,11 @@ Programmatic API for `@networkselfmd/node` -- the Agent runtime.
 The central class. Create one per process.
 
 ```typescript
-import { Agent } from '@networkselfmd/node';
+import { Agent, secretFileProvider } from '@networkselfmd/node';
 
 const agent = new Agent({
   dataDir: '~/.networkselfmd',     // SQLite + keys stored here
-  passphrase: 'optional',        // encrypts private key at rest
+  secretProvider: secretFileProvider('/run/secrets/networkselfmd-passphrase'),
 });
 
 await agent.start();
@@ -25,6 +25,7 @@ await agent.stop();
 interface AgentOptions {
   dataDir: string;               // required, path to data directory
   passphrase?: string;           // encrypts private key at rest
+  secretProvider?: () => string | Promise<string>; // preferred for mounted secrets
   displayName?: string;          // human-readable agent name
   bootstrap?: Array<{            // custom DHT bootstrap nodes
     host: string;

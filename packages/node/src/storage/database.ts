@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
-import { mkdirSync, existsSync, chmodSync } from 'node:fs';
+import { mkdirSync, existsSync, chmodSync, readFileSync, statSync } from 'node:fs';
 
 const SCHEMA_VERSION = 5;
 
@@ -129,21 +129,24 @@ const MIGRATIONS: string[] = [
 
 export class AgentDatabase {
   private db: Database.Database;
+  private readonly dataDir: string;
+  private readonly dbPath: string;
 
   constructor(dataDir: string) {
     if (!existsSync(dataDir)) {
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     }
-    const dbPath = join(dataDir, 'agent.db');
-    this.db = new Database(dbPath);
-    if (process.platform !== 'win32') {
-      chmodSync(dbPath, 0o600);
-    }
+    this.dataDir = dataDir;
+    this.dbPath = join(dataDir, 'agent.db');
+    this.db = new Database(this.dbPath);
+    this.enforcePermissions();
     // Ensure key bytes removed by migrations/updates are overwritten rather
     // than retained in SQLite freelist pages.
     this.db.pragma('secure_delete = ON');
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 100');
     this.db.pragma('foreign_keys = ON');
+    this.enforcePermissions();
   }
 
   migrate(): void {
@@ -160,6 +163,7 @@ export class AgentDatabase {
     });
 
     transaction();
+    this.enforcePermissions();
   }
 
   private getSchemaVersion(): number {
@@ -177,10 +181,58 @@ export class AgentDatabase {
     return this.db;
   }
 
-  checkpoint(): void {
-    // A migrated plaintext key can otherwise remain in the pre-WAL database
-    // page until SQLite decides to checkpoint it later.
-    this.db.pragma('wal_checkpoint(TRUNCATE)');
+  async erasePlaintextSnapshots(
+    sensitiveBytes: Uint8Array,
+    forceCheckpoint = false,
+  ): Promise<void> {
+    const secret = Buffer.from(sensitiveBytes);
+    const containsSecret = () => this.databaseFiles().some((path) => {
+      try {
+        return readFileSync(path).includes(secret);
+      } catch {
+        return false;
+      }
+    });
+
+    if (!forceCheckpoint && !containsSecret()) {
+      this.enforcePermissions();
+      return;
+    }
+
+    const attempts = 4;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const [result] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+        busy: number;
+        log: number;
+        checkpointed: number;
+      }>;
+      this.enforcePermissions();
+
+      const walPath = `${this.dbPath}-wal`;
+      const walEmpty = !existsSync(walPath) || statSync(walPath).size === 0;
+      if (result?.busy === 0 && result.log === 0 && walEmpty && !containsSecret()) {
+        return;
+      }
+
+      if (attempt + 1 < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+
+    throw new Error('Unable to securely remove the plaintext identity snapshot');
+  }
+
+  enforcePermissions(): void {
+    if (process.platform === 'win32') return;
+
+    chmodSync(this.dataDir, 0o700);
+    for (const path of this.databaseFiles()) {
+      if (existsSync(path)) chmodSync(path, 0o600);
+    }
+  }
+
+  private databaseFiles(): string[] {
+    return [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`];
   }
 
   close(): void {

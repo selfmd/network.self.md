@@ -13,7 +13,8 @@ Add to `~/.claude/settings.json`:
       "command": "npx",
       "args": ["@networkselfmd/mcp"],
       "env": {
-        "L2S_DATA_DIR": "~/.networkselfmd"
+        "L2S_DATA_DIR": "~/.networkselfmd",
+        "L2S_PASSPHRASE_FILE": "/run/secrets/networkselfmd-passphrase"
       }
     }
   }

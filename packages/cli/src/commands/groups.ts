@@ -1,14 +1,12 @@
-import os from 'node:os';
-import path from 'node:path';
 import chalk from 'chalk';
 import { Agent } from '@networkselfmd/node';
+import type { AgentOptions } from '@networkselfmd/node';
+import { getDataDir } from '../agent-options.js';
 
-function getDataDir(): string {
-  return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
-}
+type Secrets = Pick<AgentOptions, 'passphrase' | 'secretProvider'>;
 
-async function withAgent<T>(fn: (agent: Agent) => Promise<T>): Promise<T> {
-  const agent = new Agent({ dataDir: getDataDir() });
+async function withAgent<T>(fn: (agent: Agent) => Promise<T>, secrets: Secrets): Promise<T> {
+  const agent = new Agent({ dataDir: getDataDir(), ...secrets });
   await agent.start();
   try {
     return await fn(agent);
@@ -17,7 +15,7 @@ async function withAgent<T>(fn: (agent: Agent) => Promise<T>): Promise<T> {
   }
 }
 
-export async function createGroup(name: string): Promise<void> {
+export async function createGroup(name: string, secrets: Secrets = {}): Promise<void> {
   await withAgent(async (agent) => {
     const result = await agent.createGroup(name);
     const stateId = Buffer.from(result.groupId).toString('hex');
@@ -28,18 +26,18 @@ export async function createGroup(name: string): Promise<void> {
     console.log();
     console.log(chalk.dim('Share the State ID with others so they can join.'));
     console.log();
-  });
+  }, secrets);
 }
 
-export async function joinGroup(groupId: string): Promise<void> {
+export async function joinGroup(groupId: string, secrets: Secrets = {}): Promise<void> {
   await withAgent(async (agent) => {
     await agent.joinGroup(groupId);
 
     console.log(chalk.green(`\nJoined state ${groupId}\n`));
-  });
+  }, secrets);
 }
 
-export async function listGroups(): Promise<void> {
+export async function listGroups(secrets: Secrets = {}): Promise<void> {
   await withAgent(async (agent) => {
     const states = agent.listGroups();
 
@@ -76,7 +74,7 @@ export async function listGroups(): Promise<void> {
     }
 
     console.log();
-  });
+  }, secrets);
 }
 
 function padRight(str: string, width: number): string {

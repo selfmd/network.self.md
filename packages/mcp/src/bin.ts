@@ -1,13 +1,10 @@
 #!/usr/bin/env node
-import { resolve } from 'path';
-import { homedir } from 'os';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Agent } from '@networkselfmd/node';
 import { createServer } from './server.js';
+import { mcpAgentOptions } from './config.js';
 
-const dataDir = process.env.L2S_DATA_DIR || resolve(homedir(), '.networkselfmd');
-
-const agent = new Agent({ dataDir });
+const agent = new Agent(mcpAgentOptions());
 
 const server = createServer(agent);
 

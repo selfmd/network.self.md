@@ -5,6 +5,8 @@ export type {
   MemberInfo,
   Message,
 } from './agent.js';
+export { secretFileProvider } from './secrets.js';
+export type { SecretProvider } from './secrets.js';
 
 export { AgentDatabase } from './storage/database.js';
 export {

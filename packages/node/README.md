@@ -168,6 +168,7 @@ new Agent(options: AgentOptions)
 - `dataDir: string` — path to SQLite database and identity storage (required)
 - `displayName?: string` — human-readable name for this agent
 - `passphrase?: string` — optional passphrase to encrypt keys at rest (Argon2id + XChaCha20-Poly1305)
+- `secretProvider?: () => string | Promise<string>` — lazy passphrase provider; use `secretFileProvider(path)` for mounted secrets
 - `bootstrap?: Array<{ host: string; port: number }>` — optional Hyperswarm bootstrap nodes
 
 #### Lifecycle

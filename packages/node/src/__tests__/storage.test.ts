@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -27,6 +27,20 @@ afterEach(() => {
 });
 
 describe('AgentDatabase', () => {
+  it.skipIf(process.platform === 'win32')('should enforce private permissions on the directory and SQLite files', () => {
+    chmodSync(dataDir, 0o777);
+    database.migrate();
+    database.getDb().prepare('INSERT INTO peers (public_key, fingerprint) VALUES (?, ?)')
+      .run(Buffer.alloc(32), 'permissions-test');
+    database.enforcePermissions();
+
+    expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+    for (const suffix of ['', '-wal', '-shm']) {
+      const path = join(dataDir, `agent.db${suffix}`);
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
+  });
   it('should create database and run migrations', () => {
     const db = database.getDb();
     const tables = db

@@ -4,24 +4,22 @@ import { fileURLToPath } from 'node:url';
 import { Agent } from '@networkselfmd/node';
 import { attachAgentLogging } from './agentEvents.js';
 import { buildApp } from './routes.js';
+import { dashboardAgentOptions } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function main() {
-  const dataDir = process.env.L2S_DATA_DIR ?? path.join(process.env.HOME ?? '~', '.networkselfmd');
+  const agentOptions = dashboardAgentOptions();
 
   // Dashboard IS an agent — it joins the P2P network, discovers peers and states
-  const agent = new Agent({
-    dataDir,
-    displayName: process.env.AGENT_NAME,
-  });
+  const agent = new Agent(agentOptions);
 
   attachAgentLogging(agent);
 
   await agent.start();
   console.log(`Agent started: ${agent.identity.fingerprint}`);
   console.log(`Display name: ${agent.identity.displayName ?? '(none)'}`);
-  console.log(`Data dir: ${dataDir}`);
+  console.log(`Data dir: ${agentOptions.dataDir}`);
 
   const app = await buildApp({ agent });
 

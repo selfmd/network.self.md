@@ -59,6 +59,11 @@ export interface StoredKeyData {
   ciphertext: Buffer;
 }
 
+export type EncryptedMigrationResult =
+  | 'migrated'
+  | 'already-protected'
+  | 'changed';
+
 export interface MessageQueryOptions {
   groupId?: Uint8Array;
   peerPublicKey?: Uint8Array;
@@ -69,14 +74,14 @@ export interface MessageQueryOptions {
 export class IdentityRepository {
   constructor(private db: Database.Database) {}
 
-  save(
+  createPlaintext(
     edPrivateKey: Uint8Array,
     edPublicKey: Uint8Array,
     displayName?: string,
-  ): void {
+  ): boolean {
     const savePlaintext = this.db.transaction(() => {
-      this.db.prepare(
-        `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+      const result = this.db.prepare(
+        `INSERT OR IGNORE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
          VALUES (1, ?, ?, ?, ?)`,
       ).run(
         Buffer.from(edPrivateKey),
@@ -84,9 +89,28 @@ export class IdentityRepository {
         displayName ?? null,
         Date.now(),
       );
-      this.db.prepare('DELETE FROM key_storage WHERE id = 1').run();
+      return result.changes === 1;
     });
-    savePlaintext();
+    return savePlaintext.immediate();
+  }
+
+  createEncrypted(
+    edPublicKey: Uint8Array,
+    displayName: string | undefined,
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): boolean {
+    const save = this.db.transaction(() => {
+      if (this.load() || this.loadEncryptedKeys()) return false;
+      this.db.prepare(
+        `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+         VALUES (1, NULL, ?, ?, ?)`,
+      ).run(Buffer.from(edPublicKey), displayName ?? null, Date.now());
+      this.writeEncryptedKeys(salt, nonce, ciphertext);
+      return true;
+    });
+    return save.immediate();
   }
 
   saveEncrypted(
@@ -96,32 +120,124 @@ export class IdentityRepository {
     nonce: Uint8Array,
     ciphertext: Uint8Array,
   ): void {
-    const save = this.db.transaction(() => {
-      this.db.prepare(
-        `INSERT OR REPLACE INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
-         VALUES (1, NULL, ?, ?, ?)`,
-      ).run(Buffer.from(edPublicKey), displayName ?? null, Date.now());
-      this.writeEncryptedKeys(salt, nonce, ciphertext);
-    });
-    save.immediate();
+    if (!this.createEncrypted(edPublicKey, displayName, salt, nonce, ciphertext)) {
+      throw new Error('Identity or encrypted key storage already exists');
+    }
   }
 
   migrateToEncrypted(
     salt: Uint8Array,
     nonce: Uint8Array,
     ciphertext: Uint8Array,
-  ): void {
+  ): EncryptedMigrationResult;
+  migrateToEncrypted(
+    expectedPrivateKey: Uint8Array,
+    expectedPublicKey: Uint8Array,
+    salt: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ): EncryptedMigrationResult;
+  migrateToEncrypted(
+    first: Uint8Array,
+    second: Uint8Array,
+    third: Uint8Array,
+    fourth?: Uint8Array,
+    fifth?: Uint8Array,
+  ): EncryptedMigrationResult {
     const migrate = this.db.transaction(() => {
+      const current = this.load();
+      if (!current) return 'changed';
+      if (current.ed_private_key === null) {
+        return this.loadEncryptedKeys() ? 'already-protected' : 'changed';
+      }
+      const expectedPrivateKey = fifth
+        ? first
+        : new Uint8Array(current.ed_private_key);
+      const expectedPublicKey = fifth
+        ? second
+        : new Uint8Array(current.ed_public_key);
+      const salt = fifth ? third : first;
+      const nonce = fifth ? fourth! : second;
+      const ciphertext = fifth ?? third;
+      if (
+        !current.ed_private_key.equals(Buffer.from(expectedPrivateKey)) ||
+        !current.ed_public_key.equals(Buffer.from(expectedPublicKey))
+      ) {
+        return 'changed';
+      }
       // Store the recoverable encrypted copy before removing the only
       // plaintext copy. The transaction makes both changes durable together.
       this.writeEncryptedKeys(salt, nonce, ciphertext);
-      this.db.prepare('UPDATE identity SET ed_private_key = NULL WHERE id = 1').run();
+      const updated = this.db.prepare(
+        `UPDATE identity SET ed_private_key = NULL
+         WHERE id = 1 AND ed_private_key = ? AND ed_public_key = ?`,
+      ).run(Buffer.from(expectedPrivateKey), Buffer.from(expectedPublicKey));
+      return updated.changes === 1 ? 'migrated' : 'changed';
     });
-    migrate.immediate();
+    return migrate.immediate() as EncryptedMigrationResult;
   }
 
-  removePlaintextPrivateKey(): void {
-    this.db.prepare('UPDATE identity SET ed_private_key = NULL WHERE id = 1').run();
+  removePlaintextPrivateKey(
+    expectedPrivateKey: Uint8Array,
+    expectedPublicKey: Uint8Array,
+  ): boolean {
+    const clear = this.db.transaction(
+      () =>
+        this.db
+          .prepare(
+            `UPDATE identity SET ed_private_key = NULL
+             WHERE id = 1 AND ed_private_key = ? AND ed_public_key = ?`,
+          )
+          .run(Buffer.from(expectedPrivateKey), Buffer.from(expectedPublicKey))
+          .changes === 1,
+    );
+    return clear.immediate();
+  }
+
+  recoverOrphanedIdentity(
+    expectedKeyData: StoredKeyData,
+    edPublicKey: Uint8Array,
+  ): boolean {
+    const recover = this.db.transaction(() => {
+      if (this.load()) return false;
+      const current = this.loadEncryptedKeys();
+      if (
+        !current ||
+        !current.salt.equals(expectedKeyData.salt) ||
+        !current.nonce.equals(expectedKeyData.nonce) ||
+        !current.ciphertext.equals(expectedKeyData.ciphertext)
+      ) {
+        return false;
+      }
+      this.db.prepare(
+        `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+         VALUES (1, NULL, ?, NULL, ?)`,
+      ).run(Buffer.from(edPublicKey), Date.now());
+      return true;
+    });
+    return recover.immediate();
+  }
+
+  /** Kept for callers that explicitly want plaintext storage. */
+  save(
+    edPrivateKey: Uint8Array,
+    edPublicKey: Uint8Array,
+    displayName?: string,
+  ): void {
+    const save = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM key_storage WHERE id = 1').run();
+      this.db.prepare('DELETE FROM identity WHERE id = 1').run();
+      this.db.prepare(
+        `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+         VALUES (1, ?, ?, ?, ?)`,
+      ).run(
+        Buffer.from(edPrivateKey),
+        Buffer.from(edPublicKey),
+        displayName ?? null,
+        Date.now(),
+      );
+    });
+    save.immediate();
   }
 
   load(): StoredIdentity | undefined {
