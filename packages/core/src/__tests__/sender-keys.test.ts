@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SenderKeys, type SenderKeyRecord } from '../protocol/sender-keys.js';
+import { generateIdentity } from '../identity.js';
 
 describe('SenderKeys', () => {
   it('generates initial state with random chain key and index 0', () => {
@@ -12,7 +13,10 @@ describe('SenderKeys', () => {
   it('encrypt/decrypt roundtrip', () => {
     const state = SenderKeys.generate();
     const plaintext = new TextEncoder().encode('group message');
-    const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(state, plaintext);
+    const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(
+      state,
+      plaintext,
+    );
 
     expect(chainIndex).toBe(0);
     expect(nextState.chainIndex).toBe(1);
@@ -23,7 +27,12 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const { plaintext: decrypted } = SenderKeys.decrypt(record, chainIndex, nonce, ciphertext);
+    const { plaintext: decrypted } = SenderKeys.decrypt(
+      record,
+      chainIndex,
+      nonce,
+      ciphertext,
+    );
     expect(decrypted).toEqual(plaintext);
   });
 
@@ -35,7 +44,11 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const messages: Array<{ ciphertext: Uint8Array; nonce: Uint8Array; chainIndex: number }> = [];
+    const messages: Array<{
+      ciphertext: Uint8Array;
+      nonce: Uint8Array;
+      chainIndex: number;
+    }> = [];
 
     for (let i = 0; i < 5; i++) {
       const plaintext = new TextEncoder().encode(`message ${i}`);
@@ -52,7 +65,7 @@ describe('SenderKeys', () => {
         currentRecord,
         messages[i].chainIndex,
         messages[i].nonce,
-        messages[i].ciphertext
+        messages[i].ciphertext,
       );
       expect(new TextDecoder().decode(plaintext)).toBe(`message ${i}`);
       currentRecord = nextRecord;
@@ -67,7 +80,11 @@ describe('SenderKeys', () => {
       skippedKeys: new Map(),
     };
 
-    const messages: Array<{ ciphertext: Uint8Array; nonce: Uint8Array; chainIndex: number }> = [];
+    const messages: Array<{
+      ciphertext: Uint8Array;
+      nonce: Uint8Array;
+      chainIndex: number;
+    }> = [];
 
     for (let i = 0; i < 3; i++) {
       const plaintext = new TextEncoder().encode(`msg-${i}`);
@@ -81,7 +98,7 @@ describe('SenderKeys', () => {
       record,
       messages[2].chainIndex,
       messages[2].nonce,
-      messages[2].ciphertext
+      messages[2].ciphertext,
     );
     expect(new TextDecoder().decode(p2)).toBe('msg-2');
     expect(r1.skippedKeys.size).toBe(2); // keys 0 and 1 cached
@@ -91,7 +108,7 @@ describe('SenderKeys', () => {
       r1,
       messages[0].chainIndex,
       messages[0].nonce,
-      messages[0].ciphertext
+      messages[0].ciphertext,
     );
     expect(new TextDecoder().decode(p0)).toBe('msg-0');
     expect(r2.skippedKeys.size).toBe(1); // key 1 still cached
@@ -101,7 +118,7 @@ describe('SenderKeys', () => {
       r2,
       messages[1].chainIndex,
       messages[1].nonce,
-      messages[1].ciphertext
+      messages[1].ciphertext,
     );
     expect(new TextDecoder().decode(p1)).toBe('msg-1');
     expect(r3.skippedKeys.size).toBe(0);
@@ -124,25 +141,117 @@ describe('SenderKeys', () => {
 
     const { ciphertext, nonce, chainIndex } = SenderKeys.encrypt(
       advancedState,
-      new TextEncoder().encode('too far')
+      new TextEncoder().encode('too far'),
     );
 
     expect(() =>
-      SenderKeys.decrypt(record, chainIndex, nonce, ciphertext)
+      SenderKeys.decrypt(record, chainIndex, nonce, ciphertext),
     ).toThrow(/too many skipped/i);
   });
-
   it('createDistribution produces valid message', () => {
     const state = SenderKeys.generate();
-    const groupId = new Uint8Array(16);
+    const groupId = new Uint8Array(32);
     const signingKey = new Uint8Array(32);
-    const dist = SenderKeys.createDistribution(groupId, state, signingKey);
+    const epochHash = new Uint8Array(32).fill(7);
+    const dist = SenderKeys.createDistribution(
+      groupId,
+      state,
+      signingKey,
+      3,
+      epochHash,
+    );
 
-    expect(dist.type).toBe(0x03);
     expect(dist.groupId).toBe(groupId);
     expect(dist.chainKey).toBe(state.chainKey);
     expect(dist.chainIndex).toBe(state.chainIndex);
     expect(dist.signingPublicKey).toBe(signingKey);
+    expect(dist.epochVersion).toBe(3);
+    expect(dist.epochHash).toBe(epochHash);
+    expect(dist.protocolVersion).toBe(2);
+    expect(dist.generationId).toHaveLength(16);
+    expect(dist.sequence).toBe(0);
     expect(typeof dist.timestamp).toBe('number');
+  });
+
+  it('encrypts a distribution for one authenticated recipient', () => {
+    const alice = generateIdentity('Alice');
+    const bob = generateIdentity('Bob');
+    const groupId = new Uint8Array(32).fill(11);
+    const epochHash = new Uint8Array(32).fill(12);
+    const state = SenderKeys.generate();
+    const payload = SenderKeys.createDistribution(
+      groupId,
+      state,
+      alice.edPublicKey,
+      4,
+      epochHash,
+    );
+
+    const envelope = SenderKeys.encryptDistribution(
+      payload,
+      alice.xPrivateKey,
+      alice.edPublicKey,
+      bob.xPublicKey,
+      bob.edPublicKey,
+    );
+
+    expect(envelope.type).toBe(0x03);
+    expect(envelope.protocolVersion).toBe(2);
+    expect(envelope.recipientPublicKey).toEqual(bob.edPublicKey);
+    expect(envelope).not.toHaveProperty('groupId');
+    expect(envelope).not.toHaveProperty('chainKey');
+    expect(envelope.ciphertext).not.toEqual(state.chainKey);
+
+    const decrypted = SenderKeys.decryptDistribution(
+      envelope,
+      bob.xPrivateKey,
+      bob.edPublicKey,
+      alice.xPublicKey,
+      alice.edPublicKey,
+    );
+    expect(decrypted.groupId).toEqual(groupId);
+    expect(decrypted.chainKey).toEqual(state.chainKey);
+    expect(decrypted.epochVersion).toBe(4);
+    expect(decrypted.epochHash).toEqual(epochHash);
+    expect(decrypted.generationId).toEqual(payload.generationId);
+    expect(decrypted.sequence).toBe(payload.sequence);
+
+    expect(() => SenderKeys.decryptDistribution(
+      { ...envelope, protocolVersion: 1 },
+      bob.xPrivateKey,
+      bob.edPublicKey,
+      alice.xPublicKey,
+      alice.edPublicKey,
+    )).toThrow(/unsupported/i);
+  });
+
+  it('rejects a distribution relayed over another authenticated session', () => {
+    const alice = generateIdentity('Alice');
+    const bob = generateIdentity('Bob');
+    const mallory = generateIdentity('Mallory');
+    const payload = SenderKeys.createDistribution(
+      new Uint8Array(32).fill(21),
+      SenderKeys.generate(),
+      alice.edPublicKey,
+      1,
+      new Uint8Array(32).fill(22),
+    );
+    const envelope = SenderKeys.encryptDistribution(
+      payload,
+      alice.xPrivateKey,
+      alice.edPublicKey,
+      bob.xPublicKey,
+      bob.edPublicKey,
+    );
+
+    expect(() =>
+      SenderKeys.decryptDistribution(
+        envelope,
+        bob.xPrivateKey,
+        bob.edPublicKey,
+        mallory.xPublicKey,
+        mallory.edPublicKey,
+      ),
+    ).toThrow();
   });
 });

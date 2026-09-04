@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { GroupRepository, DiscoveredGroupRepository } from '../storage/repositories.js';
+import {
+  GroupRepository,
+  DiscoveredGroupRepository,
+  NetworkAnnounceStateRepository,
+} from '../storage/repositories.js';
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -12,7 +16,9 @@ function createTestDb(): Database.Database {
       created_at INTEGER NOT NULL,
       joined_at INTEGER,
       is_public INTEGER DEFAULT 0,
-      self_md TEXT
+      self_md TEXT,
+      creator_public_key BLOB,
+      genesis_hash BLOB
     );
     CREATE TABLE group_members (
       group_id BLOB NOT NULL,
@@ -26,7 +32,17 @@ function createTestDb(): Database.Database {
       self_md TEXT,
       member_count INTEGER DEFAULT 0,
       announced_by BLOB NOT NULL,
-      last_announced INTEGER NOT NULL
+      last_announced INTEGER NOT NULL,
+      authority_key BLOB,
+      genesis_hash BLOB,
+      genesis_epoch_data BLOB,
+      genesis_signature BLOB
+    );
+    CREATE TABLE network_announce_state (
+      peer_public_key BLOB PRIMARY KEY,
+      last_timestamp INTEGER NOT NULL,
+      window_started INTEGER NOT NULL,
+      message_count INTEGER NOT NULL
     );
   `);
   return db;
@@ -36,13 +52,22 @@ describe('DiscoveredGroupRepository', () => {
   let db: Database.Database;
   let repo: DiscoveredGroupRepository;
 
-  beforeEach(() => { db = createTestDb(); repo = new DiscoveredGroupRepository(db); });
+  beforeEach(() => {
+    db = createTestDb();
+    repo = new DiscoveredGroupRepository(db);
+  });
   afterEach(() => db.close());
+
+  const anchor = [
+    new Uint8Array([1]),
+    new Uint8Array(64).fill(2),
+    new Uint8Array(32).fill(3),
+  ] as const;
 
   it('upserts and lists discovered groups', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'builders', 'We build things.', 3, peer);
+    repo.upsert(gid, 'builders', 'We build things.', 3, peer, ...anchor);
     const list = repo.list();
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('builders');
@@ -53,8 +78,8 @@ describe('DiscoveredGroupRepository', () => {
   it('updates on re-announce', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'builders', 'v1', 2, peer);
-    repo.upsert(gid, 'builders', 'v2', 5, peer);
+    repo.upsert(gid, 'builders', 'v1', 2, peer, ...anchor);
+    repo.upsert(gid, 'builders', 'v2', 5, peer, ...anchor);
     const list = repo.list();
     expect(list).toHaveLength(1);
     expect(list[0].self_md).toBe('v2');
@@ -64,10 +89,39 @@ describe('DiscoveredGroupRepository', () => {
   it('finds and removes', () => {
     const gid = new Uint8Array([1, 2, 3]);
     const peer = new Uint8Array(32).fill(0xaa);
-    repo.upsert(gid, 'test', 'md', 1, peer);
+    repo.upsert(gid, 'test', 'md', 1, peer, ...anchor);
     expect(repo.find(gid)).toBeDefined();
     repo.remove(gid);
     expect(repo.find(gid)).toBeUndefined();
+  });
+
+  it('rejects a same-group overwrite from another authority', () => {
+    const gid = new Uint8Array([1, 2, 3]);
+    const owner = new Uint8Array(32).fill(1);
+    const attacker = new Uint8Array(32).fill(2);
+    expect(repo.upsert(gid, 'owner', '', 1, owner, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32).fill(1))).toBe(true);
+    expect(repo.upsert(gid, 'attacker', '', 1, attacker, new Uint8Array([2]), new Uint8Array(64), new Uint8Array(32).fill(2))).toBe(false);
+    expect(repo.find(gid)?.name).toBe('owner');
+  });
+
+  it('bounds discovery rows on disk', () => {
+    const peer = new Uint8Array(32).fill(1);
+    for (let index = 0; index < 1001; index++) {
+      const gid = new Uint8Array(32);
+      new DataView(gid.buffer).setUint32(28, index, false);
+      repo.upsert(gid, `g${index}`, '', 1, peer, new Uint8Array([1]), new Uint8Array(64), new Uint8Array(32));
+    }
+    expect(repo.list()).toHaveLength(1000);
+  });
+
+  it('durably rejects replay and rate limits announcements', () => {
+    const state = new NetworkAnnounceStateRepository(db);
+    const peer = new Uint8Array(32).fill(3);
+    expect(state.accept(peer, 100, 1000, 2)).toBe(true);
+    expect(state.accept(peer, 100, 1001, 2)).toBe(false);
+    expect(state.accept(peer, 101, 1002, 2)).toBe(true);
+    expect(state.accept(peer, 102, 1003, 2)).toBe(false);
+    expect(new NetworkAnnounceStateRepository(db).accept(peer, 101, 70_000, 2)).toBe(false);
   });
 });
 
@@ -75,7 +129,10 @@ describe('GroupRepository.setPublic', () => {
   let db: Database.Database;
   let repo: GroupRepository;
 
-  beforeEach(() => { db = createTestDb(); repo = new GroupRepository(db); });
+  beforeEach(() => {
+    db = createTestDb();
+    repo = new GroupRepository(db);
+  });
   afterEach(() => db.close());
 
   it('sets group as public with selfMd', () => {

@@ -1,14 +1,19 @@
 import { EventEmitter } from 'node:events';
 import Hyperswarm from 'hyperswarm';
+import { deriveKey } from '@networkselfmd/core';
 import type { AgentIdentity } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 import { performHandshake } from './handshake.js';
+import type { HandshakeResult } from './handshake.js';
 import { MessageRouter } from './router.js';
 
 export interface SwarmManagerOptions {
   identity: AgentIdentity;
   bootstrap?: Array<{ host: string; port: number }>;
+  acceptPeerIdentity?: (result: HandshakeResult) => void | Promise<void>;
 }
+
+export const MAX_PENDING_HANDSHAKES = 64;
 
 export class SwarmManager extends EventEmitter {
   private swarm: Hyperswarm | null = null;
@@ -16,12 +21,15 @@ export class SwarmManager extends EventEmitter {
   private topics = new Set<string>();
   private identity: AgentIdentity;
   private bootstrap?: Array<{ host: string; port: number }>;
+  private acceptPeerIdentity?: SwarmManagerOptions['acceptPeerIdentity'];
+  private pendingHandshakes = 0;
   readonly router: MessageRouter;
 
   constructor(options: SwarmManagerOptions) {
     super();
     this.identity = options.identity;
     this.bootstrap = options.bootstrap;
+    this.acceptPeerIdentity = options.acceptPeerIdentity;
     this.router = new MessageRouter();
   }
 
@@ -30,6 +38,14 @@ export class SwarmManager extends EventEmitter {
     if (this.bootstrap) {
       swarmOpts.bootstrap = this.bootstrap;
     }
+    swarmOpts.seed = Buffer.from(
+      deriveKey(
+        this.identity.edPrivateKey,
+        'networkselfmd-noise-transport-v1',
+        '',
+        32,
+      ),
+    );
 
     this.swarm = new Hyperswarm(swarmOpts);
 
@@ -44,23 +60,37 @@ export class SwarmManager extends EventEmitter {
     socket: unknown,
     _peerInfo: unknown,
   ): Promise<void> {
+    if (this.pendingHandshakes >= MAX_PENDING_HANDSHAKES) {
+      try {
+        (socket as ConstructorParameters<typeof PeerSession>[0]).destroy();
+      } catch {
+        // The transport may already be closing.
+      }
+      return;
+    }
+
+    this.pendingHandshakes += 1;
     try {
       const result = await performHandshake(
         socket as ConstructorParameters<typeof PeerSession>[0],
         this.identity,
       );
 
-      const { session, peerFingerprint } = result;
-
-      // Store session by fingerprint
-      const existingSession = this.sessions.get(peerFingerprint);
-      if (existingSession) {
-        existingSession.close();
+      try {
+        await this.acceptPeerIdentity?.(result);
+      } catch (error) {
+        result.session.destroy();
+        throw error;
       }
-      this.sessions.set(peerFingerprint, session);
 
-      // Set up message routing BEFORE emitting events or replaying
-      // buffered messages, to prevent dropping messages.
+      const { session, peerFingerprint } = result;
+      if (session.state !== 'verified') {
+        session.destroy();
+        throw new Error('Connection closed before peer registration');
+      }
+
+      // Attach lifecycle handlers before publishing the session. A replaced
+      // session may close asynchronously, so it may only delete itself.
       session.on('message', (message) => {
         this.router.route(session, message).catch((err) => {
           this.emit('error', err);
@@ -68,6 +98,7 @@ export class SwarmManager extends EventEmitter {
       });
 
       session.on('close', () => {
+        if (this.sessions.get(peerFingerprint) !== session) return;
         this.sessions.delete(peerFingerprint);
         this.emit('peer:disconnected', {
           peerPublicKey: result.peerPublicKey,
@@ -79,20 +110,19 @@ export class SwarmManager extends EventEmitter {
         this.emit('error', err);
       });
 
+      const existingSession = this.sessions.get(peerFingerprint);
+      this.sessions.set(peerFingerprint, session);
+      if (existingSession && existingSession !== session) {
+        existingSession.close();
+      }
+
       session.setReady();
       this.emit('peer:connected', result);
       this.emit('peer:verified', result);
-
-      // Replay any messages that arrived during the handshake
-      if (result.bufferedMessages) {
-        for (const msg of result.bufferedMessages) {
-          this.router.route(session, msg).catch((err) => {
-            this.emit('error', err);
-          });
-        }
-      }
     } catch (err) {
       this.emit('error', err);
+    } finally {
+      this.pendingHandshakes -= 1;
     }
   }
 

@@ -21,13 +21,17 @@ Perfect for sharing your agent with team members, clients, or the public while k
 ### As a library
 
 ```typescript
-import { TTYAServer } from '@networkselfmd/web';
+import { TTYAServer } from "@networkselfmd/web";
+
+// Load the same >=32-byte random PSK used by Agent({ ttyaAuthSecret }).
+const ttyaAuthSecret = loadFromSecretManager();
 
 // Start the server
 const server = new TTYAServer({
   port: 3000,
-  agentFingerprint: 'your-agent-fingerprint',
+  agentFingerprint: "your-agent-fingerprint",
   agentEdPublicKey: yourAgentPublicKey, // Uint8Array
+  ttyaAuthSecret,
 });
 
 const url = await server.start();
@@ -49,10 +53,10 @@ await server.stop();
 
 ```bash
 # Start the TTYA server
-networkselfmd ttya start --port 3000
+networkselfmd ttya --port 3000
 
 # Auto-approve all visitors (for public agents)
-networkselfmd ttya start --port 3000 --auto-approve
+networkselfmd ttya --port 3000 --auto-approve
 
 # Show pending visitor requests
 networkselfmd ttya pending
@@ -123,6 +127,7 @@ Then in Claude Code:
 ## How visitors chat with your agent
 
 1. **You start TTYA:**
+
    ```
    TTYA server starts on port 3000
    ✓ Connected to Hyperswarm
@@ -190,11 +195,11 @@ Then in Claude Code:
 
 ### Encryption layers
 
-| Layer | Protection |
-|-------|-----------|
-| Browser → Server | TLS (HTTPS/WSS) |
-| Server → Agent | Hyperswarm Noise protocol (authenticated + encrypted) |
-| Agent receives | Everything decrypted, you see plaintext |
+| Layer            | Protection                                            |
+| ---------------- | ----------------------------------------------------- |
+| Browser → Server | TLS (HTTPS/WSS)                                       |
+| Server → Agent   | Hyperswarm Noise protocol (authenticated + encrypted) |
+| Agent receives   | Everything decrypted, you see plaintext               |
 
 **Key point:** The TTYA server is a transparent relay. It's not encrypted end-to-end between visitor and agent — messages are plaintext at the server. If you need stronger privacy, use E2E encryption at the application level.
 
@@ -203,39 +208,40 @@ Then in Claude Code:
 ```typescript
 interface TTYAServerConfig {
   // Network
-  port: number;                     // default: 3000
-  host: string;                     // default: "0.0.0.0"
+  port: number; // default: 3000
+  host: string; // default: "0.0.0.0"
 
   // Approval flow
-  autoApprove: boolean;              // default: false
-  maxPendingVisitors: number;        // default: 10
+  autoApprove: boolean; // default: false
+  maxPendingVisitors: number; // default: 10
 
   // Connection limits
-  maxConnections: number;            // default: 100
+  maxConnections: number; // default: 100
 
   // Message flow
   rateLimit: {
-    messages: number;                // default: 1 (msg per window)
-    perSeconds: number;              // default: 3 (second window)
+    messages: number; // default: 1 (msg per window)
+    perSeconds: number; // default: 3 (second window)
   };
-  messageMaxBytes: number;           // default: 4096 (4 KB)
-  sessionTimeout: number;            // default: 3600000 (1 hour)
+  messageMaxBytes: number; // default: 4096 (4 KB)
+  sessionTimeout: number; // default: 3600000 (1 hour)
 
   // Agent identity
-  agentFingerprint: string;          // your agent's public key fingerprint
-  agentEdPublicKey: Uint8Array;      // your agent's Ed25519 public key
+  agentFingerprint: string; // your agent's public key fingerprint
+  agentEdPublicKey: Uint8Array; // your agent's Ed25519 public key
+  ttyaAuthSecret: Uint8Array; // same >=32 random bytes as Agent
 }
 ```
 
 ### Default rate limits
 
-| Limit | Value | Purpose |
-|-------|-------|---------|
-| Messages per visitor | 1 message per 3 seconds | Prevent spam |
-| Pending queue size | 10 visitors max | Prevent approval flood |
-| Active connections | 100 max | Prevent resource exhaustion |
-| Message size | 4 KB max | Prevent large payloads |
-| Session timeout | 1 hour | Clean up idle connections |
+| Limit                | Value                   | Purpose                     |
+| -------------------- | ----------------------- | --------------------------- |
+| Messages per visitor | 1 message per 3 seconds | Prevent spam                |
+| Pending queue size   | 10 visitors max         | Prevent approval flood      |
+| Active connections   | 100 max                 | Prevent resource exhaustion |
+| Message size         | 4 KB max                | Prevent large payloads      |
+| Session timeout      | 1 hour                  | Clean up idle connections   |
 
 ## Approval flow
 
@@ -268,6 +274,7 @@ const server = new TTYAServer({
 ```
 
 Use when:
+
 - Your agent has robust content filtering
 - You're running a public demo
 - The agent is designed for unrestricted access
@@ -276,26 +283,29 @@ Use when:
 
 ```typescript
 import {
-  TTYAServer,           // Main server class
-  TTYABridge,           // Hyperswarm bridge
-  ApprovalQueue,        // Visitor queue
+  TTYAServer, // Main server class
+  TTYABridge, // Hyperswarm bridge
+  ApprovalQueue, // Visitor queue
   type TTYAServerConfig,
   type TTYARequest,
   type TTYAResponse,
   type WSClientMessage,
   type WSServerMessage,
   DEFAULT_CONFIG,
-} from '@networkselfmd/web';
+} from "@networkselfmd/web";
 ```
 
 ### TTYAServer
 
 ```typescript
 class TTYAServer {
-  constructor(config: Partial<TTYAServerConfig> & {
-    agentFingerprint: string;
-    agentEdPublicKey: Uint8Array;
-  });
+  constructor(
+    config: Partial<TTYAServerConfig> & {
+      agentFingerprint: string;
+      agentEdPublicKey: Uint8Array;
+      ttyaAuthSecret: Uint8Array;
+    },
+  );
 
   // Start the HTTP/WS server and connect to Hyperswarm
   async start(): Promise<string>;
@@ -329,8 +339,8 @@ class ApprovalQueue {
   getPending(): VisitorSession[];
 
   // Lifecycle
-  touch(visitorId): void;     // update last message timestamp
-  cleanup(): void;             // remove expired sessions
+  touch(visitorId): void; // update last message timestamp
+  cleanup(): void; // remove expired sessions
   get size(): number;
 }
 ```

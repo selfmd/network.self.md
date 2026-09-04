@@ -7,6 +7,7 @@ import {
   hashEpoch,
   createSignedEpoch,
   verifyEpoch,
+  verifyGenesisEpoch,
   createGenesisEpoch,
   type GroupEpoch,
   type SignedGroupEpoch,
@@ -41,13 +42,27 @@ describe('GroupEpoch serialization', () => {
       prevHash: new Uint8Array(32),
       groupId: 'g1',
       members: [{ publicKey: admin.publicKey, role: 'admin' }],
-      timestamp: 1000,
+      createdAt: 1000,
       createdBy: admin.publicKey,
     };
 
     const a = serializeEpoch(epoch);
     const b = serializeEpoch(epoch);
     expect(a).toEqual(b);
+  });
+
+  it('matches the canonical domain/version golden vector', () => {
+    const epoch: GroupEpoch = {
+      version: 0,
+      prevHash: new Uint8Array(32),
+      groupId: '01',
+      members: [{ publicKey: new Uint8Array(32).fill(2), role: 'admin' }],
+      createdAt: 3,
+      createdBy: new Uint8Array(32).fill(2),
+    };
+    expect(Buffer.from(serializeEpoch(epoch)).toString('hex')).toBe(
+      '88781a6e6574776f726b2e73656c662e6d642f47726f757045706f63680100d840582000000000000000000000000000000000000000000000000000000000000000006230318182d840582002020202020202020202020202020202020202020202020202020202020202026561646d696e03d84058200202020202020202020202020202020202020202020202020202020202020202',
+    );
   });
 });
 
@@ -105,7 +120,7 @@ describe('verifyEpoch', () => {
         { publicKey: admin.publicKey, role: 'admin' },
         { publicKey: member.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const signed1 = createSignedEpoch(epoch1, admin.privateKey);
@@ -145,7 +160,7 @@ describe('verifyEpoch', () => {
         { publicKey: admin.publicKey, role: 'admin' },
         { publicKey: member.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: member.publicKey, // member, not admin
     };
     const signed = createSignedEpoch(epoch, member.privateKey);
@@ -177,7 +192,45 @@ describe('createGenesisEpoch', () => {
     expect(epoch.members[0].role).toBe('admin');
     expect(new Uint8Array(epoch.members[0].publicKey)).toEqual(admin.publicKey);
     expect(new Uint8Array(epoch.createdBy)).toEqual(admin.publicKey);
-    expect(epoch.timestamp).toBeGreaterThan(0);
+    expect(epoch.createdAt).toBeGreaterThan(0);
+  });
+});
+
+describe('verifyGenesisEpoch', () => {
+  it('accepts only the exact pinned v0 shape', () => {
+    const admin = generateKeypair();
+    const member = generateKeypair();
+    const valid = createSignedEpoch(
+      createGenesisEpoch('g1', admin.publicKey, 1),
+      admin.privateKey,
+    );
+    expect(verifyGenesisEpoch(valid, 'g1', admin.publicKey)).toBe(true);
+    expect(verifyGenesisEpoch(valid, 'g2', admin.publicKey)).toBe(false);
+
+    const notExact = createSignedEpoch(
+      {
+        ...valid.epoch,
+        members: [
+          ...valid.epoch.members,
+          { publicKey: member.publicKey, role: 'member' },
+        ],
+      },
+      admin.privateKey,
+    );
+    expect(verifyGenesisEpoch(notExact, 'g1', admin.publicKey)).toBe(false);
+  });
+
+  it('rejects a signed v0 that is not the exact one-admin trust anchor', () => {
+    const admin = generateKeypair();
+    const member = generateKeypair();
+    const forgedV0: GroupEpoch = {
+      ...createGenesisEpoch('g1', admin.publicKey),
+      members: [
+        { publicKey: admin.publicKey, role: 'admin' },
+        { publicKey: member.publicKey, role: 'member' },
+      ],
+    };
+    expect(verifyGenesisEpoch(createSignedEpoch(forgedV0, admin.privateKey), 'g1', admin.publicKey)).toBe(false);
   });
 });
 
@@ -201,7 +254,7 @@ describe('epoch chain integrity', () => {
         { publicKey: admin.publicKey, role: 'admin' },
         { publicKey: m1.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s1 = createSignedEpoch(e1, admin.privateKey);
@@ -217,7 +270,7 @@ describe('epoch chain integrity', () => {
         { publicKey: m1.publicKey, role: 'member' },
         { publicKey: m2.publicKey, role: 'member' },
       ],
-      timestamp: Date.now(),
+      createdAt: Date.now(),
       createdBy: admin.publicKey,
     };
     const s2 = createSignedEpoch(e2, admin.privateKey);
@@ -239,10 +292,8 @@ describe('epoch chain integrity', () => {
       version: 1,
       prevHash: s0.hash,
       groupId: 'g1',
-      members: [
-        { publicKey: attacker.publicKey, role: 'admin' },
-      ],
-      timestamp: Date.now(),
+      members: [{ publicKey: attacker.publicKey, role: 'admin' }],
+      createdAt: Date.now(),
       createdBy: attacker.publicKey,
     };
     const signedFork = createSignedEpoch(forked, attacker.privateKey);

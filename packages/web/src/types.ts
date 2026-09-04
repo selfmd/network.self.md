@@ -51,7 +51,7 @@ export interface TTYAServerConfig {
   sessionTimeout: number;
   agentFingerprint: string;
   agentEdPublicKey: Uint8Array;
-  /** Pre-shared secret for TTYA bridge authentication (HMAC challenge-response) */
+  /** Pre-shared secret for mutual TTYA bridge/agent authentication */
   ttyaAuthSecret: Uint8Array;
 }
 

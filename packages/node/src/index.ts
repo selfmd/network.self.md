@@ -1,5 +1,12 @@
-export { Agent } from './agent.js';
-export type { AgentOptions, MemberInfo, Message } from './agent.js';
+export { Agent, IdentityKeyStorageError } from './agent.js';
+export type {
+  AgentOptions,
+  IdentityKeyStorageErrorCode,
+  MemberInfo,
+  Message,
+} from './agent.js';
+export { secretFileProvider } from './secrets.js';
+export type { SecretProvider } from './secrets.js';
 
 export { AgentDatabase } from './storage/database.js';
 export {
@@ -18,3 +25,10 @@ export { MessageRouter } from './network/router.js';
 export { performHandshake } from './network/handshake.js';
 
 export { GroupManager } from './groups/group-manager.js';
+
+export { TTYAManager } from './ttya/ttya-manager.js';
+export type {
+  TTYARequest,
+  TTYAResponse,
+  TTYAVisitor,
+} from './ttya/ttya-manager.js';

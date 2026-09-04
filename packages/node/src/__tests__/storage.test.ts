@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import {
   AgentDatabase,
   IdentityRepository,
@@ -26,6 +27,20 @@ afterEach(() => {
 });
 
 describe('AgentDatabase', () => {
+  it.skipIf(process.platform === 'win32')('should enforce private permissions on the directory and SQLite files', () => {
+    chmodSync(dataDir, 0o777);
+    database.migrate();
+    database.getDb().prepare('INSERT INTO peers (public_key, fingerprint) VALUES (?, ?)')
+      .run(Buffer.alloc(32), 'permissions-test');
+    database.enforcePermissions();
+
+    expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+    for (const suffix of ['', '-wal', '-shm']) {
+      const path = join(dataDir, `agent.db${suffix}`);
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
+  });
   it('should create database and run migrations', () => {
     const db = database.getDb();
     const tables = db
@@ -53,7 +68,89 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(4);
+    expect(row.version).toBe(7);
+  });
+
+  it('should migrate a populated v4 identity to the nullable encrypted-only schema', () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'nsmd-v4-test-'));
+    const legacyDb = new Database(join(legacyDir, 'agent.db'));
+    legacyDb.exec(`
+      CREATE TABLE identity (
+        id INTEGER PRIMARY KEY,
+        ed_private_key BLOB NOT NULL,
+        ed_public_key BLOB NOT NULL,
+        display_name TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE groups (
+        group_id BLOB PRIMARY KEY,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        created_at INTEGER NOT NULL,
+        joined_at INTEGER,
+        is_public INTEGER DEFAULT 0,
+        self_md TEXT
+      );
+      CREATE TABLE discovered_groups (
+        group_id BLOB PRIMARY KEY,
+        name TEXT NOT NULL,
+        self_md TEXT,
+        member_count INTEGER DEFAULT 0,
+        announced_by BLOB NOT NULL,
+        last_announced INTEGER NOT NULL
+      );
+      CREATE TABLE sender_keys (
+        group_id BLOB NOT NULL,
+        public_key BLOB NOT NULL,
+        chain_key BLOB NOT NULL,
+        chain_index INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (group_id, public_key)
+      );
+      CREATE TABLE peers (
+        public_key BLOB PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        display_name TEXT,
+        trusted INTEGER DEFAULT 0,
+        last_seen INTEGER
+      );
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      INSERT INTO schema_version (version) VALUES (4);
+    `);
+    legacyDb.prepare(
+      `INSERT INTO identity (id, ed_private_key, ed_public_key, display_name, created_at)
+       VALUES (1, ?, ?, 'LegacyAgent', 1234)`,
+    ).run(Buffer.alloc(32, 1), Buffer.alloc(32, 2));
+    legacyDb.prepare(
+      `INSERT INTO discovered_groups
+        (group_id, name, self_md, member_count, announced_by, last_announced)
+       VALUES (?, 'Unauthenticated cache', NULL, 1, ?, 1234)`,
+    ).run(Buffer.alloc(32, 3), Buffer.alloc(32, 4));
+    legacyDb.close();
+
+    const migrated = new AgentDatabase(legacyDir);
+    migrated.migrate();
+    const migratedDb = migrated.getDb();
+    const row = migratedDb.prepare('SELECT * FROM identity WHERE id = 1').get() as {
+      ed_private_key: Buffer;
+      display_name: string;
+    };
+    const privateKeyColumn = migratedDb
+      .prepare(`PRAGMA table_info('identity')`)
+      .all()
+      .find((column) => (column as { name: string }).name === 'ed_private_key') as {
+      notnull: number;
+    };
+
+    expect(row.ed_private_key).toEqual(Buffer.alloc(32, 1));
+    expect(row.display_name).toBe('LegacyAgent');
+    expect(privateKeyColumn.notnull).toBe(0);
+    expect(
+      migratedDb
+        .prepare('SELECT COUNT(*) AS count FROM discovered_groups')
+        .get(),
+    ).toEqual({ count: 0 });
+    migrated.close();
+    rmSync(legacyDir, { recursive: true, force: true });
   });
 });
 
@@ -69,7 +166,63 @@ describe('IdentityRepository', () => {
     expect(loaded).toBeDefined();
     expect(loaded!.display_name).toBe('TestAgent');
     expect(new Uint8Array(loaded!.ed_public_key)).toEqual(publicKey);
-    expect(new Uint8Array(loaded!.ed_private_key)).toEqual(privateKey);
+    expect(new Uint8Array(loaded!.ed_private_key!)).toEqual(privateKey);
+  });
+
+  it('should atomically store an encrypted-only identity', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const publicKey = new Uint8Array(32).fill(2);
+    const salt = new Uint8Array(32).fill(3);
+    const nonce = new Uint8Array(24).fill(4);
+    const ciphertext = new Uint8Array(48).fill(5);
+
+    repo.saveEncrypted(publicKey, 'EncryptedAgent', salt, nonce, ciphertext);
+
+    const identity = repo.load();
+    const encrypted = repo.loadEncryptedKeys();
+    expect(identity!.ed_private_key).toBeNull();
+    expect(new Uint8Array(identity!.ed_public_key)).toEqual(publicKey);
+    expect(new Uint8Array(encrypted!.ciphertext)).toEqual(ciphertext);
+  });
+
+  it('should write ciphertext before clearing a migrated plaintext key', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const privateKey = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    const salt = new Uint8Array(32).fill(3);
+    const nonce = new Uint8Array(24).fill(4);
+    const ciphertext = new Uint8Array(48).fill(5);
+    repo.save(privateKey, publicKey, 'MigratedAgent');
+
+    repo.migrateToEncrypted(salt, nonce, ciphertext);
+
+    expect(repo.load()!.ed_private_key).toBeNull();
+    expect(new Uint8Array(repo.loadEncryptedKeys()!.ciphertext)).toEqual(ciphertext);
+  });
+
+  it('should retain the plaintext key if encrypted storage cannot be written', () => {
+    const repo = new IdentityRepository(database.getDb());
+    const privateKey = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    repo.save(privateKey, publicKey, 'RollbackAgent');
+    database.getDb().exec(`
+      CREATE TRIGGER reject_encrypted_key
+      BEFORE INSERT ON key_storage
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated encrypted storage failure');
+      END;
+    `);
+
+    expect(() =>
+      repo.migrateToEncrypted(
+        new Uint8Array(32).fill(3),
+        new Uint8Array(24).fill(4),
+        new Uint8Array(48).fill(5),
+      ),
+    ).toThrow('simulated encrypted storage failure');
+
+    expect(new Uint8Array(repo.load()!.ed_private_key!)).toEqual(privateKey);
+    expect(repo.loadEncryptedKeys()).toBeUndefined();
   });
 
   it('should save and load encrypted keys', () => {
@@ -135,6 +288,55 @@ describe('PeerRepository', () => {
     const updated = repo.find(pk)!.last_seen!;
     expect(updated).toBeGreaterThanOrEqual(first);
   });
+
+  it('pins the Ed25519 identity to its first observed Noise transport key', () => {
+    const publicKey = new Uint8Array(32).fill(10);
+    const noisePublicKey = new Uint8Array(32).fill(20);
+
+    repo.pinTransportIdentity(publicKey, 'abc123', noisePublicKey, 'Old name');
+    repo.pinTransportIdentity(publicKey, 'abc123', noisePublicKey, 'New name');
+
+    const found = repo.find(publicKey)!;
+    expect(new Uint8Array(found.noise_public_key!)).toEqual(noisePublicKey);
+    expect(found.display_name).toBe('New name');
+  });
+
+  it('rejects a changed Noise key without treating a display-name update as a key change', () => {
+    const publicKey = new Uint8Array(32).fill(10);
+    repo.pinTransportIdentity(
+      publicKey,
+      'abc123',
+      new Uint8Array(32).fill(20),
+      'Old name',
+    );
+
+    expect(() =>
+      repo.pinTransportIdentity(
+        publicKey,
+        'abc123',
+        new Uint8Array(32).fill(21),
+        'New name',
+      ),
+    ).toThrow(/transport key changed/i);
+    expect(repo.find(publicKey)!.display_name).toBe('Old name');
+  });
+
+  it('rejects substituting another identity onto a pinned Noise key', () => {
+    const noisePublicKey = new Uint8Array(32).fill(20);
+    repo.pinTransportIdentity(
+      new Uint8Array(32).fill(10),
+      'identity-1',
+      noisePublicKey,
+    );
+
+    expect(() =>
+      repo.pinTransportIdentity(
+        new Uint8Array(32).fill(11),
+        'identity-2',
+        noisePublicKey,
+      ),
+    ).toThrow(/different identity/i);
+  });
 });
 
 describe('GroupRepository', () => {
@@ -160,6 +362,46 @@ describe('GroupRepository', () => {
 
     const groups = repo.list();
     expect(groups.length).toBe(2);
+  });
+
+  it('atomically pins an unpinned legacy group and accepts only the exact authority afterwards', () => {
+    const gid = new Uint8Array(32).fill(3);
+    const creator = new Uint8Array(32).fill(4);
+    const genesisHash = new Uint8Array(32).fill(5);
+    repo.create(gid, 'Legacy', 'member');
+
+    repo.join(gid, 'Verified', 'member', creator, genesisHash);
+    const pinned = repo.find(gid)!;
+    expect(new Uint8Array(pinned.creator_public_key!)).toEqual(creator);
+    expect(new Uint8Array(pinned.genesis_hash!)).toEqual(genesisHash);
+
+    repo.join(gid, 'Verified again', 'member', creator, genesisHash);
+
+    expect(() =>
+      repo.join(
+        gid,
+        'Attacker',
+        'member',
+        new Uint8Array(32).fill(6),
+        genesisHash,
+      ),
+    ).toThrow(/authority mismatch/i);
+    expect(repo.find(gid)!.name).toBe('Verified again');
+  });
+
+  it('rejects partial and missing authority updates for an already pinned group', () => {
+    const gid = new Uint8Array(32).fill(7);
+    const creator = new Uint8Array(32).fill(8);
+    const genesisHash = new Uint8Array(32).fill(9);
+    repo.create(gid, 'Pinned', 'member', creator, genesisHash);
+
+    expect(() => repo.join(gid, 'No proof', 'member')).toThrow(
+      /authority mismatch/i,
+    );
+    expect(() => repo.join(gid, 'Partial', 'member', creator)).toThrow(
+      /both creator key and genesis hash/i,
+    );
+    expect(repo.find(gid)!.name).toBe('Pinned');
   });
 
   it('should manage members', () => {
@@ -318,5 +560,17 @@ describe('SenderKeyRepository', () => {
 
     expect(repo.load(gid, new Uint8Array(32).fill(10))).toBeUndefined();
     expect(repo.load(gid, new Uint8Array(32).fill(20))).toBeUndefined();
+  });
+
+  it('durably rejects replayed or rolled-back distributions', () => {
+    const gid = new Uint8Array(32).fill(4);
+    const pk = new Uint8Array(32).fill(5);
+    const generation = new Uint8Array(16).fill(6);
+    const epochHash = new Uint8Array(32).fill(7);
+    expect(repo.storeIfNewer(gid, pk, new Uint8Array(32).fill(1), 10, generation, 8, 3, epochHash)).toBe(true);
+    const reopened = new SenderKeyRepository(database.getDb());
+    expect(reopened.storeIfNewer(gid, pk, new Uint8Array(32).fill(2), 10, generation, 8, 3, epochHash)).toBe(false);
+    expect(reopened.storeIfNewer(gid, pk, new Uint8Array(32).fill(3), 9, generation, 9, 3, epochHash)).toBe(false);
+    expect(new Uint8Array(reopened.load(gid, pk)!.chain_key)).toEqual(new Uint8Array(32).fill(1));
   });
 });

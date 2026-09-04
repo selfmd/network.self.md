@@ -33,6 +33,10 @@ export function fingerprintFromPublicKey(edPublicKey: Uint8Array): string {
   return zBase32Encode(truncated);
 }
 
+export function deriveEd25519PublicKey(edPrivateKey: Uint8Array): Uint8Array {
+  return ed25519.getPublicKey(edPrivateKey);
+}
+
 export function deriveX25519KeyPair(edPrivateKey: Uint8Array): {
   xPrivateKey: Uint8Array;
   xPublicKey: Uint8Array;

@@ -1,353 +1,540 @@
-/**
- * Hyperswarm bridge for TTYA.
- *
- * Connects the web server to the agent node via the Hyperswarm P2P network.
- * Derives a TTYA-specific topic from the agent's Ed25519 public key,
- * joins it, and forwards messages between WebSocket visitors and the agent.
- */
-
+/** Noise-bound, mutually authenticated Hyperswarm bridge for TTYA. */
 import Hyperswarm from 'hyperswarm';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  MAX_TTYA_FRAME_SIZE,
+  TTYA_AUTH_NONCE_BYTES,
+  TTYA_AUTH_VERSION,
+  TTYAFrameDecoder,
+  buildTTYAAuthProofPayload,
+  buildTTYADataProofPayload,
+  buildTTYASessionKeyPayload,
+  copyAndValidateTTYAAuthSecret,
+  copyAndValidateTTYAChannelBinding,
+  deriveKey,
+  isTTYAAuthChallengeFrame,
+  isTTYAAuthConfirmationFrame,
+  isTTYADataFrame,
+  type TTYAAuthConfirmationFrame,
+  type TTYAAuthResponseFrame,
+  type TTYADataFrame,
+} from '@networkselfmd/core';
 import type { TTYARequest, TTYAResponse } from './types.js';
 
-/** Maximum allowed TTYA frame payload size (64 KB). Prevents OOM from malicious peers. */
-const MAX_TTYA_FRAME_SIZE = 65536;
-
-/**
- * HKDF-SHA256 implementation using Node.js crypto.
- * topic = hkdf(sha256, ikm, salt, info, length)
- */
-function hkdfSha256(
-  ikm: Uint8Array,
-  salt: string,
-  info: string,
-  length: number,
-): Uint8Array {
-  const saltBuf = salt ? Buffer.from(salt, 'utf-8') : Buffer.alloc(32);
-  // Extract
-  const prk = createHmac('sha256', saltBuf).update(ikm).digest();
-  // Expand
-  const infoBuf = Buffer.from(info || '', 'utf-8');
-  const n = Math.ceil(length / 32);
-  const okm = Buffer.alloc(n * 32);
-  let prev = Buffer.alloc(0);
-  for (let i = 1; i <= n; i++) {
-    prev = createHmac('sha256', prk)
-      .update(Buffer.concat([prev, infoBuf, Buffer.from([i])]))
-      .digest();
-    prev.copy(okm, (i - 1) * 32);
-  }
-  return new Uint8Array(okm.subarray(0, length));
+interface TTYASocket {
+  handshakeHash?: Uint8Array | null;
+  remotePublicKey?: Uint8Array | null;
+  write(data: Uint8Array): boolean;
+  destroy(): void;
+  on(event: string, listener: (...args: any[]) => void): unknown;
 }
 
-/**
- * Encode a TTYARequest as a length-prefixed JSON frame.
- * Wire format: [4 bytes uint32 BE length][JSON payload]
- *
- * In production this should use CBOR (cbor-x) matching the protocol spec.
- */
-function encodeFrame(msg: TTYARequest): Uint8Array {
-  const json = JSON.stringify(msg);
-  const payload = Buffer.from(json, 'utf-8');
-  const frame = Buffer.alloc(4 + payload.length);
-  frame.writeUInt32BE(payload.length, 0);
-  payload.copy(frame, 4);
-  return new Uint8Array(frame);
+interface AuthFailureState {
+  failures: number;
+  lastFailure: number;
+  blockedUntil: number;
 }
 
+type BridgeAuthState =
+  | 'awaiting-challenge'
+  | 'awaiting-confirmation'
+  | 'authenticated';
+
+interface BridgeConnectionState {
+  readonly decoder: TTYAFrameDecoder;
+  readonly binding: Uint8Array;
+  readonly key: string;
+  authState: BridgeAuthState;
+  agentNonce: string | null;
+  bridgeNonce: string | null;
+  sessionKey: Buffer | null;
+  receiveSequence: number;
+  sendSequence: number;
+  authTimeout: ReturnType<typeof setTimeout> | null;
+}
+
+const AUTH_TIMEOUT_MS = 5_000;
+const AUTH_RATE_WINDOW_MS = 60_000;
+const AUTH_FAILURES_PER_PEER = 5;
+const AUTH_FAILURES_GLOBAL = 20;
+const AUTH_BACKOFF_BASE_MS = 250;
+const AUTH_BACKOFF_MAX_MS = 30_000;
+export const MAX_TTYA_AUTH_CANDIDATES = 4;
+const MAX_PENDING_REQUESTS = 1_000;
+const MAX_VISITOR_ID_BYTES = 128;
+const MAX_CONTENT_BYTES = 4_096;
 const VALID_RESPONSE_ACTIONS = new Set(['approve', 'reject', 'reply']);
 
-/**
- * Runtime validation for TTYAResponse objects received over the wire.
- * Rejects messages with missing or wrong-type fields to prevent crashes
- * from malicious Hyperswarm peers.
- */
+function hasMaxBytes(value: string, maximum: number): boolean {
+  return Buffer.byteLength(value, 'utf8') <= maximum;
+}
+
 function isValidTTYAResponse(obj: unknown): obj is TTYAResponse {
   if (obj === null || typeof obj !== 'object') return false;
-  const o = obj as Record<string, unknown>;
-  if (o.type !== 0x08) return false;
-  if (typeof o.visitorId !== 'string') return false;
-  if (typeof o.action !== 'string' || !VALID_RESPONSE_ACTIONS.has(o.action)) return false;
-  if (o.content !== undefined && typeof o.content !== 'string') return false;
-  if (o.sessionToken !== undefined && typeof o.sessionToken !== 'string') return false;
+  const value = obj as Record<string, unknown>;
+  if (value.type !== 0x08) return false;
+  if (
+    typeof value.visitorId !== 'string' ||
+    value.visitorId.length === 0 ||
+    !hasMaxBytes(value.visitorId, MAX_VISITOR_ID_BYTES)
+  ) {
+    return false;
+  }
+  if (
+    typeof value.action !== 'string' ||
+    !VALID_RESPONSE_ACTIONS.has(value.action)
+  ) {
+    return false;
+  }
+  if (
+    value.content !== undefined &&
+    (typeof value.content !== 'string' ||
+      !hasMaxBytes(value.content, MAX_CONTENT_BYTES))
+  ) {
+    return false;
+  }
+  if (
+    value.sessionToken !== undefined &&
+    typeof value.sessionToken !== 'string'
+  ) {
+    return false;
+  }
   return true;
 }
 
-/**
- * Decode length-prefixed JSON frames from a buffer.
- * Returns parsed TTYAResponse objects and the number of bytes consumed.
- */
-function decodeFrames(data: Buffer): { responses: TTYAResponse[]; consumed: number } {
-  const responses: TTYAResponse[] = [];
-  let offset = 0;
-
-  while (offset + 4 <= data.length) {
-    const len = data.readUInt32BE(offset);
-    if (len > MAX_TTYA_FRAME_SIZE) {
-      throw new Error(`TTYA frame too large: ${len} bytes (max ${MAX_TTYA_FRAME_SIZE})`);
-    }
-    if (offset + 4 + len > data.length) break;
-    const payload = data.subarray(offset + 4, offset + 4 + len);
-    try {
-      const parsed: unknown = JSON.parse(payload.toString('utf-8'));
-      if (isValidTTYAResponse(parsed)) {
-        responses.push(parsed);
-      } else {
-        console.warn('[TTYABridge] Skipping invalid response frame: failed validation');
-      }
-    } catch {
-      // skip malformed frames
-    }
-    offset += 4 + len;
+function encodeFrame(value: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(value), 'utf8');
+  if (payload.length === 0 || payload.length > MAX_TTYA_FRAME_SIZE) {
+    throw new Error('TTYA frame exceeds maximum size');
   }
-
-  return { responses, consumed: offset };
+  const frame = Buffer.allocUnsafe(4 + payload.length);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return frame;
 }
 
-/** Challenge frame sent by agent to bridge on connection */
-interface TTYAChallengeFrame {
-  type: 'ttya-challenge';
-  challenge: string; // hex-encoded 32 random bytes
+function parseJsonFrame(payload: Uint8Array): unknown {
+  return JSON.parse(Buffer.from(payload).toString('utf8')) as unknown;
 }
 
-function isValidChallengeFrame(obj: unknown): obj is TTYAChallengeFrame {
-  if (obj === null || typeof obj !== 'object') return false;
-  const o = obj as Record<string, unknown>;
-  return (
-    o.type === 'ttya-challenge' &&
-    typeof o.challenge === 'string'
-  );
+function connectionKey(conn: TTYASocket): string {
+  const remoteKey = conn.remotePublicKey;
+  return remoteKey instanceof Uint8Array && remoteKey.length > 0
+    ? Buffer.from(remoteKey).toString('hex')
+    : 'unknown';
 }
-
-const MAX_PENDING_REQUESTS = 1000;
 
 export class TTYABridge {
-  private agentEdPublicKey: Uint8Array;
-  private authSecret: Uint8Array;
+  private readonly agentEdPublicKey: Uint8Array;
+  private readonly authSecret: Uint8Array;
   private swarm: Hyperswarm | null = null;
-  private agentConnection: any = null;
+  private connectPromise: Promise<void> | null = null;
+  private agentConnection: TTYASocket | null = null;
+  private connections = new Map<TTYASocket, BridgeConnectionState>();
   private responseHandler: ((response: TTYAResponse) => void) | null = null;
   private pendingRequests: TTYARequest[] = [];
-  private receiveBuffer = Buffer.alloc(0);
-  private authenticated = false;
+  private authFailures = new Map<string, AuthFailureState>();
+  private globalAuthFailures: number[] = [];
 
   constructor(agentEdPublicKey: Uint8Array, authSecret: Uint8Array) {
-    this.agentEdPublicKey = agentEdPublicKey;
-    this.authSecret = authSecret;
+    if (
+      !(agentEdPublicKey instanceof Uint8Array) ||
+      agentEdPublicKey.length !== 32
+    ) {
+      throw new Error('TTYA agent Ed25519 public key must be 32 bytes');
+    }
+    this.agentEdPublicKey = new Uint8Array(agentEdPublicKey);
+    this.authSecret = copyAndValidateTTYAAuthSecret(authSecret);
   }
 
-  /**
-   * Derive the TTYA topic from the agent's Ed25519 public key.
-   * topic = hkdf(sha256, agentEdPublicKey, "networkselfmd-ttya-v1", "", 32)
-   */
   private deriveTopic(): Buffer {
-    const topic = hkdfSha256(this.agentEdPublicKey, 'networkselfmd-ttya-v1', '', 32);
-    return Buffer.from(topic);
+    return Buffer.from(
+      deriveKey(this.agentEdPublicKey, 'networkselfmd-ttya-v1', '', 32),
+    );
   }
 
-  /**
-   * Join the Hyperswarm topic and wait for the agent node to connect.
-   */
   async connect(): Promise<void> {
-    const topic = this.deriveTopic();
-
-    this.swarm = new Hyperswarm();
-
-    this.swarm.on('connection', (conn: any, _info: any) => {
-      this.agentConnection = conn;
-      this.authenticated = false;
-
-      // Don't send requests yet — wait for challenge from agent
-
-      conn.on('data', (chunk: Buffer) => {
-        this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);
-
-        if (this.receiveBuffer.length > MAX_TTYA_FRAME_SIZE + 4) {
-          console.warn(`[TTYABridge] Receive buffer exceeded max size (${this.receiveBuffer.length} bytes), destroying connection`);
-          this.receiveBuffer = Buffer.alloc(0);
-          conn.destroy();
-          return;
-        }
-
-        this.processReceiveBuffer();
-      });
-
-      conn.on('close', () => {
-        this.agentConnection = null;
-        this.authenticated = false;
-        this.receiveBuffer = Buffer.alloc(0);
-      });
-
-      conn.on('error', () => {
-        this.agentConnection = null;
-        this.authenticated = false;
-        this.receiveBuffer = Buffer.alloc(0);
-      });
-    });
-
-    // Join the TTYA topic as a client (looking for the agent server)
-    this.swarm.join(topic, { client: true, server: false });
-    await this.swarm.flush();
+    if (this.connectPromise) return this.connectPromise;
+    if (this.swarm) return;
+    this.connectPromise = this.connectInternal();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
-  /**
-   * Disconnect from Hyperswarm.
-   */
+  private async connectInternal(): Promise<void> {
+    const swarm = new Hyperswarm();
+    this.swarm = swarm;
+    swarm.on('connection', (conn: TTYASocket) => this.acceptConnection(conn));
+    try {
+      swarm.join(this.deriveTopic(), { client: true, server: false });
+      await swarm.flush();
+      if (this.swarm !== swarm) await swarm.destroy();
+    } catch (error) {
+      if (this.swarm === swarm) this.swarm = null;
+      await swarm.destroy().catch(() => {});
+      throw error;
+    }
+  }
+
   async disconnect(): Promise<void> {
-    if (this.agentConnection) {
-      try {
-        this.agentConnection.destroy();
-      } catch {
-        // ignore
-      }
-      this.agentConnection = null;
+    if (this.connectPromise) await this.connectPromise.catch(() => {});
+    const connections = [...this.connections.keys()];
+    this.agentConnection = null;
+    for (const connection of connections) {
+      this.removeConnection(connection);
+      this.closeSocket(connection);
     }
-
-    if (this.swarm) {
-      await this.swarm.destroy();
-      this.swarm = null;
-    }
-
-    this.receiveBuffer = Buffer.alloc(0);
+    const swarm = this.swarm;
+    this.swarm = null;
+    if (swarm) await swarm.destroy();
     this.pendingRequests = [];
-    this.authenticated = false;
+    this.authFailures.clear();
+    this.globalAuthFailures = [];
   }
 
-  /**
-   * Send a TTYARequest to the connected agent.
-   * If agent is not connected yet, the request is queued.
-   */
   sendToAgent(request: TTYARequest): void {
-    if (this.agentConnection && this.authenticated) {
-      this.writeRequest(request);
-    } else {
-      if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
-        console.warn('[Bridge] Pending request queue full, dropping oldest');
-        this.pendingRequests.shift();
-      }
-      this.pendingRequests.push(request);
+    const connection = this.agentConnection;
+    const state = connection ? this.connections.get(connection) : undefined;
+    if (connection && state?.authState === 'authenticated') {
+      if (this.writeRequest(request, connection, state)) return;
     }
+    if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
+      this.pendingRequests.shift();
+    }
+    this.pendingRequests.push(structuredClone(request));
   }
 
-  /**
-   * Register handler for TTYAResponse messages from the agent.
-   */
   onAgentResponse(handler: (response: TTYAResponse) => void): void {
     this.responseHandler = handler;
   }
 
-  /** Whether we have an active connection to the agent node */
   get isConnected(): boolean {
-    return this.agentConnection !== null && this.authenticated;
+    if (!this.agentConnection) return false;
+    return (
+      this.connections.get(this.agentConnection)?.authState === 'authenticated'
+    );
   }
 
-  /**
-   * Send a challenge-response HMAC back to the agent.
-   */
-  private sendChallengeResponse(challenge: string): void {
-    if (!this.agentConnection) return;
+  private acceptConnection(conn: TTYASocket): void {
+    // Keep an authenticated incumbent stable, but allow a bounded race among
+    // candidates so a silent first socket cannot monopolize the topic.
+    if (this.agentConnection) {
+      this.closeSocket(conn);
+      return;
+    }
+    if (this.connections.size >= MAX_TTYA_AUTH_CANDIDATES) {
+      this.closeSocket(conn);
+      return;
+    }
+    const now = Date.now();
+    const key = connectionKey(conn);
+    if (!this.mayAttemptAuthentication(key, now)) {
+      this.closeSocket(conn);
+      return;
+    }
 
-    const challengeBytes = Buffer.from(challenge, 'hex');
-    const hmacValue = createHmac('sha256', this.authSecret)
-      .update(challengeBytes)
-      .digest()
-      .toString('hex');
+    let binding: Uint8Array;
+    try {
+      binding = copyAndValidateTTYAChannelBinding(conn.handshakeHash);
+    } catch {
+      this.recordAuthFailure(key, now);
+      this.closeSocket(conn);
+      return;
+    }
 
-    const responseFrame = {
-      type: 'ttya-challenge-response',
-      hmac: hmacValue,
+    const state: BridgeConnectionState = {
+      decoder: new TTYAFrameDecoder(),
+      binding,
+      key,
+      authState: 'awaiting-challenge',
+      agentNonce: null,
+      bridgeNonce: null,
+      sessionKey: null,
+      receiveSequence: 0,
+      sendSequence: 0,
+      authTimeout: null,
     };
-
-    const json = JSON.stringify(responseFrame);
-    const jsonBuf = Buffer.from(json, 'utf-8');
-    const frame = Buffer.alloc(4 + jsonBuf.length);
-    frame.writeUInt32BE(jsonBuf.length, 0);
-    jsonBuf.copy(frame, 4);
-
-    try {
-      this.agentConnection.write(frame);
-    } catch {
-      // connection may have dropped
-    }
-  }
-
-  private writeRequest(request: TTYARequest): void {
-    if (!this.agentConnection) return;
-    try {
-      const frame = encodeFrame(request);
-      this.agentConnection.write(Buffer.from(frame));
-    } catch {
-      // connection may have dropped
-    }
-  }
-
-  private processReceiveBuffer(): void {
-    // If not authenticated, expect the first frame to be a challenge from the agent
-    if (!this.authenticated) {
-      if (this.receiveBuffer.length < 4) return;
-      const len = this.receiveBuffer.readUInt32BE(0);
-      if (len > MAX_TTYA_FRAME_SIZE) {
-        console.warn('[TTYABridge] Challenge frame too large, destroying connection');
-        this.receiveBuffer = Buffer.alloc(0);
-        if (this.agentConnection) this.agentConnection.destroy();
-        return;
-      }
-      if (this.receiveBuffer.length < 4 + len) return;
-
-      const payload = this.receiveBuffer.subarray(4, 4 + len);
-      this.receiveBuffer = Buffer.from(this.receiveBuffer.subarray(4 + len));
-
+    this.connections.set(conn, state);
+    conn.on('data', (chunk: Uint8Array) => {
+      if (this.connections.get(conn) !== state) return;
       try {
-        const parsed: unknown = JSON.parse(payload.toString('utf-8'));
-        if (isValidChallengeFrame(parsed)) {
-          // Respond with HMAC
-          this.sendChallengeResponse(parsed.challenge);
-          this.authenticated = true;
-
-          // Flush any requests that queued before authentication
-          for (const req of this.pendingRequests) {
-            this.writeRequest(req);
-          }
-          this.pendingRequests = [];
-
-          // Continue processing any remaining data in the buffer
-          if (this.receiveBuffer.length > 0) {
-            this.processReceiveBuffer();
-          }
-          return;
+        const frames = state.decoder.push(chunk);
+        for (const frame of frames) {
+          if (this.connections.get(conn) !== state) return;
+          this.processFrame(conn, state, frame);
         }
       } catch {
-        // malformed frame
+        this.destroyConnection(conn, state.authState !== 'authenticated');
       }
+    });
+    conn.on('close', () => this.handleConnectionClosed(conn));
+    conn.on('error', () => this.handleConnectionClosed(conn));
 
-      // Challenge parsing failed — destroy connection
-      console.warn('[TTYABridge] Failed to parse challenge frame, destroying connection');
-      this.receiveBuffer = Buffer.alloc(0);
-      if (this.agentConnection) this.agentConnection.destroy();
+    state.authTimeout = setTimeout(() => {
+      if (
+        this.connections.get(conn) === state &&
+        state.authState !== 'authenticated'
+      ) {
+        this.destroyConnection(conn, true);
+      }
+    }, AUTH_TIMEOUT_MS);
+    state.authTimeout.unref?.();
+  }
+
+  private processFrame(
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+    payload: Uint8Array,
+  ): void {
+    const parsed = parseJsonFrame(payload);
+    if (state.authState === 'awaiting-challenge') {
+      if (!isTTYAAuthChallengeFrame(parsed)) {
+        throw new Error('Invalid TTYA authentication challenge');
+      }
+      state.agentNonce = parsed.agentNonce;
+      state.bridgeNonce = randomBytes(TTYA_AUTH_NONCE_BYTES).toString('hex');
+      const response: TTYAAuthResponseFrame = {
+        type: 'ttya-auth-response',
+        version: TTYA_AUTH_VERSION,
+        agentNonce: state.agentNonce,
+        bridgeNonce: state.bridgeNonce,
+        proof: createHmac('sha256', this.authSecret)
+          .update(
+            buildTTYAAuthProofPayload(
+              'bridge',
+              state.agentNonce,
+              state.bridgeNonce,
+              state.binding,
+            ),
+          )
+          .digest('hex'),
+      };
+      state.authState = 'awaiting-confirmation';
+      conn.write(encodeFrame(response));
       return;
     }
 
-    // Authenticated — process TTYAResponse frames normally
-    let responses: TTYAResponse[];
-    let consumed: number;
+    if (state.authState === 'awaiting-confirmation') {
+      if (
+        !isTTYAAuthConfirmationFrame(parsed) ||
+        !this.verifyAgentConfirmation(state, parsed)
+      ) {
+        throw new Error('Invalid TTYA authentication confirmation');
+      }
+      state.sessionKey = createHmac('sha256', this.authSecret)
+        .update(
+          buildTTYASessionKeyPayload(
+            state.agentNonce!,
+            state.bridgeNonce!,
+            state.binding,
+          ),
+        )
+        .digest();
+      if (this.agentConnection && this.agentConnection !== conn) {
+        this.destroyConnection(conn, false);
+        return;
+      }
+      state.authState = 'authenticated';
+      state.agentNonce = null;
+      state.bridgeNonce = null;
+      this.clearAuthTimeout(state);
+      this.authFailures.delete(state.key);
+      this.agentConnection = conn;
+      for (const candidate of [...this.connections.keys()]) {
+        if (candidate !== conn) this.destroyConnection(candidate, false);
+      }
+      this.flushPendingRequests(conn, state);
+      return;
+    }
+
+    if (!isTTYADataFrame(parsed)) {
+      throw new Error('Expected authenticated TTYA data frame');
+    }
+    const response = this.verifyAndDecodeDataFrame(state, parsed);
+    if (!isValidTTYAResponse(response)) {
+      throw new Error('Invalid TTYA response');
+    }
+    this.responseHandler?.(response);
+  }
+
+  private verifyAgentConfirmation(
+    state: BridgeConnectionState,
+    frame: TTYAAuthConfirmationFrame,
+  ): boolean {
+    if (
+      !state.agentNonce ||
+      !state.bridgeNonce ||
+      frame.agentNonce !== state.agentNonce ||
+      frame.bridgeNonce !== state.bridgeNonce
+    ) {
+      return false;
+    }
+    const expected = createHmac('sha256', this.authSecret)
+      .update(
+        buildTTYAAuthProofPayload(
+          'agent',
+          state.agentNonce,
+          state.bridgeNonce,
+          state.binding,
+        ),
+      )
+      .digest();
+    const received = Buffer.from(frame.proof, 'hex');
+    return (
+      received.length === expected.length && timingSafeEqual(expected, received)
+    );
+  }
+
+  private verifyAndDecodeDataFrame(
+    state: BridgeConnectionState,
+    frame: TTYADataFrame,
+  ): unknown {
+    if (!state.sessionKey || frame.sequence !== state.receiveSequence) {
+      throw new Error('Invalid TTYA data sequence');
+    }
+    const payload = Buffer.from(frame.payload, 'base64');
+    if (payload.toString('base64') !== frame.payload) {
+      throw new Error('Non-canonical TTYA data payload');
+    }
+    const expected = createHmac('sha256', state.sessionKey)
+      .update(
+        buildTTYADataProofPayload('agent-to-bridge', frame.sequence, payload),
+      )
+      .digest();
+    const received = Buffer.from(frame.proof, 'hex');
+    if (
+      received.length !== expected.length ||
+      !timingSafeEqual(expected, received)
+    ) {
+      throw new Error('Invalid TTYA data proof');
+    }
+    state.receiveSequence += 1;
+    return JSON.parse(payload.toString('utf8')) as unknown;
+  }
+
+  private writeRequest(
+    request: TTYARequest,
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+  ): boolean {
+    if (
+      this.agentConnection !== conn ||
+      state.authState !== 'authenticated' ||
+      !state.sessionKey
+    ) {
+      return false;
+    }
     try {
-      ({ responses, consumed } = decodeFrames(this.receiveBuffer));
-    } catch (err) {
-      console.warn('[TTYABridge] Frame decode error, clearing buffer:', err);
-      this.receiveBuffer = Buffer.alloc(0);
-      if (this.agentConnection) {
-        this.agentConnection.destroy();
-      }
-      return;
+      const payload = Buffer.from(JSON.stringify(request), 'utf8');
+      const sequence = state.sendSequence;
+      const frame: TTYADataFrame = {
+        type: 'ttya-data',
+        version: TTYA_AUTH_VERSION,
+        sequence,
+        payload: payload.toString('base64'),
+        proof: createHmac('sha256', state.sessionKey)
+          .update(
+            buildTTYADataProofPayload('bridge-to-agent', sequence, payload),
+          )
+          .digest('hex'),
+      };
+      conn.write(encodeFrame(frame));
+      state.sendSequence += 1;
+      return true;
+    } catch {
+      this.destroyConnection(conn, false);
+      return false;
     }
-    if (responses.length === 0) return;
+  }
 
-    this.receiveBuffer = Buffer.from(this.receiveBuffer.subarray(consumed));
-
-    for (const response of responses) {
-      if (this.responseHandler) {
-        this.responseHandler(response);
+  private flushPendingRequests(
+    conn: TTYASocket,
+    state: BridgeConnectionState,
+  ): void {
+    const queued = this.pendingRequests;
+    this.pendingRequests = [];
+    for (let index = 0; index < queued.length; index += 1) {
+      if (!this.writeRequest(queued[index], conn, state)) {
+        this.pendingRequests.unshift(...queued.slice(index));
+        return;
       }
+    }
+  }
+
+  private mayAttemptAuthentication(key: string, now: number): boolean {
+    for (const [failedKey, state] of this.authFailures) {
+      if (now - state.lastFailure >= AUTH_RATE_WINDOW_MS) {
+        this.authFailures.delete(failedKey);
+      }
+    }
+    this.globalAuthFailures = this.globalAuthFailures.filter(
+      (timestamp) => now - timestamp < AUTH_RATE_WINDOW_MS,
+    );
+    if (this.globalAuthFailures.length >= AUTH_FAILURES_GLOBAL) return false;
+    const state = this.authFailures.get(key);
+    if (!state) return true;
+    return state.failures < AUTH_FAILURES_PER_PEER && now >= state.blockedUntil;
+  }
+
+  private recordAuthFailure(key: string, now = Date.now()): void {
+    this.globalAuthFailures = this.globalAuthFailures.filter(
+      (timestamp) => now - timestamp < AUTH_RATE_WINDOW_MS,
+    );
+    this.globalAuthFailures.push(now);
+    const previous = this.authFailures.get(key);
+    const failures =
+      previous && now - previous.lastFailure < AUTH_RATE_WINDOW_MS
+        ? previous.failures + 1
+        : 1;
+    this.authFailures.set(key, {
+      failures,
+      lastFailure: now,
+      blockedUntil:
+        now +
+        Math.min(
+          AUTH_BACKOFF_MAX_MS,
+          AUTH_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 16),
+        ),
+    });
+  }
+
+  private clearAuthTimeout(state: BridgeConnectionState): void {
+    if (state.authTimeout) clearTimeout(state.authTimeout);
+    state.authTimeout = null;
+  }
+
+  private handleConnectionClosed(conn: TTYASocket): void {
+    const state = this.connections.get(conn);
+    if (state && state.authState !== 'authenticated') {
+      this.recordAuthFailure(state.key);
+    }
+    this.removeConnection(conn);
+  }
+
+  private destroyConnection(conn: TTYASocket, authFailure: boolean): void {
+    const state = this.connections.get(conn);
+    if (state && authFailure) this.recordAuthFailure(state.key);
+    this.removeConnection(conn);
+    this.closeSocket(conn);
+  }
+
+  private removeConnection(conn: TTYASocket): void {
+    const state = this.connections.get(conn);
+    if (!state) return;
+    this.clearAuthTimeout(state);
+    state.decoder.reset();
+    this.connections.delete(conn);
+    if (this.agentConnection === conn) this.agentConnection = null;
+  }
+
+  private closeSocket(conn: TTYASocket): void {
+    try {
+      conn.destroy();
+    } catch {
+      // ignore a stale socket
     }
   }
 }
