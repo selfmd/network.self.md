@@ -3,6 +3,7 @@ import Hyperswarm from 'hyperswarm';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   MAX_TTYA_FRAME_SIZE,
+  MAX_TTYA_CONTENT_BYTES,
   TTYA_AUTH_NONCE_BYTES,
   TTYA_AUTH_VERSION,
   TTYAFrameDecoder,
@@ -62,7 +63,6 @@ const AUTH_BACKOFF_MAX_MS = 30_000;
 export const MAX_TTYA_AUTH_CANDIDATES = 4;
 const MAX_PENDING_REQUESTS = 1_000;
 const MAX_VISITOR_ID_BYTES = 128;
-const MAX_CONTENT_BYTES = 4_096;
 const VALID_RESPONSE_ACTIONS = new Set(['approve', 'reject', 'reply']);
 
 function hasMaxBytes(value: string, maximum: number): boolean {
@@ -89,7 +89,7 @@ function isValidTTYAResponse(obj: unknown): obj is TTYAResponse {
   if (
     value.content !== undefined &&
     (typeof value.content !== 'string' ||
-      !hasMaxBytes(value.content, MAX_CONTENT_BYTES))
+      !hasMaxBytes(value.content, MAX_TTYA_CONTENT_BYTES))
   ) {
     return false;
   }

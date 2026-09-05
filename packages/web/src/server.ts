@@ -10,7 +10,12 @@ import websocket from '@fastify/websocket';
 import helmet from '@fastify/helmet';
 import { createHash } from 'node:crypto';
 import { createId } from '@paralleldrive/cuid2';
-import { copyAndValidateTTYAAuthSecret } from '@networkselfmd/core';
+import {
+  copyAndValidateTTYAAuthSecret,
+  MAX_TTYA_CONTENT_BYTES,
+  MAX_TTYA_FRAME_SIZE,
+  MAX_TTYA_USER_AGENT_BYTES,
+} from '@networkselfmd/core';
 import { ApprovalQueue } from './approval.js';
 import { TTYABridge } from './bridge.js';
 import { getChatHTML } from './static-content.js';
@@ -18,7 +23,6 @@ import type {
   TTYAServerConfig,
   TTYARequest,
   TTYAResponse,
-  WSClientMessage,
   WSServerMessage,
 } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
@@ -84,10 +88,23 @@ export class TTYAServer {
     this.app = app;
 
     // Register security headers
-    await app.register(helmet);
+    await app.register(helmet, {
+      enableCSPNonces: true,
+      contentSecurityPolicy: {
+        directives: {
+          // The standalone server serves HTTP; forcing HTTPS breaks its chat URL.
+          upgradeInsecureRequests: null,
+          styleSrc: ["'self'", 'https://fonts.googleapis.com'],
+        },
+      },
+    });
 
     // Register WebSocket support
-    await app.register(websocket);
+    await app.register(websocket, {
+      // Bound the encoded JSON before parsing; allow escaping overhead above
+      // the smaller application content limit.
+      options: { maxPayload: MAX_TTYA_FRAME_SIZE },
+    });
 
     // Set up bridge response handler
     this.bridge.onAgentResponse((response: TTYAResponse) => {
@@ -113,7 +130,7 @@ export class TTYAServer {
         const fp = req.params.fingerprint;
         if (fp !== fingerprint) return reply.code(404).send('Not found');
         reply.type('text/html');
-        return getChatHTML(fp);
+        return getChatHTML(fp, reply.cspNonce);
       },
     );
 
@@ -162,7 +179,7 @@ export class TTYAServer {
           const data = typeof raw === 'string' ? raw : raw.toString('utf-8');
 
           // Parse message
-          let clientMsg: WSClientMessage;
+          let clientMsg: unknown;
           try {
             clientMsg = JSON.parse(data);
           } catch {
@@ -174,7 +191,11 @@ export class TTYAServer {
           }
 
           if (
+            clientMsg === null ||
+            typeof clientMsg !== 'object' ||
+            !('type' in clientMsg) ||
             clientMsg.type !== 'message' ||
+            !('content' in clientMsg) ||
             typeof clientMsg.content !== 'string'
           ) {
             sendWS(socket, { type: 'error', message: 'Invalid message type' });
@@ -183,7 +204,9 @@ export class TTYAServer {
 
           // Check message size
           const contentBytes = Buffer.byteLength(clientMsg.content, 'utf-8');
-          if (contentBytes > this.config.messageMaxBytes) {
+          if (
+            contentBytes > Math.min(this.config.messageMaxBytes, MAX_TTYA_CONTENT_BYTES)
+          ) {
             sendWS(socket, { type: 'error', message: 'Message too large' });
             return;
           }
@@ -231,7 +254,12 @@ export class TTYAServer {
               content: clientMsg.content,
               metadata: {
                 ipHash,
-                userAgent: req.headers['user-agent'],
+                userAgent:
+                  req.headers['user-agent'] !== undefined &&
+                  Buffer.byteLength(req.headers['user-agent'], 'utf8') <=
+                    MAX_TTYA_USER_AGENT_BYTES
+                    ? req.headers['user-agent']
+                    : undefined,
                 timestamp: now,
               },
             };

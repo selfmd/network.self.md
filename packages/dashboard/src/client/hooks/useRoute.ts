@@ -12,7 +12,11 @@ function parseHash(): Route {
   const hash = window.location.hash.slice(1) || '/';
   const stateMatch = hash.match(/^\/states?\/(.+)$/);
   if (stateMatch) {
-    return { page: 'state', stateId: decodeURIComponent(stateMatch[1]) };
+    try {
+      return { page: 'state', stateId: decodeURIComponent(stateMatch[1]) };
+    } catch {
+      return { page: 'home' };
+    }
   }
   if (hash === '/discover') return { page: 'discover' };
   if (hash === '/wire') return { page: 'wire' };

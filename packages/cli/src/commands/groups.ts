@@ -24,7 +24,7 @@ export async function createGroup(name: string, secrets: Secrets = {}): Promise<
     console.log(`  ${chalk.dim('State ID:')}  ${stateId}`);
     console.log(`  ${chalk.dim('Name:')}      ${name}`);
     console.log();
-    console.log(chalk.dim('Share the State ID with others so they can join.'));
+    console.log(chalk.dim('Private states require an admin invitation before joining. Use MCP state_invite to invite a connected peer.'));
     console.log();
   }, secrets);
 }

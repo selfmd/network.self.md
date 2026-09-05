@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { secretFileProvider } from '@networkselfmd/node';
 import type { AgentOptions } from '@networkselfmd/node';
 
@@ -6,10 +7,17 @@ export function dashboardAgentOptions(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentOptions {
   const passphraseFile = env.L2S_PASSPHRASE_FILE;
+  const home = env.HOME || homedir();
+  const configured = env.L2S_DATA_DIR;
+  const dataDir = configured === '~'
+    ? home
+    : configured?.startsWith('~/')
+      ? path.resolve(home, configured.slice(2))
+      : configured || path.join(home, '.networkselfmd');
   return {
-    dataDir: env.L2S_DATA_DIR ?? path.join(env.HOME ?? '~', '.networkselfmd'),
+    dataDir,
     displayName: env.AGENT_NAME,
-    passphrase: env.L2S_PASSPHRASE,
+    passphrase: passphraseFile ? undefined : env.L2S_PASSPHRASE,
     secretProvider: passphraseFile ? secretFileProvider(passphraseFile) : undefined,
   };
 }
@@ -31,7 +39,7 @@ export async function dashboardServerOptions(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DashboardServerOptions> {
   const host = env.HOST ?? '127.0.0.1';
-  const port = Number.parseInt(env.PORT ?? '3001', 10);
+  const port = Number(env.PORT ?? '3001');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error('PORT must be an integer between 1 and 65535');
   }

@@ -6,6 +6,9 @@ export const TTYA_AUTH_SECRET_MIN_BYTES = 32;
 export const TTYA_CHANNEL_BINDING_MIN_BYTES = 32;
 export const TTYA_CHANNEL_BINDING_MAX_BYTES = 128;
 export const MAX_TTYA_FRAME_SIZE = 65_536;
+/** Application limits enforced by both ends of the authenticated relay. */
+export const MAX_TTYA_CONTENT_BYTES = 4_096;
+export const MAX_TTYA_USER_AGENT_BYTES = 1_024;
 
 export type TTYAAuthRole = 'bridge' | 'agent';
 export type TTYADataDirection = 'bridge-to-agent' | 'agent-to-bridge';

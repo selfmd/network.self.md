@@ -64,6 +64,12 @@ describe('useRoute', () => {
     expect(result.current).toEqual({ page: 'home' });
   });
 
+  it('falls back to home for malformed percent encoding instead of crashing', () => {
+    window.location.hash = '#/state/%E0%A4%A';
+    const { result } = renderHook(() => useRoute());
+    expect(result.current).toEqual({ page: 'home' });
+  });
+
   it('responds to hashchange events', () => {
     window.location.hash = '#/';
     const { result } = renderHook(() => useRoute());

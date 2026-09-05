@@ -3,6 +3,8 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import Hyperswarm from 'hyperswarm';
 import {
   MAX_TTYA_FRAME_SIZE,
+  MAX_TTYA_USER_AGENT_BYTES,
+  MAX_TTYA_CONTENT_BYTES,
   TTYA_AUTH_NONCE_BYTES,
   TTYA_AUTH_VERSION,
   TTYAFrameDecoder,
@@ -87,9 +89,7 @@ export const MAX_TTYA_AUTH_CANDIDATES = 4;
 const VISITOR_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const VISITOR_STALE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_VISITOR_ID_BYTES = 128;
-const MAX_CONTENT_BYTES = 4_096;
 const MAX_IP_HASH_BYTES = 128;
-const MAX_USER_AGENT_BYTES = 1_024;
 const VALID_REQUEST_ACTIONS = new Set(['message', 'connect', 'disconnect']);
 
 function hasMaxBytes(value: string, maximum: number): boolean {
@@ -116,7 +116,7 @@ function isValidTTYARequest(obj: unknown): obj is TTYARequest {
   if (
     value.content !== undefined &&
     (typeof value.content !== 'string' ||
-      !hasMaxBytes(value.content, MAX_CONTENT_BYTES))
+      !hasMaxBytes(value.content, MAX_TTYA_CONTENT_BYTES))
   ) {
     return false;
   }
@@ -139,7 +139,7 @@ function isValidTTYARequest(obj: unknown): obj is TTYARequest {
   if (
     metadata.userAgent !== undefined &&
     (typeof metadata.userAgent !== 'string' ||
-      !hasMaxBytes(metadata.userAgent, MAX_USER_AGENT_BYTES))
+      !hasMaxBytes(metadata.userAgent, MAX_TTYA_USER_AGENT_BYTES))
   ) {
     return false;
   }
@@ -283,8 +283,8 @@ export class TTYAManager extends EventEmitter {
   reply(visitorId: string, content: string): void {
     const visitor = this.visitors.get(visitorId);
     if (!visitor) throw new Error(`Unknown visitor: ${visitorId}`);
-    if (!hasMaxBytes(content, MAX_CONTENT_BYTES)) {
-      throw new Error(`TTYA reply exceeds ${MAX_CONTENT_BYTES} bytes`);
+    if (!hasMaxBytes(content, MAX_TTYA_CONTENT_BYTES)) {
+      throw new Error(`TTYA reply exceeds ${MAX_TTYA_CONTENT_BYTES} bytes`);
     }
     this.sendResponse({ type: 0x08, visitorId, action: 'reply', content });
   }

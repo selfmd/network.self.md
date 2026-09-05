@@ -41,7 +41,7 @@ a { color: inherit; }
 button, input { font: inherit; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
 
-.app-shell { position: relative; min-height: 100vh; padding: 18px; isolation: isolate; }
+.app-shell { position: relative; min-height: 100dvh; padding: 18px; isolation: isolate; }
 .noise-layer {
   position: fixed; inset: 0; pointer-events: none; z-index: -1; opacity: 0.5;
   background-image:
@@ -153,8 +153,11 @@ h1 span { color: var(--muted); }
 @keyframes shimmer { to { background-position: -220% 0; } }
 .animate-in { animation: rise .32s ease both; }.delay-2 { animation-delay: .08s; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-.toast-container { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: grid; gap: 8px; max-width: min(520px, calc(100vw - 40px)); }
+.toast-container { position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom)); z-index: 100; display: grid; gap: 8px; max-width: min(520px, calc(100vw - 40px)); }
 .toast { border: 1px solid var(--line-strong); background: var(--panel-strong); border-radius: var(--r-md); padding: 12px; color: var(--text); box-shadow: var(--shadow); white-space: pre-wrap; }
+.copy-feedback { grid-column: 1 / -1; flex-basis: 100%; min-width: 0; color: var(--danger); }
+.copy-feedback textarea { width: 100%; resize: vertical; color: var(--text); background: var(--panel-strong); border: 1px solid var(--line-strong); padding: 10px; font: inherit; }
+.msg-content { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 920px) {
   .app-shell { padding: 10px; }

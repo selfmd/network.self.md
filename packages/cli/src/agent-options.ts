@@ -11,7 +11,10 @@ export interface CliSecretOptions {
 }
 
 export function getDataDir(): string {
-  return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
+  const configured = process.env.L2S_DATA_DIR;
+  if (configured === '~') return os.homedir();
+  if (configured?.startsWith('~/')) return path.resolve(os.homedir(), configured.slice(2));
+  return configured || path.join(os.homedir(), '.networkselfmd');
 }
 
 export async function agentSecretOptions(

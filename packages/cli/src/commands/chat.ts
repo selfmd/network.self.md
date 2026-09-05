@@ -10,12 +10,13 @@ export async function startChat(
   secrets: Pick<AgentOptions, 'passphrase' | 'secretProvider'> = {},
 ): Promise<void> {
   const agent = new Agent({ dataDir: getDataDir(), ...secrets });
-  await agent.start();
-
-  const { waitUntilExit } = render(
-    React.createElement(ChatView, { agent, groupId })
-  );
-
-  await waitUntilExit();
-  await agent.stop();
+  try {
+    await agent.start();
+    const { waitUntilExit } = render(
+      React.createElement(ChatView, { agent, groupId }),
+    );
+    await waitUntilExit();
+  } finally {
+    await agent.stop();
+  }
 }

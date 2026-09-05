@@ -22,7 +22,7 @@ Returns your fingerprint (your unique ID on the network) and public key.`,
           text: JSON.stringify({
             fingerprint: identity.fingerprint,
             displayName: identity.displayName,
-            publicKey: Buffer.from(identity.edPublicKey).toString('base64'),
+            publicKey: Buffer.from(identity.edPublicKey).toString('hex'),
           }),
         }],
       };

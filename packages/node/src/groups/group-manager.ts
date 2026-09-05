@@ -180,6 +180,16 @@ export class GroupManager extends EventEmitter {
     this.epochRepo.saveEpoch(genesis);
     await this.swarm.join(Buffer.from(deriveKey(groupId, 'networkselfmd-topic-v1', '', 32)));
 
+    // Leaving erases sender secrets but retains the authenticated epoch chain.
+    // Historical epoch delivery does not recreate keys, so restore membership
+    // and a fresh generation explicitly when joining an existing membership.
+    const latest = this.epochRepo.getLatestEpoch(groupIdHex);
+    if (latest && this.isMemberInEpoch(latest, this.identity.edPublicKey)) {
+      this.syncMembershipToEpoch(groupId, latest);
+      const localKey = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
+      if (!localKey?.generation_id) await this.rotateKeys(groupId);
+    }
+
     const acceptInviteId = anchor.inviteId ?? `public:${this.identity.fingerprint}`;
     if (!pending) {
       this.inviteRepo.save({
@@ -922,6 +932,11 @@ export class GroupManager extends EventEmitter {
             if (pending) {
               if (
                 pending.direction !== 'outgoing' ||
+                !buffersEqual(new Uint8Array(pending.group_id), message.groupId) ||
+                !buffersEqual(
+                  new Uint8Array(pending.inviter_public_key),
+                  this.identity.edPublicKey,
+                ) ||
                 !buffersEqual(
                   new Uint8Array(pending.invitee_public_key),
                   senderPublicKey,
@@ -933,6 +948,7 @@ export class GroupManager extends EventEmitter {
               throw new Error('Rejected group accept: no pending invite');
             }
             if (this.isMemberInEpoch(latestEpoch, senderPublicKey)) {
+              if (pending) this.inviteRepo.delete(pending.invite_id);
               return { kind: 'accept' };
             }
             const signedEpoch = createSignedEpoch(
@@ -1126,6 +1142,9 @@ export class GroupManager extends EventEmitter {
             !buffersEqual(existing.signature, signed.signature)
           ) {
             throw new Error('Rejected epoch: historical fork');
+          }
+          if (this.isMemberInEpoch(latest, this.identity.edPublicKey)) {
+            this.inviteRepo.deleteIncoming(message.groupId);
           }
           return { kind: 'historical' };
         } else {

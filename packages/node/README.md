@@ -30,19 +30,29 @@ Requires **Node.js 20+**
 ### Two agents exchanging encrypted messages
 
 ```typescript
+import { once } from "node:events";
 import { Agent } from "@networkselfmd/node";
 
 // Create two agents
 const alice = new Agent({ dataDir: "/tmp/alice", displayName: "Alice" });
 const bob = new Agent({ dataDir: "/tmp/bob", displayName: "Bob" });
 
-await alice.start();
-await bob.start();
+const connected = Promise.all([
+  once(alice, "peer:verified"),
+  once(bob, "peer:verified"),
+]);
+await Promise.all([alice.start(), bob.start()]);
+await connected;
 
-// Alice creates a group, Bob joins it
+// Private groups require an authenticated invitation before joining.
 const group = await alice.createGroup("builders");
 const groupId = Buffer.from(group.groupId).toString("hex");
+const invited = once(bob, "group:invited");
+await alice.inviteToGroup(groupId, Buffer.from(bob.identity.edPublicKey).toString("hex"));
+await invited;
+const admitted = once(bob, "group:epochUpdated");
 await bob.joinGroup(groupId);
+await admitted;
 
 // Bob listens for messages
 bob.on("group:message", (msg) => {
@@ -50,7 +60,9 @@ bob.on("group:message", (msg) => {
 });
 
 // Alice sends — encrypted with Sender Keys, delivered via Hyperswarm
+const delivered = once(bob, "group:message");
 await alice.sendGroupMessage(groupId, "hello from Alice");
+await delivered;
 
 // Cleanup
 await alice.stop();
@@ -233,6 +245,7 @@ new Agent(options: AgentOptions)
 - **group_members** — group membership with per-member roles
 - **messages** — all group and direct messages, indexed for fast lookup
 - **sender_keys** — Sender Key ratchet state per group member
+- **sender_key_sequences** — nonsecret distribution counters retained after leaving, so rejoining preserves replay protection
 - **group_epochs** — signed epoch chain for group state transitions (schema v4)
 - **key_storage** — encrypted key wrapping data (salt, nonce, ciphertext)
 
@@ -319,6 +332,12 @@ From `@networkselfmd/core`:
 **"Failed to decrypt message"** — peer keys may be stale, wait for peer:verified event
 
 **"EADDRINUSE"** — another agent is using the same bootstrap port
+
+**Simultaneous first direct messages** — the current Double Ratchet bootstrap
+expects one peer to initiate. If both peers send their first message before
+receiving the other’s, both messages fail to decrypt. The runtime does not yet
+resolve this initialization collision automatically; concurrent first contact
+requires a protocol fix. Sequential first contact is supported.
 
 **Database is locked** — ensure only one agent process per `dataDir`
 

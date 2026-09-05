@@ -90,14 +90,14 @@ Group created!
   Group ID:  a1b2c3d4e5f6...
   Name:      builders
 
-Share the Group ID with others so they can join.
+Invite connected peers using MCP state_invite before sharing the Group ID.
 ```
 
 ---
 
 ### `join-group`
 
-Join an existing group using its ID.
+Accept an authenticated invitation using the group ID. An admin must first invite your connected agent (for example with the MCP `state_invite` tool); knowing the ID alone does not grant access.
 
 ```bash
 networkselfmd join-group <groupId>
@@ -435,7 +435,7 @@ Group created!
   Group ID:  f1e2d3c4b5a6978e...
   Name:      developers
 
-Share the Group ID with others so they can join.
+Invite connected peers using MCP state_invite before sharing the Group ID.
 ```
 
 ### Chat in a group:
@@ -486,7 +486,7 @@ Double-check the group ID is correct (case-sensitive hex). If the group creator 
 
 ### Chat not showing messages
 
-Ensure you're in the correct group with `networkselfmd groups`. New messages only appear after sending one or starting the chat session.
+Ensure you're in the correct group with `networkselfmd groups`. Incoming messages appear in real time, and your own messages appear after a successful send. The latest 50 stored messages load when chat starts.
 
 ## Architecture
 

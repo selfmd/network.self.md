@@ -15,7 +15,7 @@ export function registerResources(server: McpServer, agent: Agent): void {
           text: JSON.stringify(identity ? {
             fingerprint: identity.fingerprint,
             displayName: identity.displayName,
-            publicKey: Buffer.from(identity.edPublicKey).toString('base64'),
+            publicKey: Buffer.from(identity.edPublicKey).toString('hex'),
           } : null),
         }],
       };

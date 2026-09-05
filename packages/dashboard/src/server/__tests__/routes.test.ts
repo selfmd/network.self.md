@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../routes.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -92,6 +92,8 @@ describe('Dashboard API routes', () => {
   beforeAll(async () => {
     app = await buildApp({ agent: mockAgent() as any });
   });
+
+  afterAll(async () => { await app.close(); });
 
   it('GET /healthz returns process health', async () => {
     const res = await app.inject({ method: 'GET', url: '/healthz' });
@@ -221,6 +223,57 @@ describe('Dashboard API routes', () => {
     const res = await app.inject({ method: 'GET', url: '/api/security/keys' });
     expect(res.statusCode).toBe(501);
     expect(res.json().error.code).toBe('security-keys-unavailable');
+  });
+});
+
+describe('Dashboard state identity', () => {
+  it('keeps same-name states separate and counts each unique ID', async () => {
+    const agent = mockAgent();
+    agent.listDiscoveredGroups = () => [{
+      groupId: new Uint8Array([4, 5, 6]),
+      name: 'builders',
+      selfMd: 'A different community.',
+      memberCount: 99,
+    }];
+    const app = await buildApp({ agent: agent as any });
+    try {
+      const states = (await app.inject('/api/states')).json();
+      expect(states).toHaveLength(2);
+      expect(states.find((state: any) => state.id === '010203')).toMatchObject({ memberCount: 3, selfMd: 'We build things.' });
+      expect(states.find((state: any) => state.id === '040506')).toMatchObject({ memberCount: 99, selfMd: 'A different community.' });
+      expect((await app.inject('/api/status')).json().stateCount).toBe(2);
+    } finally { await app.close(); }
+  });
+
+  it('prefers joined state metadata over a stale announcement for the same ID', async () => {
+    const agent = mockAgent();
+    agent.listDiscoveredGroups = () => [{
+      groupId: new Uint8Array([1, 2, 3]),
+      name: 'old builders name',
+      selfMd: 'Old rules.',
+      memberCount: 99,
+    }];
+    const app = await buildApp({ agent: agent as any });
+    try {
+      const states = (await app.inject('/api/states')).json();
+      expect(states).toHaveLength(1);
+      expect(states[0]).toMatchObject({ id: '010203', name: 'builders', memberCount: 3, selfMd: 'We build things.' });
+    } finally { await app.close(); }
+  });
+
+  it('returns the joined ID even when another state has the same name', async () => {
+    const agent = mockAgent();
+    const ownGroups = agent.listGroups;
+    agent.listGroups = () => ownGroups().map((group) => ({ ...group, name: 'builders' }));
+    agent.listDiscoveredGroups = () => [{
+      groupId: new Uint8Array([4, 5, 6]), name: 'builders', selfMd: 'Other rules.', memberCount: 5,
+    }];
+    const app = await buildApp({ agent: agent as any });
+    try {
+      const joined = await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join' });
+      expect(joined.statusCode).toBe(200);
+      expect(joined.json().state.id).toBe('040506');
+    } finally { await app.close(); }
   });
 });
 

@@ -1,6 +1,5 @@
-import { useState } from 'react';
 import { usePolling } from '../hooks/usePolling';
-import { useToast } from './Toast';
+import { CopyButton, joinStateInstructions } from './CopyButton';
 import type { ApiStateDetail } from '../types';
 
 function formatTime(ts: number): string {
@@ -22,24 +21,8 @@ function timeAgo(ts: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-function CopyIdButton({ stateId, stateName }: { stateId: string; stateName: string }) {
-  const toast = useToast();
-  const [copied, setCopied] = useState(false);
-  const prompt = `Join the "${stateName}" state on network.self.md:\n\nnpx networkselfmd join-state ${stateId}`;
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(prompt).then(() => {
-      setCopied(true);
-      toast(prompt);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  return (
-    <button className="btn" onClick={handleCopy}>
-      {copied ? 'copied' : 'copy join-state command'}
-    </button>
-  );
+function CopyIdButton({ stateId, stateName, isPublic }: { stateId: string; stateName: string; isPublic: boolean }) {
+  return <CopyButton text={joinStateInstructions(stateId, stateName, isPublic)} label="copy join instructions" />;
 }
 
 export function StatePage({ stateId }: { stateId: string }) {
@@ -77,7 +60,7 @@ export function StatePage({ stateId }: { stateId: string }) {
           </div>
           <div className="hero-actions">
             {data.isPublic && <span className="badge green">public state</span>}
-            <CopyIdButton stateId={data.id} stateName={data.name} />
+            <CopyIdButton stateId={data.id} stateName={data.name} isPublic={data.isPublic} />
           </div>
         </div>
         <div className="status-strip inline">

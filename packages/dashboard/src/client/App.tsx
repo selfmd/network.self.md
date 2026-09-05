@@ -5,28 +5,18 @@ import { StatusBar } from './components/StatusBar';
 import { PeerList } from './components/PeerList';
 import { StateList } from './components/StateList';
 import { StatePage } from './components/StatePage';
+import { CopyButton } from './components/CopyButton';
 import { ToastProvider, useToast } from './components/Toast';
 import type { ApiStatus, ApiPeer, ApiState, ApiDiscoveredState, ApiJoinResponse } from './types';
 
 const SETUP_PROMPT = `git clone https://github.com/selfmd/network.self.md.git
 cd network.self.md
 pnpm install && pnpm build
-npx networkselfmd init --name my-agent
-npx networkselfmd states`;
+node packages/cli/dist/bin.js init --name my-agent
+node packages/cli/dist/bin.js states`;
 
 function CopySetupButton() {
-  const toast = useToast();
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(SETUP_PROMPT).then(() => {
-      setCopied(true);
-      toast(SETUP_PROMPT);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  return <button className="btn btn-glow" onClick={handleCopy}>{copied ? 'copied' : 'copy setup'}</button>;
+  return <CopyButton text={SETUP_PROMPT} label="copy setup" className="btn btn-glow" />;
 }
 
 function Chrome({ children }: { children: React.ReactNode }) {
@@ -146,17 +136,23 @@ function DiscoveryPage() {
   const { data: discovered, error } = usePolling<ApiDiscoveredState[]>('/api/discovery/states', 7000);
   const toast = useToast();
   const [joining, setJoining] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<{ id: string; message: string } | null>(null);
 
   async function joinState(id: string) {
+    if (joining !== null) return;
     setJoining(id);
+    setJoinError(null);
     try {
       const res = await fetch(`/api/discovery/states/${encodeURIComponent(id)}/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      const body = (await res.json()) as ApiJoinResponse;
-      if (!body.ok) throw new Error(body.message);
+      const body = (await res.json()) as ApiJoinResponse | { error?: { message?: string } };
+      if (!res.ok || !('ok' in body) || !body.ok) {
+        const message = 'message' in body ? body.message : 'error' in body ? body.error?.message : undefined;
+        throw new Error(message ?? `Could not join state (${res.status})`);
+      }
       toast(`joined state: ${body.state.name}`);
       window.location.hash = `/state/${encodeURIComponent(body.state.id)}`;
-    } catch (err: any) {
-      toast(`join failed: ${err.message ?? err}`);
+    } catch (err: unknown) {
+      setJoinError({ id, message: err instanceof Error ? err.message : String(err) });
     } finally {
       setJoining(null);
     }
@@ -177,7 +173,8 @@ function DiscoveryPage() {
           <article className="surface-card public-state-card span-6" key={s.id}>
             <div className="card-title"><span className="dot cyan" /> {s.name}<span className="badge green">public state</span></div>
             <pre className="manifesto small">{s.selfMd ?? 'No self.md manifesto announced yet.'}</pre>
-            <div className="card-footer"><span>{s.memberCount} agents</span><button className="btn" disabled={joining === s.id} onClick={() => joinState(s.id)}>{joining === s.id ? 'joining…' : 'join state'}</button></div>
+            <div className="card-footer"><span>{s.memberCount} agents</span><button className="btn" disabled={joining !== null} onClick={() => joinState(s.id)}>{joining === s.id ? 'joining…' : 'join state'}</button></div>
+            {joinError?.id === s.id && <div className="error-banner" role="alert">join failed · {joinError.message}</div>}
           </article>
         ))}
         {discovered && discovered.length === 0 && <div className="surface-card span-12 empty rich">No public states found yet. That is a real network state, not a fake empty-table tragedy.</div>}

@@ -79,6 +79,13 @@ describe('Agent E2E', () => {
       // Connect first so the signed, recipient-bound invite can be delivered.
       await waitForPeers(agent1, agent2, 15000);
 
+      const directToBob = waitForEvent(agent2, 'dm:message', 10000);
+      await agent1.sendDirectMessage(Buffer.from(agent2.identity.edPublicKey).toString('hex'), 'Private hello');
+      await expect(directToBob).resolves.toMatchObject({ content: 'Private hello' });
+      const directToAlice = waitForEvent(agent1, 'dm:message', 10000);
+      await agent2.sendDirectMessage(Buffer.from(agent1.identity.edPublicKey).toString('hex'), 'Private reply');
+      await expect(directToAlice).resolves.toMatchObject({ content: 'Private reply' });
+
       const group = await agent1.createGroup('test-e2e');
       const groupIdHex = Buffer.from(group.groupId).toString('hex');
       const bobPkHex = Buffer.from(agent2.identity.edPublicKey).toString('hex');
@@ -103,6 +110,26 @@ describe('Agent E2E', () => {
       const receivedByAlice = waitForEvent(agent1, 'group:message', 10000);
       await agent2.sendGroupMessage(groupIdHex, 'hi Alice, Bob here');
       await expect(receivedByAlice).resolves.toMatchObject({ content: 'hi Alice, Bob here' });
+
+      await agent2.leaveGroup(groupIdHex);
+      await agent2.stop();
+      await agent2.start();
+      await waitForPeers(agent1, agent2, 15000);
+      const reinvited = waitForEvent(agent2, 'group:invited', 10000);
+      await agent1.inviteToGroup(groupIdHex, bobPkHex);
+      await reinvited;
+      await agent2.joinGroup(groupIdHex);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      const receivedAfterRejoin = waitForEvent(agent1, 'group:message', 10000);
+      await agent2.sendGroupMessage(groupIdHex, 'Bob rejoined');
+      await expect(receivedAfterRejoin).resolves.toMatchObject({ content: 'Bob rejoined' });
+      expect(agent2.getGroupMembers(groupIdHex)).toHaveLength(2);
+      const receivedByBobAfterRejoin = waitForEvent(agent2, 'group:message', 10000);
+      await agent1.sendGroupMessage(groupIdHex, 'Welcome back');
+      await expect(receivedByBobAfterRejoin).resolves.toMatchObject({ content: 'Welcome back' });
+
+
     } finally {
       await agent1.stop();
       await agent2.stop();

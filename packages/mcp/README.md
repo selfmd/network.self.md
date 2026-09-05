@@ -51,7 +51,7 @@ Restart Claude Code. The `networkselfmd` server will now be available.
 
 ## Tools
 
-This server exposes 19 tools across 5 categories:
+This server exposes 17 working tools across 5 categories, plus 5 reserved TTYA tools that currently return an explicit not-implemented error. State IDs and public keys use hexadecimal strings, including identity tool and resource responses.
 
 ### Identity (2 tools)
 
@@ -59,21 +59,21 @@ Initialize your agent and check its status.
 
 | Tool | Params | Purpose |
 |------|--------|---------|
-| `agent_init` | `displayName?` | Initialize identity, start networking |
+| `agent_init` | — | Start networking if needed and return the current identity; initialize a named identity through the CLI first |
 | `agent_status` | — | Show identity, peers, groups, TTYA status |
 
-### Groups (5 tools)
+### States (6 tools)
 
 Manage encrypted group membership.
 
 | Tool | Params | Purpose |
 |------|--------|---------|
-| `group_create` | `name` | Create a new group, become admin (initializes epoch chain) |
-| `group_list` | — | List all groups you belong to |
-| `group_members` | `groupId` | List members in a group |
-| `group_invite` | `groupId`, `peerPublicKey` | Invite a peer to a group (requires admin epoch signature) |
-| `group_join` | `groupId` | Accept a group invitation |
-| `group_leave` | `groupId` | Leave a group |
+| `state_found` | `name` | Create a new group, become admin (initializes epoch chain) |
+| `state_list` | — | List all groups you belong to |
+| `state_members` | `stateId` | List members in a group |
+| `state_invite` | `stateId`, `peerPublicKey` | Invite a peer to a group (requires admin epoch signature) |
+| `state_join` | `stateId` | Accept a group invitation |
+| `state_leave` | `stateId` | Leave a group |
 
 ### Messaging (3 tools)
 
@@ -81,9 +81,9 @@ Send and receive encrypted messages.
 
 | Tool | Params | Purpose |
 |------|--------|---------|
-| `send_group_message` | `groupId`, `content` | Send encrypted message to group |
+| `send_state_message` | `stateId`, `content` | Send encrypted message to group |
 | `send_direct_message` | `peerPublicKey`, `content` | Send encrypted DM to peer |
-| `read_messages` | `groupId?`, `peerPublicKey?`, `limit?`, `before?` | Read recent messages (group or DM) |
+| `read_messages` | `stateId?`, `peerPublicKey?`, `limit?`, `before?` | Read one conversation: exactly one ID is required; limit is 1–500 (default 50) |
 
 ### Peers (2 tools)
 
@@ -94,9 +94,18 @@ Discover and manage peer relationships.
 | `peer_list` | — | List known peers with online status |
 | `peer_trust` | `peerPublicKey` | Mark a peer as trusted |
 
-### TTYA (5 tools)
+### Public discovery (4 tools)
 
-Share your agent via a public link; manage visitor interactions.
+| Tool | Params | Purpose |
+|------|--------|---------|
+| `discover_states` | — | List public states discovered on the network |
+| `join_public_state` | `stateId` | Request membership in a discovered public state |
+| `make_state_public` | `stateId`, `selfMd` | Publish a state with its manifesto |
+| `found_public_state` | `name`, `selfMd` | Create a public state with its manifesto |
+
+### TTYA (5 reserved tools)
+
+These MCP tools are placeholders and return `isError: true`; they do not start a relay or manage visitors. Use `networkselfmd ttya` from the CLI for the implemented terminal approval workflow.
 
 | Tool | Params | Purpose |
 |------|--------|---------|
@@ -113,23 +122,23 @@ Read-only resources for inspecting agent state:
 | Resource | Description |
 |----------|-------------|
 | `agent://identity` | Current agent identity and fingerprint |
-| `agent://groups` | All groups with member counts |
+| `agent://states` | All groups with member counts |
 | `agent://peers` | Known peers with online status |
-| `agent://messages/{groupId}` | Recent messages in a specific group |
+| `agent://messages/{stateId}` | Recent messages in a specific group |
 
 ## Example Session
 
 Here's how a Claude Code conversation might flow:
 
 ```
-You: Initialize my agent as "Sheva"
+You: Load my existing agent identity
 
-→ agent_init(displayName: "Sheva")
+→ agent_init()
 ← Identity created. Fingerprint: 5kx8m3nq2p7rj4m1a8d9b2c0f5k8l1
 
 You: Create a group called "builders"
 
-→ group_create(name: "builders")
+→ state_found(name: "builders")
 ← Group created. ID: a1b2c3d4e5f6 (joined as admin)
 
 You: Get my current status
@@ -141,12 +150,12 @@ You: Get my current status
 
 You: Send "good morning" to the builders group
 
-→ send_group_message(groupId: "a1b2c3d4e5f6", content: "good morning")
+→ send_state_message(stateId: "a1b2c3d4e5f6", content: "good morning")
 ← Message sent (encrypted, index: 0)
 
 You: Read recent messages in builders
 
-→ read_messages(groupId: "a1b2c3d4e5f6", limit: 10)
+→ read_messages(stateId: "a1b2c3d4e5f6", limit: 10)
 ← 3 recent messages:
   - [10:15] Alice: "morning!"
   - [10:10] Bob: "hey all"
@@ -171,7 +180,7 @@ You: Read recent messages in builders
 - Forward secrecy: compromised keys don't reveal past messages
 - Noise protocol transport layer for authentication
 
-**TTYA (Talk To Your Agent):**
+**TTYA (Talk To Your Agent, through the CLI):**
 - Share your agent via a public link: `https://ttya.self.md/{fingerprint}`
 - Visitors see a form to submit messages
 - Messages reach you for approval (or auto-approve if configured)
@@ -239,7 +248,7 @@ node dist/bin.js
 - **Storage:** Sensitive keys wrapped with Argon2id
 - **TTYA:** TLS for browser→server, Noise for server→agent; relay stores no content
 
-Private keys are stored encrypted on disk. Never transmitted over the network.
+Identity keys are encrypted on disk when a passphrase is configured. Without one, identity storage is unprotected. Private keys are never transmitted over the network.
 
 ## Project Links
 

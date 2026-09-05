@@ -68,7 +68,7 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(7);
+    expect(row.version).toBe(8);
   });
 
   it('should migrate a populated v4 identity to the nullable encrypted-only schema', () => {
@@ -485,6 +485,41 @@ describe('MessageRepository', () => {
     expect(page2.length).toBe(3);
   });
 
+  it('keeps group messages and other conversations out of direct history', () => {
+    const peer = new Uint8Array(32).fill(1);
+    const local = new Uint8Array(32).fill(2);
+    const other = new Uint8Array(32).fill(3);
+    const entries = [
+      { id: 'incoming', senderPublicKey: peer, peerPublicKey: local, type: 'direct' },
+      { id: 'outgoing', senderPublicKey: local, peerPublicKey: peer, type: 'direct' },
+      { id: 'group', senderPublicKey: peer, groupId: new Uint8Array(32).fill(4), type: 'group' },
+      { id: 'other', senderPublicKey: other, peerPublicKey: local, type: 'direct' },
+    ];
+    for (const entry of entries) repo.insert({ ...entry, content: entry.id, timestamp: 100 });
+    expect(repo.query({ peerPublicKey: peer }).map((message) => message.id).sort()).toEqual(['incoming', 'outgoing']);
+  });
+
+  it('paginates random message IDs by timestamp with a stable tie breaker', () => {
+    const groupId = new Uint8Array(32).fill(1);
+    const entries = [
+      { id: 'a-newest', timestamp: 300 },
+      { id: 'z-middle', timestamp: 200 },
+      { id: 'm-middle', timestamp: 200 },
+      { id: 'y-oldest', timestamp: 100 },
+    ];
+    for (const entry of entries) repo.insert({ ...entry, groupId, content: entry.id, type: 'group' });
+    const ids: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const messages = repo.query({ groupId, before, limit: 1 });
+      if (!messages.length) break;
+      ids.push(messages[0].id);
+      before = messages[0].id;
+    }
+    expect(ids).toEqual(entries.map((entry) => entry.id));
+    expect(repo.query({ groupId, before: 'missing-cursor' })).toEqual([]);
+  });
+
   it('should ignore duplicate inserts', () => {
     repo.insert({
       id: 'msg1',
@@ -511,6 +546,40 @@ describe('SenderKeyRepository', () => {
 
   beforeEach(() => {
     repo = new SenderKeyRepository(database.getDb());
+  });
+
+  it('backfills sender sequence replay floors from existing v7 key records', () => {
+    const groupId = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    repo.store(groupId, publicKey, new Uint8Array(32).fill(3), 4, new Uint8Array(16).fill(5), 23);
+    database.getDb().exec('DROP TABLE sender_key_sequences; UPDATE schema_version SET version = 7;');
+    database.migrate();
+    expect(repo.getDistributionSequence(groupId, publicKey)).toBe(23);
+    expect(repo.load(groupId, publicKey)!.chain_index).toBe(4);
+    repo.delete(groupId, publicKey);
+    expect(repo.getDistributionSequence(groupId, publicKey)).toBe(23);
+    expect(repo.load(groupId, publicKey)).toBeUndefined();
+  });
+
+  it('retains only the distribution replay floor after deletion and restart', () => {
+    const groupId = new Uint8Array(32).fill(1);
+    const publicKey = new Uint8Array(32).fill(2);
+    const oldKey = new Uint8Array(32).fill(3);
+    const oldGeneration = new Uint8Array(16).fill(4);
+    const epochHash = new Uint8Array(32).fill(5);
+    repo.store(groupId, publicKey, oldKey, 0, oldGeneration, 17, 1, epochHash);
+    repo.deleteForGroup(groupId);
+    expect(repo.load(groupId, publicKey)).toBeUndefined();
+    database.close();
+    database = new AgentDatabase(dataDir);
+    database.migrate();
+    repo = new SenderKeyRepository(database.getDb());
+    expect(repo.getDistributionSequence(groupId, publicKey)).toBe(17);
+    expect(repo.storeIfNewer(groupId, publicKey, oldKey, 0, oldGeneration, 17, 1, epochHash)).toBe(false);
+    expect(repo.load(groupId, publicKey)).toBeUndefined();
+    repo.store(groupId, publicKey, new Uint8Array(32).fill(6), 0, new Uint8Array(16).fill(7));
+    expect(repo.load(groupId, publicKey)!.distribution_sequence).toBe(17);
+    expect(repo.storeIfNewer(groupId, publicKey, new Uint8Array(32).fill(8), 0, new Uint8Array(16).fill(9), 18, 1, epochHash)).toBe(true);
   });
 
   it('should store and load sender keys', () => {

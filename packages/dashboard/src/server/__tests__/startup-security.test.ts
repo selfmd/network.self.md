@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute as pathIsAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { dashboardAgentOptions, dashboardServerOptions } from '../config.js';
@@ -18,6 +18,7 @@ describe('dashboard protected startup', () => {
     const options = dashboardAgentOptions({
       L2S_DATA_DIR: dataDir,
       L2S_PASSPHRASE_FILE: secretPath,
+      L2S_PASSPHRASE: 'stale-environment-passphrase',
     });
     expect(options.dataDir).toBe(dataDir);
     expect(options.passphrase).toBeUndefined();
@@ -30,6 +31,16 @@ describe('dashboard protected startup', () => {
     });
     expect(options.passphrase).toBe('dashboard-direct-passphrase');
     expect(options.secretProvider).toBeUndefined();
+  });
+
+  it('expands a configured home path instead of creating another identity below the current directory', () => {
+    expect(dashboardAgentOptions({ HOME: '/operator', L2S_DATA_DIR: '~/.networkselfmd' }).dataDir).toBe('/operator/.networkselfmd');
+    expect(dashboardAgentOptions({ HOME: '/operator', L2S_DATA_DIR: '~' }).dataDir).toBe('/operator');
+    expect(pathIsAbsolute(dashboardAgentOptions({}).dataDir!)).toBe(true);
+  });
+
+  it.each(['3001oops', '1.5', '65536', '0', 'NaN'])('rejects invalid PORT %s instead of partially parsing it', async (PORT) => {
+    await expect(dashboardServerOptions({ PORT })).rejects.toThrow(/PORT must be an integer/);
   });
 
   it('fails closed on a non-loopback bind without dashboard authentication', async () => {

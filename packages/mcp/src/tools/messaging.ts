@@ -46,12 +46,18 @@ The peer must be online and connected. Get their public key from peer_list.`,
     `Read recent messages. Provide EITHER stateId (for state messages) or peerPublicKey (for direct messages).
 Returns messages with sender info, content, and timestamp. Most recent first.`,
     {
-      stateId: z.string().optional().describe('State ID (hex) to read messages from'),
-      peerPublicKey: z.string().optional().describe('Peer public key (hex) for direct messages'),
-      limit: z.number().optional().describe('Max messages to return (default 50)'),
+      stateId: z.string().min(1).optional().describe('State ID (hex) to read messages from'),
+      peerPublicKey: z.string().min(1).optional().describe('Peer public key (hex) for direct messages'),
+      limit: z.number().int().min(1).max(500).optional().describe('Max messages to return (1–500, default 50)'),
       before: z.string().optional().describe('Return messages before this message ID (for pagination)'),
     },
     async ({ stateId, peerPublicKey, limit, before }) => {
+      if ((stateId === undefined) === (peerPublicKey === undefined)) {
+        return {
+          content: [{ type: 'text' as const, text: 'Provide exactly one of stateId or peerPublicKey.' }],
+          isError: true,
+        };
+      }
       const messages = agent.getMessages({
         groupId: stateId,
         peerPublicKey,

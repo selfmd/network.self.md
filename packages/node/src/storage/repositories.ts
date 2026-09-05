@@ -561,7 +561,7 @@ export class MessageRepository {
     }
 
     if (options.peerPublicKey) {
-      conditions.push('(sender_public_key = ? OR peer_public_key = ?)');
+      conditions.push("type = 'direct' AND (sender_public_key = ? OR peer_public_key = ?)");
       params.push(
         Buffer.from(options.peerPublicKey),
         Buffer.from(options.peerPublicKey),
@@ -569,7 +569,7 @@ export class MessageRepository {
     }
 
     if (options.before) {
-      conditions.push('id < ?');
+      conditions.push('(timestamp, id) < (SELECT timestamp, id FROM messages WHERE id = ?)');
       params.push(options.before);
     }
 
@@ -579,7 +579,7 @@ export class MessageRepository {
 
     return this.db
       .prepare(
-        `SELECT * FROM messages ${where} ORDER BY timestamp DESC LIMIT ?`,
+        `SELECT * FROM messages ${where} ORDER BY timestamp DESC, id DESC LIMIT ?`,
       )
       .all(...params, limit) as StoredMessage[];
   }
@@ -726,16 +726,32 @@ export class SenderKeyRepository {
       `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index, generation_id, distribution_sequence, epoch_version, epoch_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex, Buffer.from(generationId), distributionSequence, epochVersion, Buffer.from(epochHash));
+    // Preserve only the monotonic counter when secret key material is deleted.
+    // A later rejoin or key reset must not roll back the receiver's replay floor.
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO sender_key_sequences (group_id, public_key, distribution_sequence)
+        VALUES (?, ?, ?)
+        ON CONFLICT(group_id, public_key) DO UPDATE SET
+          distribution_sequence = MAX(distribution_sequence, excluded.distribution_sequence)`)
+        .run(Buffer.from(groupId), Buffer.from(publicKey), distributionSequence);
+      stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex, Buffer.from(generationId), this.getDistributionSequence(groupId, publicKey), epochVersion, Buffer.from(epochHash));
+    })();
   }
 
   storeIfNewer(groupId: Uint8Array, publicKey: Uint8Array, chainKey: Uint8Array, chainIndex: number, generationId: Uint8Array, sequence: number, epochVersion: number, epochHash: Uint8Array): boolean {
     return this.db.transaction(() => {
       const existing = this.load(groupId, publicKey);
-      if (existing && (sequence <= existing.distribution_sequence || (existing.generation_id?.equals(Buffer.from(generationId)) && chainIndex < existing.chain_index))) return false;
+      if (sequence <= this.getDistributionSequence(groupId, publicKey) || (existing?.generation_id?.equals(Buffer.from(generationId)) && chainIndex < existing.chain_index)) return false;
       this.store(groupId, publicKey, chainKey, chainIndex, generationId, sequence, epochVersion, epochHash);
       return true;
     })();
+  }
+
+  getDistributionSequence(groupId: Uint8Array, publicKey: Uint8Array): number {
+    const row = this.db.prepare(
+      'SELECT distribution_sequence FROM sender_key_sequences WHERE group_id = ? AND public_key = ?',
+    ).get(Buffer.from(groupId), Buffer.from(publicKey)) as { distribution_sequence: number } | undefined;
+    return row?.distribution_sequence ?? -1;
   }
 
   load(

@@ -7,7 +7,10 @@ function escapeHTML(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-export function getChatHTML(fingerprint: string): string {
+export function getChatHTML(
+  fingerprint: string,
+  nonces?: { script: string; style: string },
+): string {
   // JSON.stringify + replace </script> to prevent XSS when embedding in <script>
   const safeFingerprint = JSON.stringify(fingerprint).replace(/<\//g, '<\\/');
   const htmlFingerprint = escapeHTML(fingerprint);
@@ -19,7 +22,7 @@ export function getChatHTML(fingerprint: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TTYA — ${titleFingerprint}</title>
-<style>
+<style${nonces ? ` nonce="${escapeHTML(nonces.style)}"` : ''}>
 @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -326,7 +329,7 @@ html, body {
   </div>
 </div>
 
-<script>
+<script${nonces ? ` nonce="${escapeHTML(nonces.script)}"` : ''}>
 (function() {
   var fp = ${safeFingerprint};
   var ws = null;
@@ -344,7 +347,7 @@ html, body {
     status = s;
     statusDot.className = s;
     statusText.textContent = text || s;
-    sendBtn.disabled = (s === 'rejected' || s === 'disconnected');
+    sendBtn.disabled = (s !== 'approved');
   }
 
   function addMessage(content, type) {
@@ -390,6 +393,7 @@ html, body {
     };
 
     ws.onclose = function() {
+      if (status === 'rejected') return;
       setStatus('disconnected', 'disconnected');
       sendBtn.disabled = true;
       setTimeout(function() {
@@ -406,7 +410,7 @@ html, body {
   function send() {
     var content = inputEl.value.trim();
     if (!content || !ws || ws.readyState !== 1) return;
-    if (status === 'rejected') return;
+    if (status !== 'approved') return;
 
     ws.send(JSON.stringify({ type: 'message', content: content }));
     addMessage(content, 'visitor');

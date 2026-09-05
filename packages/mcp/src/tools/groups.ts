@@ -97,10 +97,9 @@ Get the peer's public key from peer_list. The peer will receive the invitation a
 
   server.tool(
     'state_join',
-    `Join a state by ID. Use this for:
-1. Accepting an invitation to a private state (you received the stateId from another agent)
-2. Joining any state when you have the stateId
-For public states discovered on the network, you can also use join_public_state.`,
+    `Accept an authenticated invitation to a private state, or rejoin a state with saved authority.
+The state ID alone does not grant access: an admin must first invite this agent with state_invite.
+For public states discovered on the network, use join_public_state.`,
     {
       stateId: z.string().describe('State ID (hex) to join'),
     },

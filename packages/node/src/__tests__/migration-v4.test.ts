@@ -72,7 +72,7 @@ describe('schema v4 migration fixture', () => {
           version: number;
         }
       ).version,
-    ).toBe(7);
+    ).toBe(8);
     const replayColumns = db
       .prepare('PRAGMA table_info(protocol_replay)')
       .all() as Array<{ name: string }>;
@@ -159,7 +159,7 @@ describe('schema v5 migration variants', () => {
     const db = migrated.getDb();
     expect(
       db.prepare('SELECT version FROM schema_version').get(),
-    ).toEqual({ version: 7 });
+    ).toEqual({ version: 8 });
     expect(
       db.prepare(`
         SELECT sender_fingerprint, message_type, state, received_at, expires_at

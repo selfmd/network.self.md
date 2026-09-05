@@ -129,23 +129,18 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
   }
 
   function getMergedStates(): ApiState[] {
-    const byName = new Map<string, ApiState>();
+    const byId = new Map<string, ApiState>();
 
     for (const s of getOwnStates()) {
-      byName.set(s.name, s);
+      byId.set(s.id, s);
     }
 
     for (const d of getDiscoveredStates()) {
-      const existing = byName.get(d.name);
-      if (existing) {
-        existing.memberCount = Math.max(existing.memberCount, d.memberCount);
-        if (!existing.selfMd && d.selfMd) existing.selfMd = d.selfMd;
-      } else {
-        byName.set(d.name, d);
-      }
+      // Names are not unique; joined metadata is authoritative for this ID.
+      if (!byId.has(d.id)) byId.set(d.id, d);
     }
 
-    return [...byName.values()];
+    return [...byId.values()];
   }
 
   app.get('/api/status', async (): Promise<ApiStatus> => {
@@ -209,17 +204,20 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
       return { ok: false, reason: 'unknown', message: 'public state not found' };
     }
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Join group timed out')), 30_000)
+        timeoutId = setTimeout(() => reject(new Error('Join group timed out')), 30_000)
       );
       await Promise.race([agent.joinPublicGroup(id), timeout]);
-      const state = getMergedStates().find((s) => s.id === id || s.name === discovered.name) ?? discovered;
+      const state = getMergedStates().find((s) => s.id === id) ?? discovered;
       return { ok: true, state };
     } catch (err) {
       console.error('[API Error]', errorMessage(err));
       reply.status(502);
       return { ok: false, reason: 'unreachable', message: 'Failed to join group' };
+    } finally {
+      clearTimeout(timeoutId);
     }
   });
 

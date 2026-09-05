@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync, readFileSync, statSync } from 'node:fs';
 import { deserializeEpoch } from '@networkselfmd/core';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const REPLAY_TTL_MS = 10 * 60 * 1000;
 
 const MIGRATIONS: string[] = [
@@ -208,6 +208,17 @@ const MIGRATIONS: string[] = [
   `
   -- Migration 7 is applied programmatically so legacy epoch CBOR can be
   -- decoded and quarantined in the same transaction as the version update.
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS sender_key_sequences (
+    group_id BLOB NOT NULL,
+    public_key BLOB NOT NULL,
+    distribution_sequence INTEGER NOT NULL,
+    PRIMARY KEY (group_id, public_key)
+  );
+  INSERT OR IGNORE INTO sender_key_sequences (group_id, public_key, distribution_sequence)
+    SELECT group_id, public_key, distribution_sequence FROM sender_keys;
+  UPDATE schema_version SET version = 8;
   `,
 ];
 
