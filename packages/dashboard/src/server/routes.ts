@@ -1,8 +1,17 @@
+import { buildPublicObservation, validatePublicPublicationConfig, type PublicPublicationConfig } from './publicNetwork.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Agent } from '@networkselfmd/node';
 import type { ApiStatus, ApiPeer, ApiState, ApiStateDetail, ApiDiscoveredState, ApiJoinResponse, ApiIdentity } from './types.js';
+import { validateOperatorOrigin, type DashboardBasicAuth } from './config.js';
+
+declare module 'fastify' {
+  interface FastifyContextConfig { publicSiteAsset?: boolean; }
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('hex');
@@ -15,7 +24,7 @@ function errorMessage(err: unknown): string {
 const LOCAL_ORIGIN_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 function isAllowedLocalOrigin(origin: string | undefined): boolean {
-  if (!origin) return true;
+  if (!origin) return false;
   try {
     const url = new URL(origin);
     return (url.protocol === 'http:' || url.protocol === 'https:') && LOCAL_ORIGIN_HOSTS.has(url.hostname);
@@ -29,9 +38,19 @@ function originHeader(request: FastifyRequest): string | undefined {
   return Array.isArray(origin) ? origin[0] : origin;
 }
 
-async function requireLocalMutationOrigin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  if (!isAllowedLocalOrigin(originHeader(request))) {
-    await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost origin' } });
+const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+async function requireMutationOrigin(request: FastifyRequest, reply: FastifyReply, operatorOrigin?: string): Promise<void> {
+  const origin = originHeader(request);
+  if (origin) {
+    if (!isAllowedLocalOrigin(origin) && origin !== operatorOrigin) {
+      await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost or configured operator origin' } });
+    }
+    return;
+  }
+  // No Origin header (non-browser client) — verify the request comes from localhost
+  if (!request.ip || !LOCALHOST_IPS.has(request.ip)) {
+    await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost or configured operator origin' } });
   }
 }
 
@@ -41,16 +60,75 @@ function isHexId(id: string): boolean {
 
 export interface DashboardAgent {
   agent: Agent;
+  auth?: DashboardBasicAuth;
+  publication?: PublicPublicationConfig;
+  operatorOrigin?: string;
+  publicSite?: boolean;
 }
 
-export async function buildApp({ agent }: DashboardAgent) {
+function credentialDigest(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest();
+}
+
+function basicCredentials(header: string | undefined): string {
+  if (!header) return '';
+  const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/.exec(header);
+  if (!match) return '';
+  try {
+    return Buffer.from(match[1], 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+export async function buildApp({ agent, auth, publication, operatorOrigin, publicSite = false }: DashboardAgent) {
+  if (operatorOrigin !== undefined) {
+    operatorOrigin = validateOperatorOrigin(operatorOrigin);
+    if (!auth) throw new Error('An operator origin requires dashboard authentication');
+  }
+  if (publicSite && (!auth || publication === undefined)) {
+    throw new Error('Public site requires dashboard authentication and explicit publication configuration');
+  }
+  const approvedPublication = validatePublicPublicationConfig(publication);
   const app = Fastify();
+
+  if (auth) {
+    const expected = credentialDigest(`${auth.username}:${auth.password}`);
+    app.addHook('onRequest', async (request, reply) => {
+      const route = request.routeOptions.url;
+      if (route === '/healthz') return;
+      if (publicSite && (request.method === 'GET' || request.method === 'HEAD') &&
+          (route === '/api/public/network' || request.routeOptions.config.publicSiteAsset === true)) return;
+      const actual = credentialDigest(
+        basicCredentials(request.headers.authorization),
+      );
+      if (!timingSafeEqual(expected, actual)) {
+        await reply
+          .header('WWW-Authenticate', 'Basic realm="network.self.md", charset="UTF-8"')
+          .status(401)
+          .send({ error: { code: 'unauthorized', message: 'Authentication required' } });
+      }
+    });
+  }
 
   await app.register(cors, {
     origin: (origin, callback) => {
-      callback(null, isAllowedLocalOrigin(origin));
+      callback(null, isAllowedLocalOrigin(origin) || (operatorOrigin !== undefined && origin === operatorOrigin));
     },
   });
+
+  await app.register(helmet, { global: false });
+  app.addHook('onRequest', async (request, reply) => {
+    // Safari/WebKit upgrades even loopback asset URLs when this CSP directive
+    // is present. The local dashboard serves HTTP and has no TLS listener.
+    const localHttp = request.protocol === 'http' &&
+      ['localhost', '127.0.0.1', '::1', '[::1]'].includes(request.hostname);
+    await reply.helmet(localHttp ? {
+      contentSecurityPolicy: { directives: { 'upgrade-insecure-requests': null } },
+      strictTransportSecurity: false,
+    } : {});
+  });
+  await app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
 
   const startedAt = Date.now();
 
@@ -80,24 +158,25 @@ export async function buildApp({ agent }: DashboardAgent) {
   }
 
   function getMergedStates(): ApiState[] {
-    const byName = new Map<string, ApiState>();
+    const byId = new Map<string, ApiState>();
 
     for (const s of getOwnStates()) {
-      byName.set(s.name, s);
+      byId.set(s.id, s);
     }
 
     for (const d of getDiscoveredStates()) {
-      const existing = byName.get(d.name);
-      if (existing) {
-        existing.memberCount = Math.max(existing.memberCount, d.memberCount);
-        if (!existing.selfMd && d.selfMd) existing.selfMd = d.selfMd;
-      } else {
-        byName.set(d.name, d);
-      }
+      // Names are not unique; joined metadata is authoritative for this ID.
+      if (!byId.has(d.id)) byId.set(d.id, d);
     }
 
-    return [...byName.values()];
+    return [...byId.values()];
   }
+
+  app.get('/api/public/network', async (_request, reply) => {
+    const observedAt = new Date().toISOString();
+    reply.header('Cache-Control', 'no-store');
+    return buildPublicObservation({ states: getMergedStates(), peers: agent.listPeers(), observedAt }, approvedPublication);
+  });
 
   app.get('/api/status', async (): Promise<ApiStatus> => {
     const peers = agent.listPeers();
@@ -111,9 +190,9 @@ export async function buildApp({ agent }: DashboardAgent) {
       stateCount: states.length,
       uptime: Date.now() - startedAt,
       online: agent.isRunning,
-      syncPct: 100,
-      latencyMsP50: 0,
-      latencyMsP95: 0,
+      syncPct: null,
+      latencyMsP50: null,
+      latencyMsP95: null,
       capabilities: {
         wireTrace: false,
         keyRotation: false,
@@ -147,7 +226,7 @@ export async function buildApp({ agent }: DashboardAgent) {
     return getDiscoveredStates();
   });
 
-  app.post<{ Params: { id: string } }>('/api/discovery/states/:id/join', { preHandler: requireLocalMutationOrigin }, async (request, reply): Promise<ApiJoinResponse> => {
+  app.post<{ Params: { id: string } }>('/api/discovery/states/:id/join', { preHandler: (request, reply) => requireMutationOrigin(request, reply, operatorOrigin) }, async (request, reply): Promise<ApiJoinResponse> => {
     const { id } = request.params;
     if (!isHexId(id)) {
       reply.status(400);
@@ -160,13 +239,20 @@ export async function buildApp({ agent }: DashboardAgent) {
       return { ok: false, reason: 'unknown', message: 'public state not found' };
     }
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      await agent.joinPublicGroup(id);
-      const state = getMergedStates().find((s) => s.id === id || s.name === discovered.name) ?? discovered;
+      const timeout = new Promise<never>((_, reject) =>
+        timeoutId = setTimeout(() => reject(new Error('Join group timed out')), 30_000)
+      );
+      await Promise.race([agent.joinPublicGroup(id), timeout]);
+      const state = getMergedStates().find((s) => s.id === id) ?? discovered;
       return { ok: true, state };
     } catch (err) {
+      console.error('[API Error]', errorMessage(err));
       reply.status(502);
-      return { ok: false, reason: 'unreachable', message: errorMessage(err) };
+      return { ok: false, reason: 'unreachable', message: 'Failed to join group' };
+    } finally {
+      clearTimeout(timeoutId);
     }
   });
 

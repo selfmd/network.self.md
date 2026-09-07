@@ -3,10 +3,11 @@ import { Box, Text, useApp, useInput } from 'ink';
 import type { Agent } from '@networkselfmd/node';
 
 interface TTYARequest {
-  id: string;
-  visitorName: string;
-  visitorFingerprint: string;
+  visitorId: string;
+  content?: string;
+  ipHash: string;
   timestamp: number;
+  status: 'pending' | 'approved' | 'rejected';
 }
 
 interface TTYAConversation {
@@ -19,9 +20,15 @@ interface TTYAViewProps {
   agent: Agent;
   port: number;
   autoApprove: boolean;
+  url: string;
 }
 
-export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) => {
+export const TTYAView: React.FC<TTYAViewProps> = ({
+  agent,
+  port,
+  autoApprove,
+  url,
+}) => {
   const { exit } = useApp();
   const [requests, setRequests] = useState<TTYARequest[]>([]);
   const [conversations, setConversations] = useState<TTYAConversation[]>([]);
@@ -29,22 +36,30 @@ export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) 
 
   useEffect(() => {
     const onRequest = (request: TTYARequest) => {
+      if (request.status !== 'pending') return;
       if (autoApprove) {
-        agent.emit('ttya:approve', request.id);
+        agent.approveTTYAVisitor(request.visitorId);
         setConversations((prev) => [
           ...prev,
           {
-            id: request.id,
-            visitorName: request.visitorName,
+            id: request.visitorId,
+            visitorName: request.visitorId,
             startedAt: Date.now(),
           },
         ]);
       } else {
-        setRequests((prev) => [...prev, request]);
+        setRequests((prev) =>
+          prev.some((item) => item.visitorId === request.visitorId)
+            ? prev
+            : [...prev, request],
+        );
       }
     };
 
     agent.on('ttya:request', onRequest);
+    for (const visitor of agent.getPendingTTYAVisitors()) {
+      onRequest(visitor);
+    }
 
     return () => {
       agent.off('ttya:request', onRequest);
@@ -69,25 +84,29 @@ export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) 
     // Approve with 'a'
     if (input === 'a' && requests[selectedIndex]) {
       const request = requests[selectedIndex]!;
-      agent.emit('ttya:approve', request.id);
+      agent.approveTTYAVisitor(request.visitorId);
       setConversations((prev) => [
         ...prev,
         {
-          id: request.id,
-          visitorName: request.visitorName,
+          id: request.visitorId,
+          visitorName: request.visitorId,
           startedAt: Date.now(),
         },
       ]);
       setRequests((prev) => prev.filter((_, i) => i !== selectedIndex));
-      setSelectedIndex((prev) => Math.min(prev, Math.max(0, requests.length - 2)));
+      setSelectedIndex((prev) =>
+        Math.min(prev, Math.max(0, requests.length - 2)),
+      );
     }
 
     // Reject with 'r'
     if (input === 'r' && requests[selectedIndex]) {
       const request = requests[selectedIndex]!;
-      agent.emit('ttya:reject', request.id);
+      agent.rejectTTYAVisitor(request.visitorId);
       setRequests((prev) => prev.filter((_, i) => i !== selectedIndex));
-      setSelectedIndex((prev) => Math.min(prev, Math.max(0, requests.length - 2)));
+      setSelectedIndex((prev) =>
+        Math.min(prev, Math.max(0, requests.length - 2)),
+      );
     }
   });
 
@@ -102,6 +121,7 @@ export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) 
           {autoApprove ? 'Auto-approve ON' : 'Manual approval'}
         </Text>
       </Box>
+      <Text color="gray">{url}</Text>
 
       <Box flexDirection="column" marginTop={1}>
         <Text bold underline>
@@ -111,10 +131,10 @@ export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) 
           <Text color="gray">No pending requests</Text>
         ) : (
           requests.map((req, i) => (
-            <Box key={req.id}>
+            <Box key={req.visitorId}>
               <Text color={i === selectedIndex ? 'green' : undefined}>
                 {i === selectedIndex ? '> ' : '  '}
-                {req.visitorName} ({req.visitorFingerprint.slice(0, 8)}) —{' '}
+                {req.visitorId} ({req.ipHash.slice(0, 8)}) —{' '}
                 {new Date(req.timestamp).toLocaleTimeString()}
               </Text>
             </Box>
@@ -142,9 +162,7 @@ export const TTYAView: React.FC<TTYAViewProps> = ({ agent, port, autoApprove }) 
       </Box>
 
       <Box marginTop={1}>
-        <Text color="gray">
-          [a] approve  [r] reject  [↑/↓] navigate  [q] quit
-        </Text>
+        <Text color="gray">[a] approve [r] reject [↑/↓] navigate [q] quit</Text>
       </Box>
     </Box>
   );

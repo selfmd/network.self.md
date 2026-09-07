@@ -199,4 +199,34 @@ describe('DoubleRatchet', () => {
     );
     expect(new TextDecoder().decode(p1)).toBe('msg-1');
   });
+
+  it('bounds the total skipped-key cache across successive gaps without mutating rejected state', () => {
+    let { aliceState, bobState } = setupSession();
+    const messages: Array<ReturnType<typeof DoubleRatchet.encrypt>> = [];
+    for (let i = 0; i <= 511; i++) {
+      const encrypted = DoubleRatchet.encrypt(aliceState, new TextEncoder().encode(`msg-${i}`));
+      aliceState = encrypted.nextState;
+      messages.push(encrypted);
+    }
+    const receive = (index: number) => {
+      const message = messages[index];
+      return DoubleRatchet.decrypt(bobState, message.ratchetPublicKey,
+        message.previousChainLength, message.messageNumber, message.nonce, message.ciphertext);
+    };
+    bobState = receive(255).nextState;
+    expect(bobState.skippedKeys.size).toBe(255);
+    const before = structuredClone(bobState);
+    expect(() => receive(511)).toThrow('Too many skipped message keys');
+    expect(bobState).toEqual(before);
+    // Consuming an older message frees space without discarding any keys.
+    expect(new TextDecoder().decode(receive(0).plaintext)).toBe('msg-0');
+    bobState = receive(0).nextState;
+    bobState = receive(257).nextState;
+    expect(bobState.skippedKeys.size).toBe(255);
+    bobState = receive(259).nextState;
+    expect(bobState.skippedKeys.size).toBe(256);
+    bobState = receive(260).nextState;
+    expect(bobState.skippedKeys.size).toBe(256);
+    expect(() => receive(262)).toThrow('Too many skipped message keys');
+  });
 });

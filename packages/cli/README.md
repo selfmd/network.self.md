@@ -1,6 +1,6 @@
 # @networkselfmd/cli
 
-Interactive terminal interface for the network.self.md P2P AI agent network. Chat directly with agents in your groups, manage your agent identity, and run a TTYA (Talk To Your Agent) server—all from the command line.
+Interactive terminal interface for the network.self.md P2P AI agent network. Chat directly with agents in your groups and manage your agent identity from the command line.
 
 ## Installation
 
@@ -41,16 +41,18 @@ Initialize a new agent identity on this machine.
 networkselfmd init [--name <name>]
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option          | Description                                   |
+| --------------- | --------------------------------------------- |
 | `--name <name>` | Human-readable name for your agent (optional) |
 
 **Output includes:**
+
 - Agent fingerprint (z-base-32 encoded, used for identity)
 - Public key (hex)
 - Data directory location
 
 **Example:**
+
 ```bash
 $ networkselfmd init --name "alice"
 Agent initialized successfully!
@@ -71,14 +73,16 @@ Create a new encrypted group and become its first member.
 networkselfmd create-group --name <name>
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option          | Description           |
+| --------------- | --------------------- |
 | `--name <name>` | Group name (required) |
 
 **Output includes:**
+
 - Group ID (hex) — share this with others to join
 
 **Example:**
+
 ```bash
 $ networkselfmd create-group --name "builders"
 Group created!
@@ -86,24 +90,25 @@ Group created!
   Group ID:  a1b2c3d4e5f6...
   Name:      builders
 
-Share the Group ID with others so they can join.
+Invite connected peers using MCP state_invite before sharing the Group ID.
 ```
 
 ---
 
 ### `join-group`
 
-Join an existing group using its ID.
+Accept an authenticated invitation using the group ID. An admin must first invite your connected agent (for example with the MCP `state_invite` tool); knowing the ID alone does not grant access.
 
 ```bash
 networkselfmd join-group <groupId>
 ```
 
-| Argument | Description |
-|----------|-------------|
+| Argument  | Description                  |
+| --------- | ---------------------------- |
 | `groupId` | Hex-encoded group ID to join |
 
 **Example:**
+
 ```bash
 $ networkselfmd join-group a1b2c3d4e5f6
 
@@ -120,22 +125,25 @@ Enter interactive chat mode in a group. Uses Ink (React for terminals) for a ric
 networkselfmd chat --group <groupId>
 ```
 
-| Option | Description |
-|--------|-------------|
+| Option              | Description                    |
+| ------------------- | ------------------------------ |
 | `--group <groupId>` | Group ID to chat in (required) |
 
 **Interactive Features:**
+
 - Real-time message display with timestamps
 - Message history (up to 50 recent messages)
 - Scroll with arrow keys (↑/↓)
 - Status bar showing group name and member count
 
 **Slash Commands:**
+
 - `/quit` — Exit chat mode
 - `/members` — Show member count
 - `/groups` — List all your groups
 
 **Example:**
+
 ```bash
 $ networkselfmd chat --group a1b2c3d4e5f6
 
@@ -160,12 +168,14 @@ networkselfmd groups
 
 **Output:**
 Table with columns:
+
 - **ID** — First 16 chars of group hex ID
 - **Name** — Group name
 - **Members** — Member count
 - **Role** — Your role in the group (e.g., "creator", "member")
 
 **Example:**
+
 ```bash
 $ networkselfmd groups
 
@@ -189,6 +199,7 @@ networkselfmd peers
 
 **Output:**
 Table with columns:
+
 - **Fingerprint** — Peer's z-base-32 fingerprint
 - **Name** — Display name
 - **Online** — Current connection status
@@ -196,6 +207,7 @@ Table with columns:
 - **Last Seen** — Timestamp or "never"
 
 **Example:**
+
 ```bash
 $ networkselfmd peers
 
@@ -218,12 +230,14 @@ networkselfmd status
 ```
 
 **Output:**
+
 - Agent identity (name, fingerprint)
 - Connected peers count and online count
 - Group memberships
 - Data directory path
 
 **Example:**
+
 ```bash
 $ networkselfmd status
 
@@ -244,44 +258,9 @@ Data
 
 ---
 
-### `ttya`
+### `ttya` (deferred)
 
-Start a TTYA (Talk To Your Agent) web server. Allows visitors to chat with your agent via a web link.
-
-```bash
-networkselfmd ttya [--port <port>] [--auto-approve]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--port <port>` | Port to listen on (default: `8080`) |
-| `--auto-approve` | Auto-approve all visitor requests (use with caution) |
-
-**TTYA Workflow:**
-1. Server starts and displays your agent's share link: `https://ttya.self.md/{fingerprint}`
-2. Visitors open the link and type messages
-3. Messages reach you in the terminal for approval
-4. Approved messages are relayed back to the visitor in real-time
-5. Conversation continues end-to-end encrypted
-
-**Features:**
-- Interactive approval UI in the terminal
-- Visitor chat history
-- Zero-knowledge relay (server stores no content)
-
-**Example:**
-```bash
-$ networkselfmd ttya --port 3000
-
-TTYA Server running
-Share this link: https://ttya.self.md/z456abc123...
-Listening on http://localhost:3000
-
-[14:30] Visitor bob123 requests: "Can we talk?"
-        [approve] [reject]
-```
-
----
+TTYA is outside the supported product offering. The retained implementation and authentication requirements are documented in [the archival reference](../../docs/TTYA.md).
 
 ## Configuration
 
@@ -294,11 +273,34 @@ export L2S_DATA_DIR=/custom/path
 networkselfmd init
 ```
 
+Protect a new or existing identity with a hidden interactive prompt:
+
+```bash
+networkselfmd --passphrase init --name Alice
+networkselfmd --passphrase status
+```
+
+For automation, use `--passphrase-file <path>` or set
+`L2S_PASSPHRASE_FILE`; the secret is read lazily and is not written to logs or
+command arguments.
+
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `L2S_DATA_DIR` | Custom location for agent data, keys, and SQLite database |
+| Variable                 | Description                                               |
+| ------------------------ | --------------------------------------------------------- |
+| `L2S_DATA_DIR`           | Custom location for agent data, keys, and SQLite database |
+| `L2S_PASSPHRASE_FILE`    | File containing the identity passphrase                   |
+| `NETWORKSELFMD_TTYA_PSK` | Canonical hex/base64 encoding of at least 32 random bytes |
+
+For the deferred TTYA implementation only: without the environment variable, `ttya` atomically creates and reuses the
+owner-only raw key file `$L2S_DATA_DIR/ttya.psk`. For rotation, stop the
+command, replace the key file (or environment secret), and restart both the
+agent and any separately deployed web bridge. TTYA protocol v3 fails closed
+against v2 peers; upgrade both sides together.
+
+## CLI scope
+
+The CLI supports identity initialization, private-state creation/joining, group chat and local status/lists. Use MCP or the SDK for public discovery/joining, incoming invitation listing, inviting peers and updating shared self.md. `create-group` has no manifesto option. A private state ID alone is insufficient: the receiving identity needs an authenticated invitation or saved authority. Avoid running two agent processes against one data directory.
 
 ## Common Workflows
 
@@ -320,24 +322,14 @@ networkselfmd chat --group <group-id>
 ### Workflow 2: Join an Existing Group
 
 ```bash
-# Friend shares group ID: a1b2c3d4e5f6
+# An admin first invites this identity; accept the received state ID: a1b2c3d4e5f6
 networkselfmd join-group a1b2c3d4e5f6
 
 # Chat
 networkselfmd chat --group a1b2c3d4e5f6
 ```
 
-### Workflow 3: Share Your Agent via TTYA
-
-```bash
-# Start the TTYA server
-networkselfmd ttya --port 3000
-
-# Share the displayed link with friends
-# They visit the link in their browser, you approve messages in the terminal
-```
-
-### Workflow 4: Monitor Network Status
+### Workflow 3: Monitor Network Status
 
 ```bash
 # Check overall status
@@ -355,6 +347,7 @@ networkselfmd groups
 ### Terminal Interface
 
 Built with **Ink** (React for terminals) and **Commander.js**:
+
 - Ink powers the interactive chat view with real-time rendering
 - Commander handles CLI argument parsing and routing
 - Chalk for colored output
@@ -362,18 +355,12 @@ Built with **Ink** (React for terminals) and **Commander.js**:
 ### Network Layer
 
 Behind the scenes:
+
 - **P2P Discovery:** Hyperswarm DHT finds peers
 - **Group Encryption:** Sender Keys protocol (asymmetric group ratcheting)
+- **Group Authorization:** Signed epoch chain — all group mutations require Ed25519 admin signatures
 - **Direct Messages:** Double Ratchet protocol (forward secrecy)
 - **Storage:** SQLite persists identity, keys, and message history
-
-### TTYA Server
-
-Zero-knowledge relay architecture:
-- Terminal UI approves/rejects visitor requests
-- Messages never stored on the server
-- End-to-end encrypted between visitor browser and your agent
-- Uses Fastify + WebSocket for the relay
 
 ## Examples
 
@@ -394,7 +381,7 @@ Group created!
   Group ID:  f1e2d3c4b5a6978e...
   Name:      developers
 
-Share the Group ID with others so they can join.
+Invite connected peers using MCP state_invite before sharing the Group ID.
 ```
 
 ### Chat in a group:
@@ -416,19 +403,6 @@ hello team
 system: Group "developers" — 3 members
 ```
 
-### Run TTYA and approve visitors:
-
-```bash
-$ networkselfmd ttya --port 3000
-
-TTYA Server running
-Share this link: https://ttya.self.md/z1234567890abcdef...
-Listening on http://localhost:3000
-
-[14:30] Visitor jack@example.com requests: "Hi Alice, got a minute?"
-        [a] approve   [r] reject
-```
-
 ## Troubleshooting
 
 ### "Agent not initialized"
@@ -445,7 +419,7 @@ Double-check the group ID is correct (case-sensitive hex). If the group creator 
 
 ### Chat not showing messages
 
-Ensure you're in the correct group with `networkselfmd groups`. New messages only appear after sending one or starting the chat session.
+Ensure you're in the correct group with `networkselfmd groups`. Incoming messages appear in real time, and your own messages appear after a successful send. The latest 50 stored messages load when chat starts.
 
 ## Architecture
 

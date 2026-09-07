@@ -6,15 +6,16 @@ Pure cryptographic primitives and protocol definitions for agent-to-agent encryp
 
 ## What's Inside
 
-| Module | Purpose |
-|--------|---------|
-| **Identity** | Ed25519 keypairs, X25519 key derivation, fingerprinting |
-| **AEAD** | XChaCha20-Poly1305 authenticated encryption |
-| **KDF** | HKDF-SHA256 key derivation and chain advancement |
-| **Signatures** | Ed25519 signing and verification |
-| **Sender Keys** | Signal Protocol–style symmetric ratchet for group messages |
-| **Double Ratchet** | Asynchronous DH ratchet + symmetric chains for 1-to-1 messages |
-| **Messages** | CBOR encoding/framing, type definitions |
+| Module                  | Purpose                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| **Identity**            | Ed25519 keypairs, X25519 key derivation, fingerprinting                                              |
+| **AEAD**                | XChaCha20-Poly1305 authenticated encryption                                                          |
+| **KDF**                 | HKDF-SHA256 key derivation and chain advancement                                                     |
+| **Signatures**          | Ed25519 signing and verification                                                                     |
+| **Sender Keys**         | Signal Protocol–style symmetric ratchet for group messages                                           |
+| **Double Ratchet**      | Asynchronous DH ratchet + symmetric chains for 1-to-1 messages                                       |
+| **Signed Group Epochs** | GroupEpoch hash chain with CBOR serialization, SHA-256 hashing, and Ed25519-signed state transitions |
+| **Messages**            | CBOR encoding/framing, type definitions                                                              |
 
 All crypto uses **audited libraries** ([Noble curves/hashes/ciphers](https://github.com/paulmillr/noble-crypto)). Zero custom cryptography.
 
@@ -37,7 +38,10 @@ pnpm add @networkselfmd/core
 Generate an agent identity (Ed25519 keypair + X25519 derive):
 
 ```typescript
-import { generateIdentity, fingerprintFromPublicKey } from '@networkselfmd/core';
+import {
+  generateIdentity,
+  fingerprintFromPublicKey,
+} from '@networkselfmd/core';
 
 const identity = generateIdentity('Alice');
 console.log(identity.fingerprint); // "z-base-32 encoded, human readable"
@@ -74,7 +78,7 @@ const derivedKey = deriveKey(
   inputKey,
   'optional-salt',
   'info-string',
-  32 // length in bytes
+  32, // length in bytes
 );
 
 // Advance a chain (for ratcheting)
@@ -106,16 +110,17 @@ import { SenderKeys } from '@networkselfmd/core/protocol';
 const senderState = SenderKeys.generate();
 const { ciphertext, nonce, chainIndex, nextState } = SenderKeys.encrypt(
   senderState,
-  plaintext
+  plaintext,
 );
 
 // Update sender state after each encryption
 let state = nextState;
 
-// Receiver: create a record from sender's distribution message
+// Receiver: create a record only after decrypting and authenticating the
+// recipient-specific SenderKeyDistribution envelope
 const record: SenderKeyRecord = {
-  chainKey: distributionMessage.chainKey,
-  chainIndex: distributionMessage.chainIndex,
+  chainKey: decryptedDistribution.chainKey,
+  chainIndex: decryptedDistribution.chainIndex,
   skippedKeys: new Map(),
 };
 
@@ -124,11 +129,12 @@ const { plaintext: decrypted, nextRecord } = SenderKeys.decrypt(
   record,
   chainIndex,
   nonce,
-  ciphertext
+  ciphertext,
 );
 ```
 
 **Features:**
+
 - One symmetric encryption per message (efficient for groups)
 - Out-of-order delivery support via skipped key cache
 - Per-sender ratchet chains
@@ -172,6 +178,7 @@ const { plaintext: decrypted, nextState: newReceiverState } =
 ```
 
 **Features:**
+
 - X25519 key ratchet on every message (optional sender-side, mandatory receiver-side)
 - Symmetric HKDF chains for message derivation
 - Forward secrecy: compromising current keys doesn't expose past messages
@@ -183,16 +190,24 @@ const { plaintext: decrypted, nextState: newReceiverState } =
 CBOR-encode and frame messages for network transmission:
 
 ```typescript
-import { encodeMessage, frameMessage, parseFrame } from '@networkselfmd/core/protocol';
+import {
+  encodeMessage,
+  frameMessage,
+  parseFrame,
+} from '@networkselfmd/core/protocol';
 
 const message: GroupEncryptedMessage = {
   type: MessageType.GroupMessage,
   groupId: new Uint8Array(32),
-  senderFingerprint: 'abc123...',
+  senderFingerprint: 'y'.repeat(32),
   chainIndex: 5,
+  generationId: new Uint8Array(16),
+  epochVersion: 2,
+  epochHash: new Uint8Array(32),
   ciphertext: new Uint8Array(100),
   nonce: new Uint8Array(24),
   timestamp: Date.now(),
+  signature: new Uint8Array(64),
 };
 
 // Encode to CBOR bytes
@@ -211,6 +226,7 @@ if (result) {
 ```
 
 **Framing:**
+
 - 4-byte big-endian uint32 length prefix
 - CBOR-encoded payload
 - Max frame size: 1 MiB
@@ -227,32 +243,41 @@ if (result) {
 ### Crypto Module
 
 **AEAD:**
+
 - `encrypt(key, plaintext): { ciphertext, nonce }` — XChaCha20-Poly1305
 - `decrypt(key, nonce, ciphertext): Uint8Array` — Decrypt
 
 **KDF:**
+
 - `deriveKey(ikm, salt, info, length): Uint8Array` — HKDF-SHA256
 - `advanceChain(chainKey): { messageKey, nextChainKey }` — Ratchet chain
 
 **Signatures:**
+
 - `sign(message, privateKey): Uint8Array` — Ed25519 sign
 - `verify(signature, message, publicKey): boolean` — Ed25519 verify
 
 ### Protocol Module
 
 **Sender Keys:**
+
 - `SenderKeys.generate(): SenderKeyState`
 - `SenderKeys.encrypt(state, plaintext): { ciphertext, nonce, chainIndex, nextState }`
 - `SenderKeys.decrypt(record, chainIndex, nonce, ciphertext): { plaintext, nextRecord }`
-- `SenderKeys.createDistribution(groupId, state, signingPublicKey): SenderKeyDistributionMessage`
+- `SenderKeys.createDistribution(groupId, state, signingPublicKey, epochVersion, epochHash): SenderKeyDistributionPayload`
+- `SenderKeys.encryptDistribution(payload, senderXPrivateKey, senderPublicKey, recipientXPublicKey, recipientPublicKey): SenderKeyDistributionMessage`
+- `SenderKeys.decryptDistribution(message, recipientXPrivateKey, recipientPublicKey, authenticatedSenderXPublicKey, authenticatedSenderPublicKey): SenderKeyDistributionPayload`
+- `senderKeyEnvelopeId(message): Uint8Array` — canonical replay identity for an opaque encrypted distribution envelope
 
 **Double Ratchet:**
+
 - `DoubleRatchet.initSender(sharedSecret, recipientRatchetPublic): DoubleRatchetState`
 - `DoubleRatchet.initReceiver(sharedSecret, ownRatchetKeyPair): DoubleRatchetState`
 - `DoubleRatchet.encrypt(state, plaintext): { ciphertext, nonce, ratchetPublicKey, previousChainLength, messageNumber, nextState }`
 - `DoubleRatchet.decrypt(state, ratchetPublicKey, previousChainLength, messageNumber, nonce, ciphertext): { plaintext, nextState }`
 
 **Messages:**
+
 - `encodeMessage(message: ProtocolMessage): Uint8Array` — CBOR encode
 - `decodeMessage(bytes: Uint8Array): ProtocolMessage` — CBOR decode
 - `frameMessage(message: ProtocolMessage): Uint8Array` — Add length prefix
@@ -264,11 +289,11 @@ if (result) {
 
 ```typescript
 interface AgentIdentity {
-  edPrivateKey: Uint8Array;      // Ed25519 private key
-  edPublicKey: Uint8Array;       // Ed25519 public key
-  xPrivateKey: Uint8Array;       // X25519 private key (DH)
-  xPublicKey: Uint8Array;        // X25519 public key (DH)
-  fingerprint: string;           // Human-readable identifier
+  edPrivateKey: Uint8Array; // Ed25519 private key
+  edPublicKey: Uint8Array; // Ed25519 public key
+  xPrivateKey: Uint8Array; // X25519 private key (DH)
+  xPublicKey: Uint8Array; // X25519 public key (DH)
+  fingerprint: string; // Human-readable identifier
   displayName?: string;
 }
 ```
@@ -277,8 +302,8 @@ interface AgentIdentity {
 
 ```typescript
 interface SenderKeyState {
-  chainKey: Uint8Array;          // Current chain key
-  chainIndex: number;            // Message counter
+  chainKey: Uint8Array; // Current chain key
+  chainIndex: number; // Message counter
 }
 
 interface SenderKeyRecord {
@@ -292,7 +317,7 @@ interface SenderKeyRecord {
 
 ```typescript
 interface DoubleRatchetState {
-  rootKey: Uint8Array;           // Root secret
+  rootKey: Uint8Array; // Root secret
   sendChainKey: Uint8Array | null;
   receiveChainKey: Uint8Array | null;
   sendRatchetPrivate: Uint8Array;
@@ -309,12 +334,13 @@ interface DoubleRatchetState {
 
 - `IdentityHandshake` — Peer authentication (Ed25519 signature + display name)
 - `GroupSync` — Group membership and epoch
-- `SenderKeyDistribution` — Share sender's chain for group membership
+- `SenderKeyDistribution` — Recipient-specific opaque encrypted sender-key envelope
 - `GroupMessage` — Encrypted message to group (Sender Keys)
 - `DirectMessage` — Encrypted 1-to-1 message (Double Ratchet)
 - `GroupManagement` — Invite, join, leave, kick, promote
-- `TTYARequest` — Request from visitor to agent owner
-- `TTYAResponse` — Agent's reply to visitor
+- `GroupEpoch` — Signed group state transitions (epoch chain with Ed25519 admin signatures)
+- `TTYARequest` — Deferred implementation: request from visitor to agent owner
+- `TTYAResponse` — Deferred implementation: agent's reply to visitor
 - `Ack` — Acknowledgment
 
 ## Design Principles
@@ -349,5 +375,5 @@ MIT
 
 - **Main Package:** [@networkselfmd/node](../node) — P2P runtime with Hyperswarm
 - **CLI:** [@networkselfmd/cli](../cli) — Terminal interface
-- **Web:** [@networkselfmd/web](../web) — TTYA server and visitor chat
+- **Web:** [@networkselfmd/web](../web) — Deferred browser bridge implementation reference
 - **MCP:** [@networkselfmd/mcp](../mcp) — Claude Code integration

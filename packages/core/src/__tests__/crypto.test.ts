@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { encrypt, decrypt } from '../crypto/aead.js';
-import { deriveKey, advanceChain } from '../crypto/kdf.js';
+import { deriveKey, advanceChain, computeSharedSecret } from '../crypto/kdf.js';
 import { sign, verify } from '../crypto/signatures.js';
 import { randomBytes } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
+import { generateIdentity } from '../identity.js';
 
 describe('AEAD (XChaCha20-Poly1305)', () => {
   it('encrypts and decrypts roundtrip', () => {
@@ -69,6 +70,33 @@ describe('KDF', () => {
     const r2 = advanceChain(chainKey);
     expect(r1.messageKey).toEqual(r2.messageKey);
     expect(r1.nextChainKey).toEqual(r2.nextChainKey);
+  });
+});
+
+describe('computeSharedSecret', () => {
+  it('is symmetric: both peers derive the same shared secret', () => {
+    const alice = generateIdentity('alice');
+    const bob = generateIdentity('bob');
+    const secretAB = computeSharedSecret(alice.xPrivateKey, bob.xPublicKey);
+    const secretBA = computeSharedSecret(bob.xPrivateKey, alice.xPublicKey);
+    expect(secretAB).toEqual(secretBA);
+  });
+
+  it('produces a 32-byte key', () => {
+    const alice = generateIdentity('alice');
+    const bob = generateIdentity('bob');
+    const secret = computeSharedSecret(alice.xPrivateKey, bob.xPublicKey);
+    expect(secret.length).toBe(32);
+    expect(secret).toBeInstanceOf(Uint8Array);
+  });
+
+  it('produces different secrets for different peer pairs', () => {
+    const alice = generateIdentity('alice');
+    const bob = generateIdentity('bob');
+    const carol = generateIdentity('carol');
+    const secretAB = computeSharedSecret(alice.xPrivateKey, bob.xPublicKey);
+    const secretAC = computeSharedSecret(alice.xPrivateKey, carol.xPublicKey);
+    expect(secretAB).not.toEqual(secretAC);
   });
 });
 

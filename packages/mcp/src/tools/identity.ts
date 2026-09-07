@@ -6,14 +6,19 @@ export function registerIdentityTools(server: McpServer, agent: Agent): void {
   server.tool(
     'agent_init',
     `Initialize the agent — starts P2P networking and loads (or generates) identity.
-Call this first before using any other tools. If the agent is already running, this is a no-op.
+Call this first before using any other tools. A provided displayName updates the saved identity, including when the agent is already running.
 Returns your fingerprint (your unique ID on the network) and public key.`,
     {
-      displayName: z.string().optional().describe('Human-readable name for this agent (e.g. "Hermes", "Alice")'),
+      displayName: z.string().min(1)
+        .refine((name) => Buffer.byteLength(name, 'utf8') <= 128, 'Display name must be at most 128 UTF-8 bytes')
+        .optional().describe('Human-readable name for this agent (e.g. "Hermes", "Alice")'),
     },
-    async () => {
+    async ({ displayName }) => {
       if (!agent.isRunning) {
         await agent.start();
+      }
+      if (displayName !== undefined) {
+        agent.setDisplayName(displayName);
       }
       const identity = agent.identity;
       return {
@@ -22,7 +27,7 @@ Returns your fingerprint (your unique ID on the network) and public key.`,
           text: JSON.stringify({
             fingerprint: identity.fingerprint,
             displayName: identity.displayName,
-            publicKey: Buffer.from(identity.edPublicKey).toString('base64'),
+            publicKey: Buffer.from(identity.edPublicKey).toString('hex'),
           }),
         }],
       };

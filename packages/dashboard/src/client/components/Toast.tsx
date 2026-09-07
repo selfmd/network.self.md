@@ -25,9 +25,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={show}>
       {children}
       {toast && (
-        <div className="toast" key={toast.id}>
-          <div className="toast-title">Copied to clipboard.</div>
-          <pre className="toast-text">{toast.text}</pre>
+        <div className="toast-container" role="status" aria-live="polite">
+          <div className="toast" key={toast.id}>{toast.text}</div>
         </div>
       )}
     </ToastContext.Provider>

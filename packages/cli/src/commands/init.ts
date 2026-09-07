@@ -1,22 +1,21 @@
-import os from 'node:os';
-import path from 'node:path';
 import fs from 'node:fs';
 import chalk from 'chalk';
 import { Agent } from '@networkselfmd/node';
+import { getDataDir } from '../agent-options.js';
+import type { AgentOptions } from '@networkselfmd/node';
 
-function getDataDir(): string {
-  return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
-}
-
-export async function initAgent(name?: string): Promise<void> {
+export async function initAgent(
+  name?: string,
+  secrets: Pick<AgentOptions, 'passphrase' | 'secretProvider'> = {},
+): Promise<void> {
   const dataDir = getDataDir();
 
   if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     console.log(chalk.green(`Created data directory: ${dataDir}`));
   }
 
-  const agent = new Agent({ dataDir, displayName: name });
+  const agent = new Agent({ dataDir, displayName: name, ...secrets });
   await agent.start();
 
   const identity = agent.identity;
