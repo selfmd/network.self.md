@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync, readFileSync, statSync } from 'node:fs';
 import { deserializeEpoch } from '@networkselfmd/core';
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const REPLAY_TTL_MS = 10 * 60 * 1000;
 
 const MIGRATIONS: string[] = [
@@ -252,6 +252,38 @@ const MIGRATIONS: string[] = [
   );
   UPDATE schema_version SET version = 9;
   `,
+  `
+  CREATE TABLE IF NOT EXISTS policy_config (
+    id INTEGER PRIMARY KEY,
+    trusted_fingerprints TEXT,
+    interests TEXT,
+    require_mention INTEGER,
+    mention_prefix_len INTEGER,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS policy_audit (
+    audit_id           TEXT PRIMARY KEY,
+    received_at        INTEGER NOT NULL,
+    inserted_at        INTEGER NOT NULL,
+    event_kind         TEXT NOT NULL,
+    message_id         TEXT,
+    group_id_hex       TEXT,
+    sender_fingerprint TEXT,
+    byte_length        INTEGER NOT NULL,
+    action             TEXT NOT NULL,
+    reason             TEXT NOT NULL,
+    addressed_to_me    INTEGER NOT NULL,
+    sender_trusted     INTEGER NOT NULL,
+    matched_interests  TEXT NOT NULL,
+    gate_rejected      INTEGER NOT NULL,
+    allowed            INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_policy_audit_inserted_at
+    ON policy_audit(inserted_at DESC);
+
+  UPDATE schema_version SET version = 10;
+  `,
 ];
 
 export class AgentDatabase {
@@ -288,7 +320,17 @@ export class AgentDatabase {
       // every known v5 shape converge before applying the shared v6 schema.
       if (currentVersion === 5) this.reconcileSchemaV5();
 
-      for (let i = currentVersion; i < SCHEMA_VERSION; i++) {
+      let migrationStart = currentVersion;
+      // The historical policy branch used versions 2/3 for policy tables,
+      // independently of the discovery/ratchet migrations on main.
+      if ((currentVersion === 2 || currentVersion === 3) &&
+          this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'policy_config'").get()) {
+        const columns = this.db.prepare('PRAGMA table_info(groups)').all() as Array<{ name: string }>;
+        if (!columns.some(column => column.name === 'is_public')) this.db.exec(MIGRATIONS[1]);
+        this.db.exec(MIGRATIONS[2]);
+        migrationStart = 3;
+      }
+      for (let i = migrationStart; i < SCHEMA_VERSION; i++) {
         if (i === 5) {
           this.applyMigrationV6();
         } else if (i === 6) {

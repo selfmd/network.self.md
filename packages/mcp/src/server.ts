@@ -1,3 +1,4 @@
+import { registerPolicyTools } from './tools/policy.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Agent } from '@networkselfmd/node';
 import { registerIdentityTools } from './tools/identity.js';
@@ -18,6 +19,7 @@ export function createServer(agent: Agent): McpServer {
   registerMessagingTools(server, agent);
   registerPeerTools(server, agent);
   registerDiscoveryTools(server, agent);
+  registerPolicyTools(server, agent);
   registerResources(server, agent);
 
   return server;

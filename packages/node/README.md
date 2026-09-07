@@ -377,3 +377,9 @@ pnpm test
 ## License
 
 MIT
+
+## Inbound policy
+
+Authenticated DM and group reception evaluates an owner-local policy before dispatching `inbound:message` or adding to `agent.inboundQueue`. Configure with `AgentOptions.policyConfig` or the validated `getPolicyConfig`, `setPolicyConfig`, `updatePolicyConfig`, and `resetPolicyConfig` methods. An authenticated DM is addressed to this agent; group messages use mentions or `requireMention: false`. Decisions are `act`, `ask`, or `ignore`, with no automatic tool execution.
+
+`agent.policyAuditRepo.recent()` reads metadata-only decisions across restart. Audit and message storage commit together; an audit failure rolls back reception so reliable delivery can retry. The private inbound queue is process-local and contains decrypted content. Never attach it to a public feed. See `docs/POLICY.md` in the repository for schema-10 migration, retention and owner-access details.

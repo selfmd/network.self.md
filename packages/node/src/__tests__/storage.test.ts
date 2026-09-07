@@ -68,7 +68,7 @@ describe('AgentDatabase', () => {
     const row = db
       .prepare('SELECT version FROM schema_version')
       .get() as { version: number };
-    expect(row.version).toBe(9);
+    expect(row.version).toBe(10);
   });
 
   it('should migrate a populated v4 identity to the nullable encrypted-only schema', () => {

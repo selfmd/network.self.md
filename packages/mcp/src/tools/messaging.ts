@@ -1,6 +1,40 @@
+import type { PrivateInboundMessageEvent } from '@networkselfmd/node';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Agent } from '@networkselfmd/node';
+
+export interface InboundEventDTO {
+  kind: 'group' | 'dm';
+  messageId: string;
+  groupIdHex?: string;
+  senderPublicKeyHex: string;
+  senderFingerprint: string;
+  plaintextUtf8?: string;
+  plaintextBase64: string;
+  timestamp: number;
+  receivedAt: number;
+}
+
+export function toInboundEventDTO(ev: PrivateInboundMessageEvent): InboundEventDTO {
+  const dto: InboundEventDTO = {
+    kind: ev.kind,
+    messageId: ev.messageId,
+    groupIdHex: ev.groupId ? Buffer.from(ev.groupId).toString('hex') : undefined,
+    senderPublicKeyHex: Buffer.from(ev.senderPublicKey).toString('hex'),
+    senderFingerprint: ev.senderFingerprint,
+    plaintextBase64: Buffer.from(ev.plaintext).toString('base64'),
+    timestamp: ev.timestamp,
+    receivedAt: ev.receivedAt,
+  };
+  // Strict UTF-8 decode. If plaintext isn't valid UTF-8, omit the field —
+  // consumers fall back to plaintextBase64.
+  try {
+    dto.plaintextUtf8 = new TextDecoder('utf-8', { fatal: true }).decode(ev.plaintext);
+  } catch {
+    // non-UTF-8 payload — plaintextUtf8 stays undefined
+  }
+  return dto;
+}
 
 export function registerMessagingTools(server: McpServer, agent: Agent): void {
   server.tool(
@@ -48,6 +82,23 @@ Offline peers are retried for up to seven days. Get the public key from peer_lis
     async ({ messageId }) => ({
       content: [{ type: 'text' as const, text: JSON.stringify({ deliveries: agent.listDeliveries(messageId) }) }],
     }),
+  );
+
+  server.tool(
+    'get_pending_inbound_events',
+    'Owner-private, local-only. Drains pending inbound (authenticated, decrypted) message events for the owner\'s agent runtime so it can decide act | ask | ignore. Results may contain plaintext — do NOT forward them to public dashboards, census, heartbeat, shared logs, or any non-owner surface.',
+    {
+      limit: z.number().int().min(1).max(1000).optional().describe('Maximum number of events to drain (default 50)'),
+    },
+    async ({ limit }) => {
+      const events = agent.inboundQueue.drain(limit ?? 50);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ events: events.map(toInboundEventDTO) }),
+        }],
+      };
+    },
   );
 
   server.tool(

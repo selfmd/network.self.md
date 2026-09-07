@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DoubleRatchet, DELIVERY_TTL_MS, computeSharedSecret, encrypt, generateIdentity, signAuthenticatedMessage } from '@networkselfmd/core';
 import type { AgentIdentity, DirectEncryptedMessage } from '@networkselfmd/core';
 import { Agent } from '../agent.js';
-import { AgentDatabase, IdentityRepository, MessageRepository, ProtocolReplayRepository, RatchetStateRepository } from '../storage/index.js';
+import { AgentDatabase, PolicyConfigRepository, IdentityRepository, MessageRepository, ProtocolReplayRepository, RatchetStateRepository } from '../storage/index.js';
 import { DM_BOOTSTRAP_WINDOW_MS } from '../network/direct-ratchet.js';
 
 const directories: string[] = [];
@@ -41,6 +41,8 @@ function runtime(identity: AgentIdentity, peer: AgentIdentity, existingDir?: str
     messageRepo: new MessageRepository(db),
     swarm: { getSession: () => ({ peerXPublicKey: peer.xPublicKey, send: (message: DirectEncryptedMessage) => outgoing.push(message) }) },
   });
+  Object.assign(agent, { policyConfigRepo: new PolicyConfigRepository(db) });
+  (agent as any).initializePolicy();
   agent.removeAllListeners('error');
   agent.on('error', errors);
   const session = { state: 'ready', peerFingerprint: peer.fingerprint, peerPublicKey: peer.edPublicKey, peerXPublicKey: peer.xPublicKey };

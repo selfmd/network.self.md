@@ -28,3 +28,5 @@ export type {
   MessageQueryOptions,
   StoredGroupInvite,
 } from './repositories.js';
+
+export * from './policy.js';

@@ -32,3 +32,14 @@ export type {
   TTYAResponse,
   TTYAVisitor,
 } from './ttya/ttya-manager.js';
+
+export * from './policy/agent-policy.js';
+export * from './policy/policy-gate.js';
+export * from './policy/audit-log.js';
+export * from './policy/validate-config.js';
+export * from './events/inbound-queue.js';
+export * from './storage/policy.js';
+
+export type { PolicyConfig, PolicyDecision, PolicyAuditEntry, PrivateInboundMessageEvent, PublicActivityEvent } from '@networkselfmd/core';
+
+export { resolveDataDir } from './data-dir.js';

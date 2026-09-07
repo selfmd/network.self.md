@@ -1,3 +1,10 @@
+import type { PolicyConfig, PolicyDecision, PrivateInboundMessageEvent } from '@networkselfmd/core';
+import { InboundEventQueue } from './events/inbound-queue.js';
+import { AgentPolicy } from './policy/agent-policy.js';
+import { PolicyGate } from './policy/policy-gate.js';
+import { PolicyAuditLog } from './policy/audit-log.js';
+import { validatePolicyConfig, PolicyConfigValidationError } from './policy/validate-config.js';
+import { PolicyConfigRepository, PolicyAuditRepository } from './storage/policy.js';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -73,6 +80,10 @@ import {
 } from './network/protocol-security.js';
 
 export interface AgentOptions {
+  policyConfig?: PolicyConfig;
+  policyAuditMax?: number;
+  policyAuditDbMax?: number;
+  inboundQueueMax?: number;
   dataDir: string;
   passphrase?: string;
   secretProvider?: SecretProvider;
@@ -125,6 +136,12 @@ export class Agent extends EventEmitter {
   groups: Map<string, GroupInfo> = new Map();
   isRunning = false;
 
+  readonly inboundQueue: InboundEventQueue;
+  policy!: AgentPolicy;
+  policyAudit!: PolicyAuditLog;
+  policyAuditRepo!: PolicyAuditRepository;
+  policyGate!: PolicyGate;
+  private policyConfigRepo!: PolicyConfigRepository;
   private options: AgentOptions;
   private database!: AgentDatabase;
   private identityRepo!: IdentityRepository;
@@ -147,6 +164,7 @@ export class Agent extends EventEmitter {
 
   constructor(options: AgentOptions) {
     super();
+    this.inboundQueue = new InboundEventQueue({ max: options.inboundQueueMax });
     this.options = {
       ...options,
       dataDir: resolveDataDir(options.dataDir),
@@ -179,6 +197,7 @@ export class Agent extends EventEmitter {
       this.database.migrate();
 
       const db = this.database.getDb();
+      this.policyConfigRepo = new PolicyConfigRepository(db);
       this.identityRepo = new IdentityRepository(db);
       this.peerRepo = new PeerRepository(db);
       this.groupRepo = new GroupRepository(db);
@@ -196,6 +215,8 @@ export class Agent extends EventEmitter {
       // Load or generate identity. Startup cleanup below closes the database
       // on an unlock failure so callers can retry with a fresh Agent instance.
       await this.loadOrGenerateIdentity(passphrase);
+
+      this.initializePolicy();
 
       // Init swarm
       this.swarm = new SwarmManager({
@@ -223,6 +244,7 @@ export class Agent extends EventEmitter {
         invites: this.groupInviteRepo,
         replay: this.protocolReplayRepo,
         bootstraps: this.groupBootstrapRepo,
+        prepareInbound: (event) => this.prepareInbound(event),
         enqueueDelivery: (groupId, content) => this.enqueueGroupDelivery(groupId, content),
       });
 
@@ -1142,6 +1164,108 @@ export class Agent extends EventEmitter {
     });
   }
 
+  // ---- Policy ----
+
+  // Returns a defensive copy of the current runtime policy configuration.
+  // Lists are sliced so callers cannot mutate the live config; mutating
+  // the returned arrays does not affect AgentPolicy.decide.
+  getPolicyConfig(): PolicyConfig {
+    const c = this.policy.getConfig();
+    const out: PolicyConfig = {};
+    if (c.trustedFingerprints !== undefined) {
+      out.trustedFingerprints = c.trustedFingerprints.slice();
+    }
+    if (c.interests !== undefined) out.interests = c.interests.slice();
+    if (c.requireMention !== undefined) out.requireMention = c.requireMention;
+    if (c.mentionPrefixLen !== undefined) out.mentionPrefixLen = c.mentionPrefixLen;
+    return out;
+  }
+
+  // Replace the policy configuration. Validates first; on bad input
+  // throws PolicyConfigValidationError without mutating anything. On
+  // success, persists to SQLite (so the change survives restart) and
+  // updates the live AgentPolicy.config in place. Decisions are pure
+  // over (config, identity, event), so the new config takes effect on
+  // the very next inbound event.
+  setPolicyConfig(config: unknown): void {
+    const result = validatePolicyConfig(config);
+    if (!result.ok) {
+      throw new PolicyConfigValidationError(result.errors);
+    }
+    this.policyConfigRepo.save(result.config);
+    this.policy.setConfig(result.config);
+  }
+
+  // Merge `partial` over the current configuration. Use this for
+  // single-field updates (e.g. flipping requireMention) without
+  // re-supplying the whole config. Validation runs on the merged
+  // result; persistence and live update follow the same rules as
+  // setPolicyConfig.
+  updatePolicyConfig(partial: unknown): void {
+    if (partial === null || typeof partial !== 'object' || Array.isArray(partial)) {
+      throw new PolicyConfigValidationError([
+        { field: 'config', message: 'must be an object' },
+      ]);
+    }
+    const merged: PolicyConfig = {
+      ...this.getPolicyConfig(),
+      ...(partial as Partial<PolicyConfig>),
+    };
+    this.setPolicyConfig(merged);
+  }
+
+  // Wipe persisted config and reset the runtime to AgentOptions.
+  // policyConfig (or {} if none was passed). Useful for tests and for
+  // operators that want to start over without restarting the process.
+  resetPolicyConfig(): void {
+    const result = validatePolicyConfig(this.options.policyConfig ?? {});
+    if (!result.ok) throw new PolicyConfigValidationError(result.errors);
+    this.policyConfigRepo.clear();
+    this.policy.setConfig(result.config);
+  }
+
+  private initializePolicy(): void {
+    const initial = validatePolicyConfig(this.policyConfigRepo.load() ?? this.options.policyConfig ?? {});
+    if (!initial.ok) throw new PolicyConfigValidationError(initial.errors);
+    this.policyAuditRepo = new PolicyAuditRepository(this.database.getDb(), { maxEntries: this.options.policyAuditDbMax });
+    this.policyAuditRepo.prune();
+    this.policyAudit = new PolicyAuditLog({ max: this.options.policyAuditMax, persist: entry => this.policyAuditRepo.insert(entry) });
+    this.policy = new AgentPolicy({ agent: this, config: initial.config });
+    this.policyGate = new PolicyGate({ policy: this.policy, audit: this.policyAudit,
+      isMember: (groupId, publicKey) => this.groupRepo.getMembers(groupId).some(member => Buffer.from(member.public_key).equals(Buffer.from(publicKey))),
+    });
+    this.policyGate.on('decision', (decision: PolicyDecision) => this.emitPolicyEvent('policy:decision', decision));
+  }
+
+  // Called inside the message/ratchet/inbox transaction. Effects run only
+  // after SQLite commits; audit failure rolls the entire reception back.
+  private emitPolicyEvent(name: string, value: unknown): void {
+    for (const listener of this.rawListeners(name)) {
+      try { listener.call(this, value); }
+      catch {
+        // A failed observer must not suppress later observers, queueing or
+        // receipts. Do not log its potentially content-bearing exception.
+        try { this.emit('error', new Error('Policy observer failed')); } catch {}
+      }
+    }
+  }
+
+  private prepareInbound(event: PrivateInboundMessageEvent): () => void {
+    const effects: Array<() => void> = [];
+    const outcome = this.policyGate.evaluate(event, effect => effects.push(effect));
+    return () => {
+      for (const effect of effects) effect();
+      this.emitPolicyEvent('policy:audit', outcome.entry);
+      if (!outcome.entry.gateRejected) this.emitPolicyEvent('activity:message', { kind: event.kind,
+        groupIdHex: event.groupId ? Buffer.from(event.groupId).toString('hex') : undefined,
+        senderFingerprint: event.senderFingerprint, timestamp: event.timestamp, byteLength: event.plaintext.byteLength });
+      if (outcome.allowed) {
+        this.inboundQueue.push(outcome.ev);
+        this.emitPolicyEvent('inbound:message', outcome.ev);
+      }
+    };
+  }
+
   private setupGroupManagerEvents(): void {
     this.groupManager.on('group:message', (data) => {
       this.emit('group:message', data);
@@ -1189,6 +1313,7 @@ export class Agent extends EventEmitter {
       return false;
     }
 
+    let publishInbound: (() => void) | undefined;
     try {
       const content = this.protocolReplayRepo.accept(reservation, () => {
         const senderFingerprint = session.peerFingerprint!;
@@ -1222,17 +1347,22 @@ export class Agent extends EventEmitter {
         const decoded = new TextDecoder().decode(decrypted.plaintext);
         delivery?.accept(decoded);
         this.ratchetStateRepo.saveSession(senderFingerprint, decrypted.session);
+        const messageId = delivery?.messageId ?? createId();
         this.messageRepo.insert({
-          id: delivery?.messageId ?? createId(),
+          id: messageId,
           senderPublicKey: session.peerPublicKey!,
           peerPublicKey: session.peerPublicKey!,
           content: decoded,
           timestamp: delivery?.timestamp ?? message.timestamp,
           type: 'direct',
         });
+        publishInbound = this.prepareInbound({ kind: 'dm', messageId,
+          senderPublicKey: session.peerPublicKey!, senderFingerprint,
+          plaintext: decrypted.plaintext, timestamp: delivery?.timestamp ?? message.timestamp, receivedAt: Date.now() });
         return decoded;
       });
 
+      publishInbound?.();
       this.emit('dm:message', {
         senderPublicKey: session.peerPublicKey!,
         senderFingerprint: session.peerFingerprint!,

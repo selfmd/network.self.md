@@ -273,3 +273,65 @@ describe('durable authenticated delivery', () => {
     expect(b.getMessages({ peerPublicKey: pk(a) })).toHaveLength(0);
   });
 });
+
+
+describe('policy and reliable delivery commit together', () => {
+  for (const kind of ['dm', 'group'] as const) {
+    for (const fault of ['audit-write', 'after-prepare'] as const) {
+      it(`${kind}: rolls back ${fault} and retries without losing or duplicating the inbound event`, async () => {
+        const a = await start(); const b = await start();
+        b.setPolicyConfig({ requireMention: false });
+        const gid = kind === 'group' ? await group(a, b) : undefined;
+        if (!gid) connect(a, b);
+        const observed: unknown[] = [];
+        b.on('inbound:message', event => observed.push(event));
+        if (fault === 'audit-write') {
+          const original = b.policyAuditRepo.insert.bind(b.policyAuditRepo);
+          vi.spyOn(b.policyAuditRepo, 'insert').mockImplementationOnce(entry => {
+            original(entry);
+            throw new Error('simulated audit write failure');
+          });
+        } else {
+          const original = internals(b).prepareInbound.bind(b);
+          vi.spyOn(internals(b), 'prepareInbound').mockImplementationOnce((event: unknown) => {
+            original(event);
+            throw new Error('simulated failure before commit');
+          });
+        }
+        const content = 'private policy transaction canary';
+        const id = gid ? await a.sendGroupMessage(gid, content) : await a.sendDirectMessage(pk(b), content);
+        await internals(a).deliveryManager.flush(); await drain();
+        const selector = gid ? { groupId: gid } : { peerPublicKey: pk(a) };
+        expect(b.getMessages(selector)).toHaveLength(0);
+        expect(b.policyAuditRepo.count()).toBe(0);
+        expect(b.policyAudit.size()).toBe(0);
+        expect(b.policyGate.dedupCount()).toBe(0);
+        expect(b.inboundQueue.size()).toBe(0);
+        expect(observed).toHaveLength(0);
+        expect(a.listDeliveries(id)[0].status).toBe('queued');
+        internals(a).deliveryRepo.reconnect(b.identity.edPublicKey);
+        await pump(a, b);
+        expect(a.listDeliveries(id)[0].status).toBe('delivered');
+        expect(b.getMessages(selector).map(message => message.content)).toEqual([content]);
+        expect(b.policyAuditRepo.count()).toBe(1);
+        expect(b.policyAudit.size()).toBe(1);
+        expect(b.inboundQueue.size()).toBe(1);
+        expect(observed).toHaveLength(1);
+        expect(JSON.stringify(b.policyAuditRepo.recent())).not.toContain(content);
+        expect(b.inboundQueue.peek()[0].messageId).toBe(b.getMessages(selector)[0].id);
+      });
+    }
+  }
+
+  it('a broken policy observer cannot suppress later observers or delivery receipts', async () => {
+    const a = await start(); const b = await start(); connect(a, b);
+    const observed = vi.fn();
+    b.on('policy:audit', () => { throw new Error('private observer error'); });
+    b.on('policy:audit', observed);
+    const id = await a.sendDirectMessage(pk(b), 'observer isolation');
+    await pump(a, b);
+    expect(a.listDeliveries(id)[0].status).toBe('delivered');
+    expect(observed).toHaveBeenCalledTimes(1);
+    expect(b.inboundQueue.size()).toBe(1);
+  });
+});
