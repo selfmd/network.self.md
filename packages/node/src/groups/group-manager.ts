@@ -1,3 +1,4 @@
+import type { PrivateInboundMessageEvent } from '@networkselfmd/core';
 import { EventEmitter } from 'node:events';
 import { createId } from '@paralleldrive/cuid2';
 import {
@@ -54,6 +55,7 @@ const KEY_ROTATION_INTERVAL = 100;
 export const GROUP_KEY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface GroupManagerOptions {
+  prepareInbound?: (event: PrivateInboundMessageEvent) => () => void;
   identity: AgentIdentity;
   swarm: SwarmManager;
   groups: GroupRepository;
@@ -81,10 +83,12 @@ export class GroupManager extends EventEmitter {
   private messageCounters = new Map<string, number>();
   private rotationTimer?: ReturnType<typeof setInterval>;
   private enqueueDelivery?: GroupManagerOptions['enqueueDelivery'];
+  private prepareInbound?: GroupManagerOptions['prepareInbound'];
 
   constructor(options: GroupManagerOptions) {
     super();
     this.identity = options.identity;
+    this.prepareInbound = options.prepareInbound;
     this.swarm = options.swarm;
     this.groupRepo = options.groups;
     this.messageRepo = options.messages;
@@ -685,6 +689,7 @@ export class GroupManager extends EventEmitter {
         this.identity.fingerprint,
       );
       const senderPublicKey = session.peerPublicKey!;
+      let publishInbound: (() => void) | undefined;
       const content = this.replayRepo.accept(reservation, () => {
         const group = this.groupRepo.find(message.groupId);
         const latest = this.epochRepo.getLatestEpoch(
@@ -756,17 +761,27 @@ export class GroupManager extends EventEmitter {
 
         const decoded = new TextDecoder().decode(plaintext);
         delivery?.accept(decoded);
+        const messageId = delivery?.messageId ?? createId();
         this.messageRepo.insert({
-          id: delivery?.messageId ?? createId(),
+          id: messageId,
           groupId: message.groupId,
           senderPublicKey,
           content: decoded,
           timestamp: delivery?.timestamp ?? message.timestamp,
           type: 'group',
         });
+        const event: PrivateInboundMessageEvent = { kind: 'group', messageId,
+          groupId: message.groupId, senderPublicKey, senderFingerprint: session.peerFingerprint!,
+          plaintext, timestamp: delivery?.timestamp ?? message.timestamp, receivedAt: Date.now() };
+        const dispatch = this.prepareInbound?.(event);
+        publishInbound = () => {
+          dispatch?.();
+          this.emit('inbound:message', event);
+        };
         return decoded;
       });
 
+      publishInbound?.();
       this.emit('group:message', {
         groupId: message.groupId,
         senderPublicKey,

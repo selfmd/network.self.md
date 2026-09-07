@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Agent } from '@networkselfmd/node';
+import { InboundEventQueue } from '@networkselfmd/node';
 import { createServer } from '../server.js';
 
 const stateId = 'ab'.repeat(32);
@@ -18,6 +19,7 @@ describe('MCP message reads over the protocol', () => {
     getMessages.mockClear();
     agent = {
       getMessages,
+      inboundQueue: new InboundEventQueue(),
       createGroup: vi.fn(async () => ({ groupId: Buffer.from(stateId, 'hex') })),
       updateGroupManifest: vi.fn(),
       listGroupInvitations: vi.fn(() => [{
@@ -56,9 +58,27 @@ describe('MCP message reads over the protocol', () => {
 
   it('advertises only implemented tools and does not expose deferred TTYA tools', async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(28);
     expect(tools.some((tool) => tool.name.startsWith('ttya_'))).toBe(false);
     expect(tools.map((tool) => tool.name)).toContain('send_direct_message');
+  });
+
+  it('validates bounded private event drains before consuming the queue', async () => {
+    agent.inboundQueue.push({ kind: 'dm', messageId: 'private-message',
+      senderPublicKey: Buffer.from(peerPublicKey, 'hex'), senderFingerprint: 'peer',
+      plaintext: new TextEncoder().encode('owner-only content'), timestamp: 1, receivedAt: 2 });
+    for (const limit of [0, -1, 1001, 1.5]) {
+      const result = await client.callTool({ name: 'get_pending_inbound_events', arguments: { limit } });
+      expect(result.isError).toBe(true);
+      expect(agent.inboundQueue.size()).toBe(1);
+    }
+    const result = await client.callTool({ name: 'get_pending_inbound_events', arguments: { limit: 1 } });
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0].text).events[0]).toMatchObject({
+      messageId: 'private-message', senderPublicKeyHex: peerPublicKey, plaintextUtf8: 'owner-only content',
+      plaintextBase64: Buffer.from('owner-only content').toString('base64'),
+    });
+    expect(agent.inboundQueue.size()).toBe(0);
   });
 
   it('exposes actionable incoming invitations with hexadecimal state IDs', async () => {

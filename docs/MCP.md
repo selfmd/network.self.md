@@ -26,7 +26,7 @@ Replace the secret-file path with an existing owner-readable passphrase file. Re
 
 ## Tools
 
-The server exposes 20 tools across 5 categories. State IDs and public keys are hexadecimal strings in tool inputs, tool responses and resources.
+The server exposes 28 tools across 6 categories. State IDs and public keys are hexadecimal strings in tool inputs, tool responses and resources.
 
 ### Identity
 
@@ -199,3 +199,9 @@ User: Send "gm builders" to the group
 ← { accepted: true, messageId: "..." }
 
 ```
+
+## Inbound policy controls
+
+Eight additional owner-local tools are available: `get_pending_inbound_events`, `get_policy_audit_recent`, `get_policy_config`, `set_policy_config`, `add_policy_trusted_fingerprint`, `remove_policy_trusted_fingerprint`, `add_policy_interest`, and `remove_policy_interest`.
+
+Pending-event responses contain private decrypted message content and drain a bounded process-local queue. They must not be exposed to public observers. Audit responses contain only metadata and survive restart. Both DM and group reception use the policy gate; `act`/`ask` decisions do not execute tools or implement an approval UI. See `docs/POLICY.md` in the repository for migration and runtime semantics.

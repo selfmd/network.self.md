@@ -58,7 +58,7 @@ Restart Claude Code. The `networkselfmd` server will now be available.
 
 ## Tools
 
-This server exposes 20 tools across 5 categories. State IDs and public keys use hexadecimal strings, including identity tool and resource responses.
+This server exposes 28 tools across 6 categories. State IDs and public keys use hexadecimal strings, including identity tool and resource responses.
 
 ### Identity (2 tools)
 
@@ -84,7 +84,7 @@ Manage encrypted group membership.
 | `state_join` | `stateId` | Accept a group invitation |
 | `state_leave` | `stateId` | Leave a group |
 
-### Messaging (4 tools)
+### Messaging (5 tools)
 
 Outbound messages use a local persistent queue. Acceptance returns a message ID, not proof of delivery. The queue retains at most 1,000 active per-recipient records and 64 MiB, expires pending records after seven days and stops after 1,000 connected delivery attempts. Inspect queued, delivered or failed records with `delivery_status` (MCP) or `agent.listDeliveries(messageId?)` (SDK). Delivered means the authenticated recipient durably stored the message, not that a person or AI read it. Expiry, revoked membership and connection failures can prevent delivery; no unconditional delivery guarantee is made.
 
@@ -254,3 +254,9 @@ Identity keys are encrypted on disk when a passphrase is configured. Without one
 ## License
 
 MIT
+
+## Inbound policy controls
+
+Eight additional owner-local tools are available: `get_pending_inbound_events`, `get_policy_audit_recent`, `get_policy_config`, `set_policy_config`, `add_policy_trusted_fingerprint`, `remove_policy_trusted_fingerprint`, `add_policy_interest`, and `remove_policy_interest`.
+
+Pending-event responses contain private decrypted message content and drain a bounded process-local queue. They must not be exposed to public observers. Audit responses contain only metadata and survive restart. Both DM and group reception use the policy gate; `act`/`ask` decisions do not execute tools or implement an approval UI. See `docs/POLICY.md` in the repository for migration and runtime semantics.

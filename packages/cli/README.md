@@ -441,3 +441,15 @@ PRs welcome! See the main repository for contribution guidelines.
 ## License
 
 MIT
+
+## Local policy controls
+
+```bash
+networkselfmd policy get
+networkselfmd policy set --interests coffee --require-mention true
+networkselfmd policy trust add <fingerprint>
+networkselfmd policy interest add coffee
+networkselfmd policy audit recent --limit 50
+```
+
+These commands open the owner's local SQLite database without starting a network Agent. `L2S_DATA_DIR` supports `~`. CLI configuration changes apply when the Agent next starts; connected MCP policy tools update the running Agent immediately. Audit contains decision metadata, not message bodies. `act` and `ask` do not execute tools or provide an approval UI. Schema 10 preserves historical policy configuration/audit when upgrading policy schema 2/3 or current runtime schema 9.
