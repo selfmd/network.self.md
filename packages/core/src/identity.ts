@@ -1,5 +1,5 @@
-import { ed25519 } from '@noble/curves/ed25519';
-import { edwardsToMontgomery, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
+import { ed25519, x25519 } from '@noble/curves/ed25519';
+import { edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
 import type { AgentIdentity } from './protocol/types.js';
@@ -33,11 +33,23 @@ export function fingerprintFromPublicKey(edPublicKey: Uint8Array): string {
   return zBase32Encode(truncated);
 }
 
+export function deriveEd25519PublicKey(edPrivateKey: Uint8Array): Uint8Array {
+  return ed25519.getPublicKey(edPrivateKey);
+}
+
+export function deriveX25519KeyPair(edPrivateKey: Uint8Array): {
+  xPrivateKey: Uint8Array;
+  xPublicKey: Uint8Array;
+} {
+  const xPrivateKey = edwardsToMontgomeryPriv(edPrivateKey);
+  const xPublicKey = x25519.getPublicKey(xPrivateKey);
+  return { xPrivateKey, xPublicKey };
+}
+
 export function generateIdentity(displayName?: string): AgentIdentity {
   const edPrivateKey = randomBytes(32);
   const edPublicKey = ed25519.getPublicKey(edPrivateKey);
-  const xPublicKey = edwardsToMontgomery(edPublicKey);
-  const xPrivateKey = edwardsToMontgomeryPriv(edPrivateKey);
+  const { xPrivateKey, xPublicKey } = deriveX25519KeyPair(edPrivateKey);
   const fingerprint = fingerprintFromPublicKey(edPublicKey);
 
   return {

@@ -22,7 +22,7 @@ describe('getChatHTML', () => {
     const html = getChatHTML('fp123');
     expect(html).toContain('msg-input');
     expect(html).toContain('send-btn');
-    expect(html).toContain('status-bar');
+    expect(html).toContain('status-pill');
     expect(html).toContain('messages');
   });
 });

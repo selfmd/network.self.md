@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os';
 // @ts-expect-error - testnet.js is not typed
 import createTestnet from 'hyperdht/testnet.js';
 
-let testnet: { bootstrap: Array<{ host: string; port: number }>; destroy: () => Promise<void> };
+let testnet: {
+  bootstrap: Array<{ host: string; port: number }>;
+  destroy: () => Promise<void>;
+};
 
 afterAll(async () => {
   if (testnet) {
@@ -16,11 +19,7 @@ afterAll(async () => {
   }
 });
 
-function waitForPeers(
-  a1: Agent,
-  a2: Agent,
-  timeout: number,
-): Promise<void> {
+function waitForPeers(a1: Agent, a2: Agent, timeout: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error('Peer discovery timeout')),
@@ -38,11 +37,11 @@ function waitForPeers(
   });
 }
 
-function waitForMessage(
+function waitForEvent(
   agent: Agent,
   event: string,
   timeout: number,
-): Promise<{ content: string; groupId: Uint8Array; senderFingerprint: string }> {
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error('Message timeout')),
@@ -55,13 +54,8 @@ function waitForMessage(
   });
 }
 
-// Wait for sender keys to be exchanged (both sides need each other's keys)
-function waitForSenderKeys(delay: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delay));
-}
-
 describe('Agent E2E', () => {
-  it('two agents exchange encrypted group messages', async () => {
+  it('two agents use authenticated invite provenance to join a group', async () => {
     testnet = await createTestnet(3);
 
     const dir1 = mkdtempSync(join(tmpdir(), 'nsmd-e2e-1-'));
@@ -82,30 +76,60 @@ describe('Agent E2E', () => {
       await agent1.start();
       await agent2.start();
 
-      // Alice creates a group
-      const group = await agent1.createGroup('test-e2e');
-      const groupIdHex = Buffer.from(group.groupId).toString('hex');
-
-      // Bob joins the same group (using the groupId)
-      await agent2.joinGroup(groupIdHex);
-
-      // Wait for peers to discover each other and complete handshake
+      // Connect first so the signed, recipient-bound invite can be delivered.
       await waitForPeers(agent1, agent2, 15000);
 
-      // Wait for sender key distribution to complete
-      await waitForSenderKeys(1000);
+      const directToBob = waitForEvent(agent2, 'dm:message', 10000);
+      await agent1.sendDirectMessage(Buffer.from(agent2.identity.edPublicKey).toString('hex'), 'Private hello');
+      await expect(directToBob).resolves.toMatchObject({ content: 'Private hello' });
+      const directToAlice = waitForEvent(agent1, 'dm:message', 10000);
+      await agent2.sendDirectMessage(Buffer.from(agent1.identity.edPublicKey).toString('hex'), 'Private reply');
+      await expect(directToAlice).resolves.toMatchObject({ content: 'Private reply' });
 
-      // Alice sends a message
+      const group = await agent1.createGroup('test-e2e');
+      const groupIdHex = Buffer.from(group.groupId).toString('hex');
+      const bobPkHex = Buffer.from(agent2.identity.edPublicKey).toString('hex');
+      const invited = waitForEvent(agent2, 'group:invited', 10000);
+      await agent1.inviteToGroup(groupIdHex, bobPkHex);
+      await invited;
+      await agent2.joinGroup(groupIdHex);
+      expect(
+        agent2
+          .listGroups()
+          .some(
+            (candidate) =>
+              Buffer.from(candidate.groupId).toString('hex') === groupIdHex,
+          ),
+      ).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const receivedByBob = waitForEvent(agent2, 'group:message', 10000);
       await agent1.sendGroupMessage(groupIdHex, 'hello from Alice');
+      await expect(receivedByBob).resolves.toMatchObject({ content: 'hello from Alice' });
 
-      // Bob should receive it
-      const msg = await waitForMessage(agent2, 'group:message', 10000);
-      expect(msg.content).toBe('hello from Alice');
-
-      // Bob replies
+      const receivedByAlice = waitForEvent(agent1, 'group:message', 10000);
       await agent2.sendGroupMessage(groupIdHex, 'hi Alice, Bob here');
-      const reply = await waitForMessage(agent1, 'group:message', 10000);
-      expect(reply.content).toBe('hi Alice, Bob here');
+      await expect(receivedByAlice).resolves.toMatchObject({ content: 'hi Alice, Bob here' });
+
+      await agent2.leaveGroup(groupIdHex);
+      await agent2.stop();
+      await agent2.start();
+      await waitForPeers(agent1, agent2, 15000);
+      const reinvited = waitForEvent(agent2, 'group:invited', 10000);
+      await agent1.inviteToGroup(groupIdHex, bobPkHex);
+      await reinvited;
+      await agent2.joinGroup(groupIdHex);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      const receivedAfterRejoin = waitForEvent(agent1, 'group:message', 10000);
+      await agent2.sendGroupMessage(groupIdHex, 'Bob rejoined');
+      await expect(receivedAfterRejoin).resolves.toMatchObject({ content: 'Bob rejoined' });
+      expect(agent2.getGroupMembers(groupIdHex)).toHaveLength(2);
+      const receivedByBobAfterRejoin = waitForEvent(agent2, 'group:message', 10000);
+      await agent1.sendGroupMessage(groupIdHex, 'Welcome back');
+      await expect(receivedByBobAfterRejoin).resolves.toMatchObject({ content: 'Welcome back' });
+
+
     } finally {
       await agent1.stop();
       await agent2.stop();

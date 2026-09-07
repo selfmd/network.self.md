@@ -7,7 +7,9 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "dev": "pnpm -r --parallel dev",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "verify:packages": "node scripts/verify-package-release.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
@@ -16,5 +18,10 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "serialize-javascript": ">=7.0.5"
+    }
   }
 }

@@ -1,14 +1,12 @@
-import os from 'node:os';
-import path from 'node:path';
 import chalk from 'chalk';
 import { Agent } from '@networkselfmd/node';
+import type { AgentOptions } from '@networkselfmd/node';
+import { getDataDir } from '../agent-options.js';
 
-function getDataDir(): string {
-  return process.env.L2S_DATA_DIR || path.join(os.homedir(), '.networkselfmd');
-}
-
-export async function listPeers(): Promise<void> {
-  const agent = new Agent({ dataDir: getDataDir() });
+export async function listPeers(
+  secrets: Pick<AgentOptions, 'passphrase' | 'secretProvider'> = {},
+): Promise<void> {
+  const agent = new Agent({ dataDir: getDataDir(), ...secrets });
   await agent.start();
 
   try {

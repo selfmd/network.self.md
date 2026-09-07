@@ -230,6 +230,10 @@ function skipMessages(
   if (skip > MAX_SKIP) {
     throw new Error(`Too many skipped messages: ${skip} > ${MAX_SKIP}`);
   }
+  const retainedKeys = state.skippedKeys.size + Math.max(0, skip);
+  if (retainedKeys > MAX_SKIP) {
+    throw new Error(`Too many skipped message keys: ${retainedKeys} > ${MAX_SKIP}`);
+  }
 
   let chainKey = state.receiveChainKey;
   const newSkipped = new Map(state.skippedKeys);

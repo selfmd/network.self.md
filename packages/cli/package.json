@@ -1,19 +1,38 @@
 {
   "name": "@networkselfmd/cli",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shmlkv/network.self.md.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "type": "module",
   "bin": {
     "networkselfmd": "dist/bin.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/**/__tests__/**",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepack": "pnpm run build"
   },
   "dependencies": {
+    "@networkselfmd/core": "workspace:*",
     "@networkselfmd/node": "workspace:*",
+    "@networkselfmd/web": "workspace:*",
     "ink": "^5.1.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.0",

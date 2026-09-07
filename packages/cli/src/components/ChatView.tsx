@@ -47,10 +47,12 @@ export const ChatView: React.FC<ChatViewProps> = ({ agent, groupId }) => {
       try {
         const history = agent.getMessages({ groupId, limit: 50 });
         setMessages(
-          history.map((m) => ({
+          [...history].reverse().map((m) => ({
             id: m.id,
             sender: m.senderPublicKey
-              ? Buffer.from(m.senderPublicKey).toString('hex').slice(0, 8)
+              ? Buffer.from(m.senderPublicKey).equals(Buffer.from(agent.identity.edPublicKey))
+                ? 'you'
+                : Buffer.from(m.senderPublicKey).toString('hex').slice(0, 8)
               : 'unknown',
             content: m.content,
             timestamp: m.timestamp,
@@ -159,7 +161,17 @@ export const ChatView: React.FC<ChatViewProps> = ({ agent, groupId }) => {
       // Send message
       try {
         await agent.sendGroupMessage(groupId, trimmed);
+        // The runtime stores outgoing messages but only emits received messages.
+        setMessages((prev) => [...prev, {
+          id: `sent-${Date.now()}-${Math.random()}`,
+          sender: 'you',
+          content: trimmed,
+          timestamp: Date.now(),
+        }]);
+        setScrollOffset(0);
       } catch {
+        setInput((current) => current || value);
+        setScrollOffset(0);
         setMessages((prev) => [
           ...prev,
           {

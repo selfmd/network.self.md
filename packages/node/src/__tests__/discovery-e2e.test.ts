@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os';
 // @ts-expect-error - testnet.js is not typed
 import createTestnet from 'hyperdht/testnet.js';
 
-let testnet: { bootstrap: Array<{ host: string; port: number }>; destroy: () => Promise<void> };
+let testnet: {
+  bootstrap: Array<{ host: string; port: number }>;
+  destroy: () => Promise<void>;
+};
 
 afterAll(async () => {
   if (testnet) {
@@ -16,11 +19,7 @@ afterAll(async () => {
   }
 });
 
-function waitForPeers(
-  a1: Agent,
-  a2: Agent,
-  timeout: number,
-): Promise<void> {
+function waitForPeers(a1: Agent, a2: Agent, timeout: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error('Peer discovery timeout')),
@@ -38,8 +37,13 @@ function waitForPeers(
   });
 }
 
-function waitForSenderKeys(delay: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delay));
+async function waitUntil(predicate: () => boolean, message: string, timeout = 10_000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
 }
 
 describe('Network discovery E2E', () => {
@@ -102,16 +106,12 @@ describe('Network discovery E2E', () => {
       await agent1.start();
       await agent2.start();
 
-      // Alice creates a group (not public yet) and Bob joins
+      // Alice creates a group; Bob may only join after authenticated discovery.
       const group = await agent1.createGroup('builders');
       const groupIdHex = Buffer.from(group.groupId).toString('hex');
-      await agent2.joinGroup(groupIdHex);
 
       // Wait for peers to discover each other
       await waitForPeers(agent1, agent2, 15000);
-
-      // Wait for sender keys to propagate
-      await waitForSenderKeys(1000);
 
       // Verify peers are connected
       expect(agent1.listPeers().length).toBeGreaterThanOrEqual(1);
@@ -119,22 +119,59 @@ describe('Network discovery E2E', () => {
 
       // Verify Alice can create a public group and the metadata is correct
       const groups = agent1.listGroups();
-      const builders = groups.find(g => g.name === 'builders');
+      const builders = groups.find((g) => g.name === 'builders');
       expect(builders).toBeDefined();
 
-      // Make the group public
-      agent1.makeGroupPublic(groupIdHex, 'We build network.self.md. Ship > discuss.');
+      const announced = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Announcement timeout')),
+          10000,
+        );
+        agent2.once('network:announce', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      agent1.makeGroupPublic(
+        groupIdHex,
+        'We build network.self.md. Ship > discuss.',
+      );
+      await announced;
 
+      await waitUntil(
+        () =>
+          agent2.listDiscoveredGroups().some(
+            (candidate) =>
+              Buffer.from(candidate.groupId).toString('hex') === groupIdHex,
+          ),
+        'Public group announcement timeout',
+      );
       // Verify the group is now public with the correct selfMd
       const updatedGroups = agent1.listGroups();
-      const publicGroup = updatedGroups.find(g => g.name === 'builders');
+      const publicGroup = updatedGroups.find((g) => g.name === 'builders');
       expect(publicGroup).toBeDefined();
       expect(publicGroup!.isPublic).toBe(true);
-      expect(publicGroup!.selfMd).toBe('We build network.self.md. Ship > discuss.');
+      expect(publicGroup!.selfMd).toBe(
+        'We build network.self.md. Ship > discuss.',
+      );
 
       // Verify listDiscoveredGroups API exists and works
       const discovered = agent2.listDiscoveredGroups();
-      expect(Array.isArray(discovered)).toBe(true);
+      expect(
+        discovered.some(
+          (candidate) =>
+            Buffer.from(candidate.groupId).toString('hex') === groupIdHex,
+        ),
+      ).toBe(true);
+      await agent2.joinPublicGroup(groupIdHex);
+      expect(
+        agent2
+          .listGroups()
+          .some(
+            (candidate) =>
+              Buffer.from(candidate.groupId).toString('hex') === groupIdHex,
+          ),
+      ).toBe(true);
     } finally {
       await agent1.stop();
       await agent2.stop();

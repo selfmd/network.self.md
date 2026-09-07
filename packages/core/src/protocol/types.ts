@@ -8,7 +8,10 @@ export const MessageType = {
   TTYARequest: 0x07,
   TTYAResponse: 0x08,
   NetworkAnnounce: 0x09,
+  GroupEpoch: 0x0a,
   Ack: 0xff,
+  ReliableDelivery: 0x0c,
+  DeliveryReceipt: 0x0d,
 } as const;
 
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType];
@@ -16,10 +19,12 @@ export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType];
 export interface IdentityHandshakeMessage {
   type: typeof MessageType.IdentityHandshake;
   edPublicKey: Uint8Array;
+  xPublicKey: Uint8Array;
   noisePublicKey: Uint8Array;
   signature: Uint8Array;
   displayName?: string;
   protocolVersion: number;
+  capabilities?: string[];
   timestamp: number;
 }
 
@@ -33,10 +38,10 @@ export interface GroupSyncMessage {
 
 export interface SenderKeyDistributionMessage {
   type: typeof MessageType.SenderKeyDistribution;
-  groupId: Uint8Array;
-  chainKey: Uint8Array;
-  chainIndex: number;
-  signingPublicKey: Uint8Array;
+  protocolVersion: number;
+  recipientPublicKey: Uint8Array;
+  ciphertext: Uint8Array;
+  nonce: Uint8Array;
   timestamp: number;
 }
 
@@ -45,9 +50,13 @@ export interface GroupEncryptedMessage {
   groupId: Uint8Array;
   senderFingerprint: string;
   chainIndex: number;
+  generationId: Uint8Array;
+  epochVersion: number;
+  epochHash: Uint8Array;
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface DirectEncryptedMessage {
@@ -60,15 +69,28 @@ export interface DirectEncryptedMessage {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface GroupManagementMessage {
   type: typeof MessageType.GroupManagement;
   groupId: Uint8Array;
-  action: 'create' | 'invite' | 'join' | 'leave' | 'kick' | 'promote';
+  action: 'create' | 'invite' | 'accept' | 'sync-request' | 'join' | 'leave' | 'kick' | 'promote' | 'metadata';
+  selfMd?: string;
+  isPublic?: boolean;
+  metadataVersion?: number;
   targetFingerprint?: string;
   groupName?: string;
+  inviteId?: string;
+  epochVersion?: number;
+  epochHash?: Uint8Array;
+  genesisEpochData?: Uint8Array;
+  genesisSignature?: Uint8Array;
+  genesisHash?: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
   timestamp: number;
+  signature: Uint8Array;
 }
 
 export interface TTYARequestMessage {
@@ -88,12 +110,32 @@ export interface TTYAResponseMessage {
 
 export interface NetworkAnnounceMessage {
   type: typeof MessageType.NetworkAnnounce;
+  protocolVersion: number;
   groups: Array<{
     groupId: Uint8Array;
     name: string;
     selfMd: string;
     memberCount: number;
+    genesisEpochData: Uint8Array;
+    genesisSignature: Uint8Array;
+    genesisHash: Uint8Array;
   }>;
+  signature: Uint8Array;
+  timestamp: number;
+}
+
+export interface GroupEpochMessage {
+  type: typeof MessageType.GroupEpoch;
+  protocolVersion: number;
+  groupId: Uint8Array;
+  epochData: Uint8Array;
+  /** Signature of the immutable epoch. */
+  signature: Uint8Array;
+  hash: Uint8Array;
+  senderFingerprint: string;
+  recipientFingerprint: string;
+  /** Signature of this fresh, recipient-bound delivery envelope. */
+  envelopeSignature: Uint8Array;
   timestamp: number;
 }
 
@@ -113,7 +155,10 @@ export type ProtocolMessage =
   | TTYARequestMessage
   | TTYAResponseMessage
   | NetworkAnnounceMessage
-  | AckMessage;
+  | GroupEpochMessage
+  | AckMessage
+  | import('./reliable-delivery.js').ReliableDeliveryMessage
+  | import('./reliable-delivery.js').DeliveryReceiptMessage;
 
 // Domain types
 

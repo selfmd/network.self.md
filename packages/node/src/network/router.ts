@@ -25,9 +25,21 @@ export class MessageRouter {
   }
 
   async route(session: PeerSession, message: ProtocolMessage): Promise<void> {
+    if (session.state !== 'ready') {
+      throw new Error(
+        `Rejected protocol message ${message.type}: session is not ready`,
+      );
+    }
+    if (message.type === 0x01) {
+      throw new Error(
+        'Rejected protocol message: IdentityHandshake is invalid after handshake',
+      );
+    }
     const handlers = this.handlers.get(message.type);
     if (!handlers || handlers.length === 0) {
-      return;
+      throw new Error(
+        `Rejected unsupported protocol message type: ${message.type}`,
+      );
     }
 
     for (const handler of handlers) {

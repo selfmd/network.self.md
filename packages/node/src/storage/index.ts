@@ -6,6 +6,12 @@ export {
   MessageRepository,
   SenderKeyRepository,
   DiscoveredGroupRepository,
+  GroupBootstrapRepository,
+  RatchetStateRepository,
+  GroupEpochRepository,
+  GroupInviteRepository,
+  NetworkAnnounceStateRepository,
+  ProtocolReplayRepository,
 } from './repositories.js';
 export type {
   StoredIdentity,
@@ -16,5 +22,9 @@ export type {
   StoredSenderKey,
   StoredKeyData,
   StoredDiscoveredGroup,
+  StoredGroupBootstrap,
+  ReplayReservation,
+  ProtocolReplayOptions,
   MessageQueryOptions,
+  StoredGroupInvite,
 } from './repositories.js';

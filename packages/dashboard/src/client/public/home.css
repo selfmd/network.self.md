@@ -1,0 +1,112 @@
+/* React-specific home layout; canonical visual values live in public.css. */
+.public-site .home-mesh {
+  display: block;
+  width: 100%;
+  height: 470px;
+}
+.public-site .public-home .film-progress span {
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.public-site .home-inline-error {
+  margin-top: 14px;
+  font: 11px/1.6 var(--mono);
+  color: #a11b47;
+}
+.public-site .home-data-dialog form {
+  margin: 0;
+}
+.public-site .home-data-dialog::backdrop {
+  background: rgb(0 0 0 / 62%);
+}
+.public-site .public-home .network-row > span:nth-child(2) {
+  min-width: 0;
+}
+.public-site .public-home .row-name {
+  display: block;
+}
+.public-site .public-home .permission-files button > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.public-site .public-home .obs-source {
+  min-width: 0;
+}
+.public-site .public-home .obs-source > .mono {
+  overflow-wrap: anywhere;
+}
+.public-site .public-home .presenter {
+  bottom: calc(20px + env(safe-area-inset-bottom));
+}
+.public-site .public-home .presenter-close {
+  padding: 0 10px;
+}
+.public-site .public-home .hero h1 {
+  text-wrap: balance;
+}
+.public-site .public-home .home-metric strong {
+  font-variant-numeric: tabular-nums;
+}
+.public-site:has(.home-data-dialog[open]) {
+  overflow: hidden;
+}
+body:has(.home-data-dialog[open]) {
+  overflow: hidden;
+}
+@media (max-width: 760px) {
+  .public-site .home-mesh {
+    height: 320px;
+  }
+  .public-site .public-home .obs-source {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .public-site .public-home .obs-top {
+    align-items: flex-start;
+  }
+  .public-site .public-home .machine-head {
+    flex-wrap: wrap;
+  }
+  .public-site .public-home .data-controls {
+    flex-wrap: wrap;
+  }
+  .public-site .public-home .presenter {
+    gap: 3px;
+  }
+  .public-site .public-home .presenter span {
+    white-space: normal;
+    max-width: 160px;
+  }
+}
+@media (max-width: 380px) {
+  .public-site .public-home .permission-files button {
+    padding: 12px 8px;
+    gap: 6px;
+    font-size: 8px;
+  }
+  .public-site .public-home .permission-action {
+    gap: 7px;
+    padding: 12px 8px;
+  }
+  .public-site .public-home .permission-action .btn {
+    padding: 10px;
+    font-size: 9px;
+  }
+  .public-site .public-home .presenter span {
+    max-width: 123px;
+    font-size: 8px;
+  }
+}
+/* Anybody's shipped metrics are wider than the reference fallback. Keep its two authored lines. */
+.public-site .public-home .hero h1 {
+  font-size: clamp(52px, calc(7.1vw - 6px), 96px);
+}
+.public-site .public-home .hero h1 > span {
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .public-site .public-home .hero h1 {
+    font-size: clamp(39px, 12.7vw, 84px);
+  }
+}

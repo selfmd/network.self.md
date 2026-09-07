@@ -1,0 +1,70 @@
+/* Reference v2.2 card composition, with stable identity artwork. */
+.public-site .discover-page .directory-grid {
+  margin-bottom: 0;
+}
+.public-site .discover-page .directory-empty {
+  padding: 50px 35px;
+  border: 1px dashed var(--line);
+  margin-top: 18px;
+}
+.public-site .discover-page .state-card {
+  padding: 0;
+}
+.public-site .discover-page .state-card h3 {
+  text-wrap: pretty;
+}
+.public-site .discover-page .state-card-footer > span {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.public-site .discover-page .state-card-kind {
+  flex-wrap: wrap;
+}
+.public-site .discover-page .public-detail {
+  overscroll-behavior: contain;
+}
+.public-site .discover-page .state-dialog-stamps .chip {
+  overflow-wrap: anywhere;
+}
+.public-site .discover-page .state-dialog-heading {
+  min-width: 0;
+}
+.public-site .discover-page .state-dialog-heading h3 {
+  min-width: 0;
+}
+.public-site .discover-page .state-dialog-heading .dialog-index {
+  flex: 0 0 auto;
+}
+.public-site .discover-page .state-id-row {
+  flex-wrap: wrap;
+}
+.public-site .discover-page .state-id-row > code {
+  min-width: 0;
+}
+.public-site .discover-page .state-doc-header {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.public-site .discover-page .state-dialog-note {
+  text-wrap: pretty;
+}
+@media (max-width: 760px) {
+  .public-site .discover-page .directory-empty {
+    padding: 30px 23px;
+  }
+  .public-site .discover-page .state-dialog-heading .dialog-index {
+    font-size: 30px;
+  }
+  .public-site .discover-page .state-dialog-content {
+    padding: 20px;
+  }
+}
+/* Keep the document indices readable on all three reference paper tones. */
+.public-site .discover-page .state-art .art-number,
+.public-site .discover-page .state-dialog-heading .dialog-index {
+  color: var(--grey);
+}
+/* The approved heading keeps “kind of state.” together when space permits. */
+.public-site .discover-page .directory-hero h1 span {
+  display: inline;
+}

@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -21,12 +23,22 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm -r build
+      - name: Typecheck
+        run: |
+          pnpm typecheck
+          pnpm --filter @networkselfmd/dashboard exec tsc -p tsconfig.client.json
       - name: Test
         run: pnpm -r test
+      - name: Verify publishable package tarballs
+        run: pnpm verify:packages
 
   docker-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build dashboard image
         run: docker build -t networkselfmd-dashboard:ci .
+      - name: Smoke test dashboard image
+        run: node scripts/verify-dashboard-image.mjs networkselfmd-dashboard:ci
