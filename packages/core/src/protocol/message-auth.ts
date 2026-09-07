@@ -69,6 +69,9 @@ export function authenticatedMessagePayload(
         message.recipientFingerprint,
         message.timestamp,
       ];
+      if (message.action === 'metadata') {
+        fields.push(message.selfMd, message.isPublic, message.metadataVersion);
+      }
       break;
     default:
       throw new Error('Message type is not authenticated by protocol v2');

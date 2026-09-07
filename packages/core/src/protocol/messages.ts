@@ -119,7 +119,7 @@ function validateHandshake(m: Record<string, unknown>): void {
   bytes(m.xPublicKey, 'xPublicKey', 32);
   bytes(m.noisePublicKey, 'noisePublicKey', 32);
   bytes(m.signature, 'signature', 64);
-  if (m.protocolVersion !== 2) fail('protocolVersion', 'must be 2');
+  if (m.protocolVersion !== 3) fail('protocolVersion', 'must be 3');
   timestamp(m.timestamp);
   optionalString(m.displayName, 'displayName', 1, 128);
   if (m.capabilities !== undefined) {
@@ -238,6 +238,9 @@ function validateGroupManagement(m: Record<string, unknown>): void {
     [
       'targetFingerprint',
       'groupName',
+      'selfMd',
+      'isPublic',
+      'metadataVersion',
       'inviteId',
       'epochVersion',
       'epochHash',
@@ -257,6 +260,7 @@ function validateGroupManagement(m: Record<string, unknown>): void {
       'leave',
       'kick',
       'promote',
+      'metadata',
     ].includes(m.action as string)
   )
     fail('action', 'is invalid');
@@ -267,6 +271,16 @@ function validateGroupManagement(m: Record<string, unknown>): void {
   if (m.targetFingerprint !== undefined)
     fingerprint(m.targetFingerprint, 'targetFingerprint');
   optionalString(m.groupName, 'groupName', 1, 128);
+  if (m.action === 'metadata') {
+    if (typeof m.selfMd !== 'string') fail('selfMd', 'is required for metadata');
+    optionalString(m.selfMd, 'selfMd', 0, 16 * 1024);
+    if (typeof m.isPublic !== 'boolean') fail('isPublic', 'must be boolean');
+    integer(m.metadataVersion, 'metadataVersion');
+    integer(m.epochVersion, 'epochVersion');
+    bytes(m.epochHash, 'epochHash', 32);
+  } else if (m.selfMd !== undefined || m.isPublic !== undefined || m.metadataVersion !== undefined) {
+    fail('metadata', 'fields require metadata action');
+  }
   optionalString(m.inviteId, 'inviteId', 1, 128);
   if (m.epochVersion !== undefined) integer(m.epochVersion, 'epochVersion');
   if (m.epochHash !== undefined) bytes(m.epochHash, 'epochHash', 32);
@@ -471,6 +485,24 @@ function validateAck(m: Record<string, unknown>): void {
   timestamp(m.timestamp);
 }
 
+function validateDelivery(m: Record<string, unknown>): void {
+  keys(m, ['type', 'id', 'senderFingerprint', 'recipientFingerprint', 'timestamp', 'signature',
+    ...(m.type === MessageType.ReliableDelivery ? ['contentHash', 'createdAt', 'expiresAt', 'message'] : [])]);
+  string(m.id, 'id', 1, 128);
+  fingerprint(m.senderFingerprint, 'senderFingerprint');
+  fingerprint(m.recipientFingerprint, 'recipientFingerprint');
+  timestamp(m.timestamp);
+  bytes(m.signature, 'signature', 64);
+  if (m.type === MessageType.ReliableDelivery) {
+    timestamp(m.createdAt); timestamp(m.expiresAt);
+    if (typeof m.contentHash !== 'string' || !/^[0-9a-f]{64}$/.test(m.contentHash)) fail('contentHash', 'invalid');
+    const inner = object(m.message);
+    if (inner.type === MessageType.GroupMessage) validateGroupMessage(inner);
+    else if (inner.type === MessageType.DirectMessage) validateDirectMessage(inner);
+    else fail('message', 'must be group or direct');
+  }
+}
+
 export function validateProtocolMessage(
   value: unknown,
 ): asserts value is ProtocolMessage {
@@ -479,6 +511,10 @@ export function validateProtocolMessage(
     fail('type', 'is required');
   if (!Number.isInteger(m.type)) fail('type', 'must be an integer');
   switch (m.type) {
+    case MessageType.ReliableDelivery:
+    case MessageType.DeliveryReceipt:
+      validateDelivery(m);
+      break;
     case MessageType.IdentityHandshake:
       validateHandshake(m);
       break;

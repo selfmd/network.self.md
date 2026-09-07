@@ -14,9 +14,9 @@ export interface ApiStatus {
   stateCount: number;
   uptime: number;
   online?: boolean;
-  syncPct?: number;
-  latencyMsP50?: number;
-  latencyMsP95?: number;
+  syncPct?: number | null;
+  latencyMsP50?: number | null;
+  latencyMsP95?: number | null;
   capabilities?: ApiCapabilities;
 }
 

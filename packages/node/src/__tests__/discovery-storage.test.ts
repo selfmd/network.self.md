@@ -17,6 +17,7 @@ function createTestDb(): Database.Database {
       joined_at INTEGER,
       is_public INTEGER DEFAULT 0,
       self_md TEXT,
+      metadata_version INTEGER NOT NULL DEFAULT 0,
       creator_public_key BLOB,
       genesis_hash BLOB
     );
@@ -25,6 +26,11 @@ function createTestDb(): Database.Database {
       public_key BLOB NOT NULL,
       role TEXT NOT NULL DEFAULT 'member',
       PRIMARY KEY (group_id, public_key)
+    );
+    CREATE TABLE retained_group_authorities (
+      group_id BLOB PRIMARY KEY,
+      creator_public_key BLOB NOT NULL,
+      genesis_hash BLOB NOT NULL
     );
     CREATE TABLE discovered_groups (
       group_id BLOB PRIMARY KEY,

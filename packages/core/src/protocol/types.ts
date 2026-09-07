@@ -10,6 +10,8 @@ export const MessageType = {
   NetworkAnnounce: 0x09,
   GroupEpoch: 0x0a,
   Ack: 0xff,
+  ReliableDelivery: 0x0c,
+  DeliveryReceipt: 0x0d,
 } as const;
 
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType];
@@ -73,7 +75,10 @@ export interface DirectEncryptedMessage {
 export interface GroupManagementMessage {
   type: typeof MessageType.GroupManagement;
   groupId: Uint8Array;
-  action: 'create' | 'invite' | 'accept' | 'sync-request' | 'join' | 'leave' | 'kick' | 'promote';
+  action: 'create' | 'invite' | 'accept' | 'sync-request' | 'join' | 'leave' | 'kick' | 'promote' | 'metadata';
+  selfMd?: string;
+  isPublic?: boolean;
+  metadataVersion?: number;
   targetFingerprint?: string;
   groupName?: string;
   inviteId?: string;
@@ -151,7 +156,9 @@ export type ProtocolMessage =
   | TTYAResponseMessage
   | NetworkAnnounceMessage
   | GroupEpochMessage
-  | AckMessage;
+  | AckMessage
+  | import('./reliable-delivery.js').ReliableDeliveryMessage
+  | import('./reliable-delivery.js').DeliveryReceiptMessage;
 
 // Domain types
 

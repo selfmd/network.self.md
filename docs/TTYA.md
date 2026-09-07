@@ -1,114 +1,8 @@
-# TTYA -- Talk To Your Agent
+# TTYA — deferred
 
-TTYA lets you share your AI agent with anyone through a web link. Visitors interact with your agent in a browser. You control who gets access.
+TTYA is deferred and is not part of the supported product offering. No hosted browser-chat service is advertised, and TTYA tools are not exposed by the MCP server. Existing implementation details below are retained as an archival reference, not an onboarding guide.
 
-## How It Works
-
-```
-You (Agent Owner)                    Visitor
-─────────────────                    ───────
-1. Start TTYA server                 1. Open link in browser
-2. Get shareable link                2. Type a message
-3. See incoming request              3. Wait for approval
-4. Approve / Reject                  4. Start chatting (if approved)
-5. Monitor conversation
-```
-
-## Starting TTYA
-
-### CLI
-
-```bash
-# Start agent manager and web bridge with one generated local PSK
-networkselfmd ttya --port 3000
-
-# With auto-approve (for AI agents that can handle any input)
-networkselfmd ttya --port 3000 --auto-approve
-```
-
-### MCP (Claude Code)
-
-```
-> Start TTYA on port 3000
-# Calls ttya_start tool
-
-> Show pending visitors
-# Calls ttya_pending tool
-
-> Approve visitor abc123
-# Calls ttya_approve tool
-```
-
-## Shareable Link
-
-After starting, you get a link:
-
-```
-https://ttya.self.md/5kx8m3nq2p7...
-                     └─ your agent fingerprint
-```
-
-Or self-hosted:
-
-```
-https://your-domain.com/talk/5kx8m3nq2p7...
-```
-
-Share this link with anyone you want to talk to your agent.
-
-## Visitor Experience
-
-1. **Open link** -- minimal chat interface loads (no signup, no install)
-2. **Type message** -- "Hi, I'd like to discuss the project proposal"
-3. **Waiting** -- visitor sees "Waiting for approval..."
-4. **Approved** -- chat opens, real-time conversation begins
-5. **Rejected** -- visitor sees "The agent owner declined your request"
-
-The visitor page is intentionally minimal: a text input, a message list, a status indicator. No JavaScript frameworks, no build tools. Works on any browser.
-
-## Approval Flow
-
-When a visitor sends their first message:
-
-```
-┌─────────────────────────────────────────────┐
-│ New TTYA Request                             │
-│                                              │
-│ Visitor: anon-7f3a                           │
-│ Message: "Hi, I'd like to discuss the        │
-│           project proposal"                  │
-│ Time: 2024-04-22 14:30 UTC                   │
-│                                              │
-│ [Approve]  [Reject]  [Block IP]              │
-└─────────────────────────────────────────────┘
-```
-
-The owner sees:
-
-- Visitor ID (anonymous, random per session)
-- First message content
-- Hashed IP (for abuse detection, not tracking)
-- Timestamp
-
-The owner can:
-
-- **Approve** -- visitor can chat freely
-- **Reject** -- visitor sees rejection, connection closed
-- **Block** -- visitor's IP hash is blocked from future requests
-
-### Auto-Approve Mode
-
-For agents that should be publicly accessible:
-
-```bash
-networkselfmd ttya --auto-approve
-```
-
-All visitors are immediately approved. Useful when:
-
-- Your agent is an AI that can handle any conversation
-- You're running a public demo
-- The agent has its own content filtering
+## Archival implementation reference
 
 ## Architecture
 
@@ -225,11 +119,3 @@ interface TTYAConfig {
   ttyaAuthSecret: Uint8Array; // required, same >=32 random bytes on both sides
 }
 ```
-
-## Future
-
-- **E2E encryption:** noise-over-websocket from browser to agent (eliminate TTYA server as trusted party)
-- **Visitor identity:** optional Ed25519 keypair for returning visitors
-- **Rich content:** file sharing, images, structured data
-- **Agent-initiated:** agent can proactively send messages to approved visitors
-- **Multi-agent:** visitor can talk to multiple agents in the same interface

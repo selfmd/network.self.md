@@ -86,6 +86,33 @@ function mockAgent() {
   };
 }
 
+describe('Dashboard transport security headers', () => {
+  it.each(['localhost:3001', '127.0.0.1:3001', '[::1]:3001'])(
+    'allows local HTTP assets at %s without forcing unavailable TLS', async (host) => {
+      const app = await buildApp({ agent: mockAgent() as any });
+      try {
+        const response = await app.inject({ url: '/healthz', headers: { host } });
+        expect(response.headers['content-security-policy']).not.toContain('upgrade-insecure-requests');
+        expect(response.headers['content-security-policy']).toContain("script-src 'self'");
+        expect(response.headers['content-security-policy']).toContain("object-src 'none'");
+        expect(response.headers['strict-transport-security']).toBeUndefined();
+        expect(response.headers['x-content-type-options']).toBe('nosniff');
+      } finally { await app.close(); }
+    },
+  );
+
+  it.each(['operator.example', 'localhost.example', '127.0.0.1.example'])(
+    'retains HTTPS security headers for %s', async (host) => {
+      const app = await buildApp({ agent: mockAgent() as any });
+      try {
+        const response = await app.inject({ url: '/healthz', headers: { host } });
+        expect(response.headers['content-security-policy']).toContain('upgrade-insecure-requests');
+        expect(response.headers['strict-transport-security']).toContain('max-age=');
+      } finally { await app.close(); }
+    },
+  );
+});
+
 describe('Dashboard API routes', () => {
   let app: FastifyInstance;
 
@@ -334,5 +361,35 @@ describe('Dashboard API authentication', () => {
     });
     expect(authorized.statusCode).toBe(200);
     await app.close();
+  });
+});
+
+describe('remote operator mutations and truthful telemetry', () => {
+  const auth = { username: 'operator', password: 'a-strong-dashboard-password' };
+  const authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
+  it('permits the exact configured origin only with authentication', async () => {
+    const app = await buildApp({ agent: mockAgent() as any, auth, operatorOrigin: 'https://operator.example' });
+    try {
+      expect((await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join', headers: { origin: 'https://operator.example' } })).statusCode).toBe(401);
+      for (const origin of ['https://evil.example', 'https://operator.example.evil.test', 'http://operator.example', 'https://operator.example:444', 'null']) {
+        expect((await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join', headers: { authorization, origin } })).statusCode).toBe(403);
+      }
+      expect((await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join', remoteAddress: '203.0.113.9', headers: { authorization } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join', headers: { authorization, origin: 'https://operator.example' } })).statusCode).toBe(200);
+    } finally { await app.close(); }
+  });
+  it('does not accept remote origins without explicit configuration', async () => {
+    const app = await buildApp({ agent: mockAgent() as any, auth });
+    try {
+      expect((await app.inject({ method: 'POST', url: '/api/discovery/states/040506/join', headers: { authorization, origin: 'https://operator.example' } })).statusCode).toBe(403);
+    } finally { await app.close(); }
+  });
+  it('reports unavailable measurements even when the node is offline', async () => {
+    const agent = mockAgent();
+    agent.isRunning = false;
+    const app = await buildApp({ agent: agent as any });
+    try {
+      expect((await app.inject('/api/status')).json()).toMatchObject({ online: false, syncPct: null, latencyMsP50: null, latencyMsP95: null });
+    } finally { await app.close(); }
   });
 });

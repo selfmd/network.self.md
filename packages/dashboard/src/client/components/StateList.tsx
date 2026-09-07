@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { ApiState } from '../types';
 import { CopyButton, joinStateInstructions } from './CopyButton';
 
@@ -18,17 +18,18 @@ function JoinCommandButton({ stateId, stateName, isPublic }: { stateId: string; 
 
 function SelfMdBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
   const needsCollapse = content.length > 220;
 
   return (
     <div className="selfmd-block" onClick={(e) => e.stopPropagation()}>
       <div className="selfmd-label">self.md</div>
-      <div className={`selfmd-content ${!expanded && needsCollapse ? 'selfmd-collapsed' : ''}`}>
+      <div id={contentId} className={`selfmd-content ${!expanded && needsCollapse ? 'selfmd-collapsed' : ''}`}>
         {content}
       </div>
       {needsCollapse && (
-        <button className="text-btn" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'collapse' : 'expand manifesto'}
+        <button className="text-btn" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}>
+          {expanded ? 'collapse' : 'read shared context'}
         </button>
       )}
     </div>
@@ -59,9 +60,9 @@ export function StateList({ states }: { states: ApiState[] | null }) {
 
 function Loading() {
   return (
-    <div className="skeleton-list">
+    <div className="skeleton-list" role="status" aria-label="Loading states">
       {[1, 2, 3].map((i) => (
-        <div className="skeleton-row" key={i}>
+        <div className="skeleton-row" key={i} aria-hidden="true">
           <span className="skeleton-block" style={{ width: '34%' }} />
           <span className="skeleton-block" style={{ width: '18%', marginLeft: 'auto' }} />
         </div>

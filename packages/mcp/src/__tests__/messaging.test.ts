@@ -12,14 +12,28 @@ describe('MCP message reads over the protocol', () => {
   let client: Client;
   let server: McpServer;
   const getMessages = vi.fn(() => []);
+  let agent: Agent;
 
   beforeEach(async () => {
     getMessages.mockClear();
-    server = createServer({
+    agent = {
       getMessages,
+      createGroup: vi.fn(async () => ({ groupId: Buffer.from(stateId, 'hex') })),
+      updateGroupManifest: vi.fn(),
+      listGroupInvitations: vi.fn(() => [{
+        inviteId: 'invite-1', groupId: Buffer.from(stateId, 'hex'), name: 'builders',
+        inviterPublicKey: Buffer.from(peerPublicKey, 'hex'), inviterFingerprint: 'inviter',
+        createdAt: 1000, expiresAt: 86401000,
+      }]),
+      sendGroupMessage: vi.fn(async () => 'group-delivery-1'),
+      sendDirectMessage: vi.fn(async () => 'direct-delivery-1'),
+      listDeliveries: vi.fn(() => [{ id: 'direct-delivery-1', peerPublicKey, status: 'queued', attempts: 0, error: null }]),
       isRunning: true,
-      identity: { fingerprint: 'test-agent', edPublicKey: Buffer.from(peerPublicKey, 'hex') },
-    } as unknown as Agent);
+      start: vi.fn(async () => { Object.assign(agent, { isRunning: true }); }),
+      setDisplayName: vi.fn((displayName: string) => { agent.identity.displayName = displayName; }),
+      identity: { fingerprint: 'test-agent', edPublicKey: Buffer.from(peerPublicKey, 'hex'), displayName: 'Existing name' },
+    } as unknown as Agent;
+    server = createServer(agent);
     client = new Client({ name: 'test-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -38,6 +52,73 @@ describe('MCP message reads over the protocol', () => {
     const resource = await client.readResource({ uri: 'agent://identity' });
     const identity = resource.contents[0]!;
     expect('text' in identity && JSON.parse(identity.text).publicKey).toBe(peerPublicKey);
+  });
+
+  it('advertises only implemented tools and does not expose deferred TTYA tools', async () => {
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(20);
+    expect(tools.some((tool) => tool.name.startsWith('ttya_'))).toBe(false);
+    expect(tools.map((tool) => tool.name)).toContain('send_direct_message');
+  });
+
+  it('exposes actionable incoming invitations with hexadecimal state IDs', async () => {
+    const result = await client.callTool({ name: 'state_invites', arguments: {} });
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text).invitations).toEqual([{
+      inviteId: 'invite-1', stateId, name: 'builders', inviterPublicKey: peerPublicKey,
+      inviterFingerprint: 'inviter', createdAt: 1000, expiresAt: 86401000,
+    }]);
+  });
+
+  it('passes private manifesto creation and updates to the runtime', async () => {
+    await client.callTool({ name: 'state_found', arguments: { name: 'builders', selfMd: 'Shared rules' } });
+    expect(agent.createGroup).toHaveBeenCalledWith('builders', { selfMd: 'Shared rules' });
+    await client.callTool({ name: 'state_update_manifest', arguments: { stateId, selfMd: 'Revised rules' } });
+    expect(agent.updateGroupManifest).toHaveBeenCalledWith(stateId, 'Revised rules');
+  });
+
+  it.each([
+    ['send_state_message', { stateId, content: 'hello' }, 'group-delivery-1'],
+    ['send_direct_message', { peerPublicKey, content: 'hello' }, 'direct-delivery-1'],
+  ])('returns an acceptance ID, not a delivery claim, for %s', async (name, args, messageId) => {
+    const result = await client.callTool({ name: name as string, arguments: args as Record<string, unknown> });
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text)).toEqual({ accepted: true, messageId });
+  });
+
+  it('queries recipient delivery state for a specific acceptance ID', async () => {
+    const result = await client.callTool({ name: 'delivery_status', arguments: { messageId: 'direct-delivery-1' } });
+    expect(agent.listDeliveries).toHaveBeenCalledWith('direct-delivery-1');
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text).deliveries[0].status).toBe('queued');
+  });
+
+  it.each([true, false])('applies a requested name when running=%s', async (isRunning) => {
+    Object.assign(agent, { isRunning });
+    const result = await client.callTool({ name: 'agent_init', arguments: { displayName: 'Hermes' } });
+    expect(result.isError).not.toBe(true);
+    expect(agent.setDisplayName).toHaveBeenCalledWith('Hermes');
+    expect(agent.start).toHaveBeenCalledTimes(isRunning ? 0 : 1);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text).displayName).toBe('Hermes');
+    const resource = await client.readResource({ uri: 'agent://identity' });
+    const identity = resource.contents[0]!;
+    expect('text' in identity && JSON.parse(identity.text).displayName).toBe('Hermes');
+  });
+
+  it('preserves the saved name when agent_init omits displayName', async () => {
+    const result = await client.callTool({ name: 'agent_init', arguments: {} });
+    expect(agent.setDisplayName).not.toHaveBeenCalled();
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text).displayName).toBe('Existing name');
+  });
+
+  it.each(['', 'a'.repeat(129), 'я'.repeat(65)])('rejects a name outside the handshake limits', async (displayName) => {
+    Object.assign(agent, { isRunning: false });
+    const result = await client.callTool({ name: 'agent_init', arguments: { displayName } });
+    expect(result.isError).toBe(true);
+    expect(agent.start).not.toHaveBeenCalled();
+    expect(agent.setDisplayName).not.toHaveBeenCalled();
   });
 
   it.each([

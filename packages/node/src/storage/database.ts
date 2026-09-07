@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdirSync, existsSync, chmodSync, readFileSync, statSync } from 'node:fs';
 import { deserializeEpoch } from '@networkselfmd/core';
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const REPLAY_TTL_MS = 10 * 60 * 1000;
 
 const MIGRATIONS: string[] = [
@@ -220,6 +220,38 @@ const MIGRATIONS: string[] = [
     SELECT group_id, public_key, distribution_sequence FROM sender_keys;
   UPDATE schema_version SET version = 8;
   `,
+  `
+  CREATE TABLE IF NOT EXISTS delivery_outbox (
+    id TEXT NOT NULL,
+    peer_public_key BLOB NOT NULL,
+    group_id BLOB,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    group_epoch_version INTEGER,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    packet BLOB,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT,
+    PRIMARY KEY (id, peer_public_key)
+  );
+  CREATE INDEX IF NOT EXISTS delivery_outbox_ready ON delivery_outbox(status, next_attempt_at, created_at);
+  CREATE TABLE IF NOT EXISTS delivery_inbox (
+    sender_fingerprint TEXT NOT NULL,
+    id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (sender_fingerprint, id)
+  );
+  CREATE TABLE IF NOT EXISTS retained_group_authorities (
+    group_id BLOB PRIMARY KEY,
+    creator_public_key BLOB NOT NULL,
+    genesis_hash BLOB NOT NULL
+  );
+  UPDATE schema_version SET version = 9;
+  `,
 ];
 
 export class AgentDatabase {
@@ -262,6 +294,12 @@ export class AgentDatabase {
         } else if (i === 6) {
           this.applyMigrationV7();
         } else {
+          if (i === 8) {
+            for (const [table, column] of [['groups', 'metadata_version'], ['sender_keys', 'generation_created_at']]) {
+              const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+              if (!columns.some(candidate => candidate.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+            }
+          }
           this.db.exec(MIGRATIONS[i]);
         }
       }

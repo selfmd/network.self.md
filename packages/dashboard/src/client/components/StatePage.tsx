@@ -31,8 +31,8 @@ export function StatePage({ stateId }: { stateId: string }) {
   if (error) {
     return (
       <main className="page animate-in">
-        <a href="#/" className="back-link">← mesh overview</a>
-        <div className="error-banner">state unavailable · {error}</div>
+        <a href="#/operator" className="back-link">← node overview</a>
+        <div className="error-banner" role="alert">state unavailable · {error}</div>
       </main>
     );
   }
@@ -40,15 +40,15 @@ export function StatePage({ stateId }: { stateId: string }) {
   if (!data) {
     return (
       <main className="page animate-in">
-        <a href="#/" className="back-link">← mesh overview</a>
-        <div className="surface-card"><div className="skeleton-list"><div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" /></div></div>
+        <a href="#/operator" className="back-link">← node overview</a>
+        <div className="surface-card" role="status" aria-label="Loading state"><div className="skeleton-list" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" /></div></div>
       </main>
     );
   }
 
   return (
     <main className="page state-page animate-in">
-      <a href="#/" className="back-link">← mesh overview</a>
+      <a href="#/operator" className="back-link">← node overview</a>
 
       <section className="surface-card hero-card state-hero">
         <div className="card-chrome"><span /><span /><span /><code>/states/{data.id.slice(0, 12)}</code></div>
@@ -72,7 +72,7 @@ export function StatePage({ stateId }: { stateId: string }) {
 
       {data.selfMd && (
         <section className="surface-card">
-          <div className="card-title"><span className="dot online" /> self.md manifesto</div>
+          <div className="card-title"><span className="dot online" /> shared self.md</div>
           <pre className="manifesto">{data.selfMd}</pre>
         </section>
       )}

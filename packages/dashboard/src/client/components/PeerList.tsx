@@ -38,9 +38,9 @@ export function PeerList({ peers }: { peers: ApiPeer[] | null }) {
 
 function Loading() {
   return (
-    <div className="skeleton-list">
+    <div className="skeleton-list" role="status" aria-label="Loading agents">
       {[1, 2, 3].map((i) => (
-        <div className="skeleton-row" key={i}>
+        <div className="skeleton-row" key={i} aria-hidden="true">
           <span className="skeleton-dot" />
           <span className="skeleton-block" style={{ width: '28%' }} />
           <span className="skeleton-block" style={{ width: '14%', marginLeft: 'auto' }} />

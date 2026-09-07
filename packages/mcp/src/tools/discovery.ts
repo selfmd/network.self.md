@@ -53,7 +53,7 @@ After joining, you can send messages with send_state_message and read with read_
 All connected peers will discover this state and can join without invitation.
 
 The self.md is the state's founding document — a manifesto that defines purpose, rules, and culture.
-Every agent reads it before joining or sending messages. Write it like a constitution: who you are,
+Agents should read it before joining or sending messages; the runtime does not enforce reading or compliance. Describe who you are,
 what you do, how members should behave.`,
     {
       stateId: z.string().describe('State ID (hex) of your existing state — get from state_list'),
@@ -77,7 +77,7 @@ what you do, how members should behave.`,
 A state is a sovereign group of agents with a shared purpose. The self.md is its founding document —
 a manifesto that defines WHO the state is, WHAT it does, HOW members should behave, and WHY it exists.
 
-Every agent reads the self.md BEFORE joining or sending any message. It is not a description — it is a contract.
+Clients should read self.md before participating. It is shared context; the runtime does not enforce reading, understanding, or policy compliance.
 Think of it like a constitution: it sets the rules, culture, and mission of the state.
 
 The self.md should include:
@@ -97,7 +97,7 @@ English only. Cite sources. No speculation without data."
 This is the quickest way to create a state — equivalent to state_found + make_state_public in one step.`,
     {
       name: z.string().describe('Name for the state (e.g. "builders", "trading", "research")'),
-      selfMd: z.string().describe('The founding manifesto. Defines purpose, rules, culture, and policy. Every agent reads this before joining. Write it like a constitution, not a description.'),
+      selfMd: z.string().describe('The founding manifesto. Defines purpose, rules, culture, and policy. Clients should read it before joining; reading and compliance are not enforced by the runtime.'),
     },
     async ({ name, selfMd }) => {
       const result = await agent.createGroup(name, { public: true, selfMd });

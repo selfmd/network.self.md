@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { argon2id } from 'hash-wasm';
+import { resolveDataDir } from './data-dir.js';
 import {
   generateIdentity,
   deriveEd25519PublicKey,
@@ -24,6 +25,8 @@ import {
   serializeEpoch,
   verifyGenesisEpoch,
   signAuthenticatedMessage,
+  deliveryContentHash,
+  DELIVERY_TTL_MS,
 } from '@networkselfmd/core';
 import type {
   AgentIdentity,
@@ -35,6 +38,8 @@ import type {
   GroupManagementMessage,
   GroupEpochMessage,
   NetworkAnnounceMessage,
+  ReliableDeliveryMessage,
+  DeliveryReceiptMessage,
 } from '@networkselfmd/core';
 import { MessageType } from '@networkselfmd/core';
 import { createId } from '@paralleldrive/cuid2';
@@ -54,6 +59,9 @@ import {
   GroupBootstrapRepository,
 } from './storage/index.js';
 import { SwarmManager } from './network/swarm.js';
+import { DeliveryRepository, type OutboxRecord } from './storage/delivery.js';
+import { DeliveryManager, type DeliveryContext } from './network/delivery-manager.js';
+import { decryptDirectRatchet, pruneDirectRatchetSession, renewPendingBootstrap } from './network/direct-ratchet.js';
 import type { PeerSession } from './network/connection.js';
 import type { HandshakeResult } from './network/handshake.js';
 import { GroupManager } from './groups/group-manager.js';
@@ -134,11 +142,14 @@ export class Agent extends EventEmitter {
   private swarm!: SwarmManager;
   private groupManager!: GroupManager;
   private ttyaManager: TTYAManager | null = null;
+  private deliveryRepo!: DeliveryRepository;
+  private deliveryManager!: DeliveryManager;
 
   constructor(options: AgentOptions) {
     super();
     this.options = {
       ...options,
+      dataDir: resolveDataDir(options.dataDir),
       ttyaAuthSecret: options.ttyaAuthSecret
         ? copyAndValidateTTYAAuthSecret(options.ttyaAuthSecret)
         : undefined,
@@ -172,6 +183,7 @@ export class Agent extends EventEmitter {
       this.peerRepo = new PeerRepository(db);
       this.groupRepo = new GroupRepository(db);
       this.messageRepo = new MessageRepository(db);
+      this.deliveryRepo = new DeliveryRepository(db);
       this.senderKeyRepo = new SenderKeyRepository(db);
       this.discoveredGroupRepo = new DiscoveredGroupRepository(db);
       this.ratchetStateRepo = new RatchetStateRepository(db);
@@ -211,6 +223,39 @@ export class Agent extends EventEmitter {
         invites: this.groupInviteRepo,
         replay: this.protocolReplayRepo,
         bootstraps: this.groupBootstrapRepo,
+        enqueueDelivery: (groupId, content) => this.enqueueGroupDelivery(groupId, content),
+      });
+
+      this.deliveryManager = new DeliveryManager({
+        identity: this.identity, repository: this.deliveryRepo,
+        getSession: fp => this.swarm.getSession(fp),
+        prepare: async (row, session) => {
+          if (!row.group_id) return () => this.encryptQueuedDirectMessage(row, session);
+          const latest = this.groupEpochRepo.getLatestEpoch(row.group_id.toString('hex'));
+          if (!this.groupRepo.find(row.group_id) || !latest) throw new Error('Group no longer exists');
+          if (![this.identity.edPublicKey, row.peer_public_key].every(pk => latest.epoch.members.some(m => buffersEqual(m.publicKey, pk)))) throw new Error('Group recipient or sender is revoked');
+          for (const epoch of this.groupEpochRepo.getEpochChain(row.group_id.toString('hex'))) {
+            if (epoch.epoch.version >= row.group_epoch_version! &&
+              ![this.identity.edPublicKey, row.peer_public_key].every(pk => epoch.epoch.members.some(m => buffersEqual(m.publicKey, pk)))) {
+              throw new Error('Group recipient or sender was revoked after enqueue');
+            }
+          }
+          await this.groupManager.rotateExpiredKey(row.group_id);
+          if (!await this.groupManager.distributeSenderKeyToPeer(row.group_id, session)) throw new Error('Current sender key is not ready');
+          return () => {
+            const epochs = this.groupEpochRepo.getEpochChain(row.group_id!.toString('hex'));
+            if (!this.groupRepo.find(row.group_id!) || !epochs.length || epochs.some(epoch => epoch.epoch.version >= row.group_epoch_version! &&
+              ![this.identity.edPublicKey, row.peer_public_key].every(pk => epoch.epoch.members.some(m => buffersEqual(m.publicKey, pk))))) {
+              throw new Error('Group recipient or sender was revoked after enqueue');
+            }
+            return this.groupManager.encryptDelivery(row.group_id!, row.content);
+          };
+        },
+        receive: (session, message, context) => message.type === MessageType.GroupMessage
+          ? this.groupManager.handleGroupMessage(session, message, context)
+          : this.handleDirectMessage(session, message, context),
+        onDelivered: (id, peerPublicKey) => this.emit('delivery:delivered', { id, peerPublicKey }),
+        onError: error => this.emit('error', error),
       });
 
       // Wire up events
@@ -239,6 +284,8 @@ export class Agent extends EventEmitter {
 
       // Rejoin existing groups
       await this.groupManager.rejoinAllGroups();
+      await this.groupManager.rotateExpiredKeys();
+      this.groupManager.startKeyRotation();
 
       // Join global network discovery topic
       const networkTopic = deriveKey(
@@ -250,8 +297,11 @@ export class Agent extends EventEmitter {
       await this.swarm.join(Buffer.from(networkTopic));
 
       this.isRunning = true;
+      this.deliveryManager.start();
       this.emit('started');
     } catch (error) {
+      this.groupManager?.stopKeyRotation();
+      await this.deliveryManager?.stop();
       if (this.ttyaManager) {
         await this.ttyaManager.stop().catch(() => {});
         this.ttyaManager = null;
@@ -272,6 +322,8 @@ export class Agent extends EventEmitter {
     if (!this.isRunning) return;
 
     this.isRunning = false;
+    this.groupManager.stopKeyRotation();
+    await this.deliveryManager.stop();
 
     if (this.ttyaManager) {
       await this.ttyaManager.stop();
@@ -289,6 +341,17 @@ export class Agent extends EventEmitter {
     this.peers.clear();
     this.groups.clear();
     this.emit('stopped');
+  }
+
+  /** Update persisted metadata without replacing the identity shared by managers. */
+  setDisplayName(displayName: string): void {
+    if (!this.isRunning) throw new Error('Agent is not running');
+    if (typeof displayName !== 'string' || !displayName.length || Buffer.byteLength(displayName, 'utf8') > 128) {
+      throw new Error('Display name must be a string of 1–128 UTF-8 bytes');
+    }
+    this.identityRepo.updateDisplayName(displayName);
+    this.identity.displayName = displayName;
+    this.options.displayName = displayName;
   }
 
   // ---- TTYA ----
@@ -335,6 +398,8 @@ export class Agent extends EventEmitter {
     if (options?.public) {
       this.groupRepo.setPublic(result.groupId, true, options.selfMd);
       this.announcePublicGroups();
+    } else if (options?.selfMd !== undefined) {
+      this.groupRepo.updateManifest(result.groupId, options.selfMd);
     }
     return result;
   }
@@ -343,6 +408,23 @@ export class Agent extends EventEmitter {
     const gid = hexToBytes(groupId);
     const pk = hexToBytes(peerPublicKey);
     await this.groupManager.inviteToGroup(gid, pk);
+  }
+
+  listGroupInvitations(): Array<{
+    inviteId: string; groupId: Uint8Array; name: string;
+    inviterPublicKey: Uint8Array; inviterFingerprint: string;
+    createdAt: number; expiresAt: number;
+  }> {
+    if (!this.isRunning) throw new Error('Agent is not running');
+    return this.groupInviteRepo.listIncoming(this.identity.edPublicKey).map((invite) => ({
+      inviteId: invite.invite_id,
+      groupId: new Uint8Array(invite.group_id),
+      name: invite.group_name,
+      inviterPublicKey: new Uint8Array(invite.inviter_public_key),
+      inviterFingerprint: fingerprintFromPublicKey(new Uint8Array(invite.inviter_public_key)),
+      createdAt: invite.created_at,
+      expiresAt: invite.created_at + 24 * 60 * 60 * 1000,
+    }));
   }
 
   async joinGroup(groupId: string): Promise<void> {
@@ -393,82 +475,75 @@ export class Agent extends EventEmitter {
 
   // ---- Messaging ----
 
-  async sendGroupMessage(groupId: string, content: string): Promise<void> {
-    const gid = hexToBytes(groupId);
-    await this.groupManager.sendGroupMessage(gid, content);
+  async sendGroupMessage(groupId: string, content: string): Promise<string> {
+    return this.groupManager.sendGroupMessage(hexToBytes(groupId), content);
   }
 
-  async sendDirectMessage(
-    peerPublicKey: string,
-    content: string,
-  ): Promise<void> {
+  async sendDirectMessage(peerPublicKey: string, content: string): Promise<string> {
     const pk = hexToBytes(peerPublicKey);
-    const peerFingerprint = fingerprintFromPublicKey(pk);
-    const session = this.swarm.getSession(peerFingerprint);
-    if (!session) {
-      throw new Error('Peer not connected');
-    }
+    if (buffersEqual(pk, this.identity.edPublicKey)) throw new Error('Cannot message own identity');
+    const id = this.enqueueDelivery(content, [pk]);
+    this.emit('dm:sent', { peerPublicKey: pk, content, messageId: id, status: 'queued' });
+    return id;
+  }
 
-    const plaintext = new TextEncoder().encode(content);
+  listDeliveries(messageId?: string) {
+    return this.deliveryRepo.list(messageId);
+  }
 
-    // Load or initialize Double Ratchet state for this peer
-    let ratchetState = this.ratchetStateRepo.load(peerFingerprint);
+  private async enqueueGroupDelivery(groupId: Uint8Array, content: string): Promise<string> {
+    const latest = this.groupEpochRepo.getLatestEpoch(Buffer.from(groupId).toString('hex'));
+    if (!latest || !latest.epoch.members.some(m => buffersEqual(m.publicKey, this.identity.edPublicKey))) throw new Error('Sender is revoked');
+    return this.enqueueDelivery(content, latest.epoch.members.map(m => m.publicKey)
+      .filter(pk => !buffersEqual(pk, this.identity.edPublicKey)), groupId);
+  }
 
-    if (!ratchetState) {
-      // First message to this peer — initialize as sender
-      if (!session.peerXPublicKey) {
-        throw new Error(
-          'Peer X25519 public key not available for DM encryption',
-        );
-      }
-      const sharedSecret = computeSharedSecret(
-        this.identity.xPrivateKey,
-        session.peerXPublicKey,
-      );
-      ratchetState = DoubleRatchet.initSender(
-        sharedSecret,
-        session.peerXPublicKey,
-      );
-    }
-
-    // Encrypt with Double Ratchet
-    const encrypted = DoubleRatchet.encrypt(ratchetState, plaintext);
-
-    // Save updated ratchet state
-    this.ratchetStateRepo.save(peerFingerprint, encrypted.nextState);
-
-    const messageId = createId();
-    const message = signAuthenticatedMessage<DirectEncryptedMessage>(
-      {
-        type: MessageType.DirectMessage,
-        senderFingerprint: this.identity.fingerprint,
-        recipientFingerprint: peerFingerprint,
-        ratchetPublicKey: encrypted.ratchetPublicKey,
-        previousChainLength: encrypted.previousChainLength,
-        messageNumber: encrypted.messageNumber,
-        ciphertext: encrypted.ciphertext,
-        nonce: encrypted.nonce,
-        timestamp: Date.now(),
-      },
-      this.identity.edPrivateKey,
-    );
-
-    session.send(message);
-
-    this.messageRepo.insert({
-      id: messageId,
-      peerPublicKey: pk,
-      senderPublicKey: this.identity.edPublicKey,
-      content,
-      timestamp: Date.now(),
-      type: 'direct',
+  private enqueueDelivery(content: string, recipients: Uint8Array[], groupId?: Uint8Array): string {
+    if (!this.isRunning) throw new Error('Agent is not running');
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (!bytes || bytes > 65536) throw new Error('Message must be 1..65536 UTF-8 bytes');
+    const id = createId();
+    const now = Date.now();
+    this.deliveryRepo.transaction(() => {
+      this.deliveryRepo.enqueue(recipients.map(pk => ({
+        id, peer_public_key: Buffer.from(pk), group_id: groupId ? Buffer.from(groupId) : null,
+        content, content_hash: deliveryContentHash(content, groupId),
+        group_epoch_version: groupId ? this.groupEpochRepo.getLatestEpoch(Buffer.from(groupId).toString('hex'))!.epoch.version : null,
+        created_at: now, expires_at: now + DELIVERY_TTL_MS,
+      })));
+      this.messageRepo.insert({ id, groupId,
+        peerPublicKey: groupId ? undefined : recipients[0],
+        senderPublicKey: this.identity.edPublicKey, content, timestamp: now,
+        type: groupId ? 'group' : 'direct',
+      });
     });
+    this.emit('delivery:queued', { id, recipients, groupId });
+    void this.deliveryManager.flush();
+    return id;
+  }
 
-    this.emit('dm:sent', {
-      peerPublicKey: pk,
-      content,
-      messageId,
-    });
+  private encryptQueuedDirectMessage(row: OutboxRecord, session: PeerSession): DirectEncryptedMessage {
+    const peerFingerprint = session.peerFingerprint!;
+    let saved = this.ratchetStateRepo.loadSession(peerFingerprint);
+    if (!saved) {
+      if (!session.peerXPublicKey) throw new Error('Peer X25519 public key not available');
+      saved = {
+        active: DoubleRatchet.initSender(computeSharedSecret(this.identity.xPrivateKey, session.peerXPublicKey), session.peerXPublicKey),
+        bootstrapPending: true,
+        // First ciphertext retries may survive disconnects for the full queue
+        // lifetime. Eligibility is never added to an existing/legacy session.
+        initialReceiver: { expiresAt: row.expires_at },
+      };
+    }
+    saved = renewPendingBootstrap(saved, row.expires_at);
+    const encrypted = DoubleRatchet.encrypt(saved.active, new TextEncoder().encode(row.content));
+    this.ratchetStateRepo.saveSession(peerFingerprint, { ...saved, active: encrypted.nextState });
+    return signAuthenticatedMessage<DirectEncryptedMessage>({
+      type: MessageType.DirectMessage, senderFingerprint: this.identity.fingerprint,
+      recipientFingerprint: peerFingerprint, ratchetPublicKey: encrypted.ratchetPublicKey,
+      previousChainLength: encrypted.previousChainLength, messageNumber: encrypted.messageNumber,
+      ciphertext: encrypted.ciphertext, nonce: encrypted.nonce, timestamp: Date.now(),
+    }, this.identity.edPrivateKey);
   }
 
   getMessages(opts: {
@@ -543,6 +618,21 @@ export class Agent extends EventEmitter {
     }
     this.groupRepo.setPublic(gid, true, selfMd);
     this.announcePublicGroups();
+    this.groupManager.broadcastMetadata(gid);
+  }
+
+  updateGroupManifest(groupId: string, selfMd: string): void {
+    if (typeof selfMd !== 'string' || Buffer.byteLength(selfMd, 'utf8') > 16 * 1024) {
+      throw new Error('self.md must be a string of at most 16384 bytes');
+    }
+    const gid = hexToBytes(groupId);
+    const latest = this.groupEpochRepo.getLatestEpoch(groupId);
+    if (!latest?.epoch.members.some((member) => member.role === 'admin' && buffersEqual(member.publicKey, this.identity.edPublicKey))) {
+      throw new Error('Not authorized: not admin in latest epoch');
+    }
+    this.groupRepo.updateManifest(gid, selfMd);
+    this.groupManager.broadcastMetadata(gid);
+    this.announcePublicGroups();
   }
 
   listDiscoveredGroups(): Array<{
@@ -577,6 +667,7 @@ export class Agent extends EventEmitter {
       genesisSignature: new Uint8Array(discovered.genesis_signature),
       genesisHash: new Uint8Array(discovered.genesis_hash),
     });
+    this.groupRepo.seedPublicMetadata(gid, discovered.self_md ?? '');
     this.discoveredGroupRepo.remove(gid);
   }
 
@@ -894,6 +985,7 @@ export class Agent extends EventEmitter {
     });
 
     this.swarm.on('peer:verified', (result: HandshakeResult) => {
+      this.deliveryManager?.reconnect(result.peerPublicKey);
       this.emit('peer:verified', {
         publicKey: result.peerPublicKey,
         fingerprint: result.peerFingerprint,
@@ -982,6 +1074,8 @@ export class Agent extends EventEmitter {
     router.on(MessageType.DirectMessage, (session, message) => {
       this.handleDirectMessage(session, message as DirectEncryptedMessage);
     });
+    router.on(MessageType.ReliableDelivery, (session, message) => this.deliveryManager.receive(session, message as ReliableDeliveryMessage));
+    router.on(MessageType.DeliveryReceipt, (session, message) => this.deliveryManager.receipt(session, message as DeliveryReceiptMessage));
 
     router.on(MessageType.NetworkAnnounce, (session, message) => {
       const announce = message as NetworkAnnounceMessage;
@@ -1081,7 +1175,8 @@ export class Agent extends EventEmitter {
   private handleDirectMessage(
     session: PeerSession,
     message: DirectEncryptedMessage,
-  ): void {
+    delivery?: DeliveryContext,
+  ): boolean {
     let reservation;
     try {
       reservation = validateAuthenticatedMessage(
@@ -1091,14 +1186,14 @@ export class Agent extends EventEmitter {
       );
     } catch (error) {
       this.emit('error', error);
-      return;
+      return false;
     }
 
     try {
       const content = this.protocolReplayRepo.accept(reservation, () => {
         const senderFingerprint = session.peerFingerprint!;
-        let ratchetState = this.ratchetStateRepo.load(senderFingerprint);
-        if (!ratchetState) {
+        let ratchetSession = this.ratchetStateRepo.loadSession(senderFingerprint);
+        if (!ratchetSession) {
           if (!session.peerXPublicKey) {
             throw new Error(
               'Peer X25519 public key not available for DM decryption',
@@ -1108,27 +1203,31 @@ export class Agent extends EventEmitter {
             this.identity.xPrivateKey,
             session.peerXPublicKey,
           );
-          ratchetState = DoubleRatchet.initReceiver(sharedSecret, {
+          ratchetSession = { active: DoubleRatchet.initReceiver(sharedSecret, {
             privateKey: this.identity.xPrivateKey,
             publicKey: this.identity.xPublicKey,
-          });
+          }) };
         }
-        const decrypted = DoubleRatchet.decrypt(
-          ratchetState,
-          message.ratchetPublicKey,
-          message.previousChainLength,
-          message.messageNumber,
-          message.nonce,
-          message.ciphertext,
+        if (delivery?.bootstrapExpiresAt) ratchetSession = renewPendingBootstrap(ratchetSession, delivery.bootstrapExpiresAt);
+        const decrypted = decryptDirectRatchet(
+          ratchetSession, message, this.identity.fingerprint, senderFingerprint,
+          () => {
+            if (!session.peerXPublicKey) throw new Error('Peer X25519 public key not available for DM decryption');
+            return DoubleRatchet.initReceiver(
+              computeSharedSecret(this.identity.xPrivateKey, session.peerXPublicKey),
+              { privateKey: this.identity.xPrivateKey, publicKey: this.identity.xPublicKey },
+            );
+          },
         );
         const decoded = new TextDecoder().decode(decrypted.plaintext);
-        this.ratchetStateRepo.save(senderFingerprint, decrypted.nextState);
+        delivery?.accept(decoded);
+        this.ratchetStateRepo.saveSession(senderFingerprint, decrypted.session);
         this.messageRepo.insert({
-          id: createId(),
+          id: delivery?.messageId ?? createId(),
           senderPublicKey: session.peerPublicKey!,
           peerPublicKey: session.peerPublicKey!,
           content: decoded,
-          timestamp: message.timestamp,
+          timestamp: delivery?.timestamp ?? message.timestamp,
           type: 'direct',
         });
         return decoded;
@@ -1138,10 +1237,12 @@ export class Agent extends EventEmitter {
         senderPublicKey: session.peerPublicKey!,
         senderFingerprint: session.peerFingerprint!,
         content,
-        timestamp: message.timestamp,
+        timestamp: delivery?.timestamp ?? message.timestamp,
       });
+      return true;
     } catch {
       this.emit('error', new Error('Failed to decrypt direct message'));
+      return false;
     }
   }
 }

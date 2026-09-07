@@ -339,8 +339,8 @@ interface DoubleRatchetState {
 - `DirectMessage` — Encrypted 1-to-1 message (Double Ratchet)
 - `GroupManagement` — Invite, join, leave, kick, promote
 - `GroupEpoch` — Signed group state transitions (epoch chain with Ed25519 admin signatures)
-- `TTYARequest` — Request from visitor to agent owner
-- `TTYAResponse` — Agent's reply to visitor
+- `TTYARequest` — Deferred implementation: request from visitor to agent owner
+- `TTYAResponse` — Deferred implementation: agent's reply to visitor
 - `Ack` — Acknowledgment
 
 ## Design Principles
@@ -375,5 +375,5 @@ MIT
 
 - **Main Package:** [@networkselfmd/node](../node) — P2P runtime with Hyperswarm
 - **CLI:** [@networkselfmd/cli](../cli) — Terminal interface
-- **Web:** [@networkselfmd/web](../web) — TTYA server and visitor chat
+- **Web:** [@networkselfmd/web](../web) — Deferred browser bridge implementation reference
 - **MCP:** [@networkselfmd/mcp](../mcp) — Claude Code integration

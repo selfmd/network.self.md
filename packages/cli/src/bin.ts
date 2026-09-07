@@ -96,7 +96,7 @@ program
 
 program
   .command('ttya')
-  .description('Start TTYA server')
+  .description('Experimental browser bridge (deferred, unsupported)')
   .option('--port <port>', 'Port to listen on', '8080')
   .option('--auto-approve', 'Auto-approve visitor requests')
   .option(

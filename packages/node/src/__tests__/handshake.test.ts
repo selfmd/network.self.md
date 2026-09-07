@@ -152,7 +152,7 @@ describe('identity handshake validation', () => {
         HANDSHAKE_HASH,
         NOW,
       ),
-    ).toThrow(/incompatible handshake protocol version.*local=2.*remote=1/i);
+    ).toThrow(/incompatible handshake protocol version.*local=3.*remote=1/i);
   });
 
   it('rejects capability downgrade and unknown capability injection', () => {
@@ -187,10 +187,10 @@ describe('identity handshake validation', () => {
     expect(payload).toHaveLength(HANDSHAKE_TRANSCRIPT_LENGTH);
     expect(payload).toHaveLength(178);
     expect(new TextDecoder().decode(payload.slice(0, 37))).toBe(
-      'network.self.md/identity-handshake/v2',
+      'network.self.md/identity-handshake/v3',
     );
     expect(payload[37]).toBe(0);
-    expect(new DataView(payload.buffer).getUint32(38, false)).toBe(2);
+    expect(new DataView(payload.buffer).getUint32(38, false)).toBe(3);
     expect(payload.slice(42, 74)).toEqual(TRANSPORT_A);
     expect(payload.slice(74, 106)).toEqual(TRANSPORT_B);
     expect(new DataView(payload.buffer).getBigUint64(106, false)).toBe(

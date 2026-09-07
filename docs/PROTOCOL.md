@@ -1,6 +1,6 @@
 # Protocol Specification
 
-Version: 2.0-draft
+Version: 3.0-draft (identity handshake and delivery envelope; Sender Keys remain v2)
 
 ## Wire Format
 
@@ -47,32 +47,33 @@ After Hyperswarm establishes a Noise-encrypted connection, both peers must compl
   noisePublicKey: Uint8Array,    // 32 bytes, Noise key from Hyperswarm
   signature: Uint8Array,         // Ed25519 signature over the bound transcript
   displayName?: string,          // optional human-readable name
-  protocolVersion: number,       // 2; other versions are incompatible
-  capabilities: ["sender-key-v2", "group-epoch-v1"],
+  protocolVersion: number,       // 3; other versions are incompatible
+  capabilities: ["sender-key-v2", "group-epoch-v1", "group-metadata-v1", "reliable-delivery-v1"],
   timestamp: number              // unix ms, must be within ±5 min of local time
 }
 ```
 
 **Verification:**
 
-Version 2 is intentionally not wire-compatible with version 1. A peer that sends any
+Version 3 requires all participants to upgrade; versions 1 and 2 cannot connect. A peer that sends any
 other `protocolVersion` fails the handshake explicitly and its stream is destroyed.
-The v2 capability profile is fixed: peers must advertise exactly `sender-key-v2` and
-`group-epoch-v1`; missing, duplicate, or unknown capabilities fail the handshake.
+The v3 capability profile is fixed: peers must advertise exactly `sender-key-v2`,
+`group-epoch-v1`, `group-metadata-v1` and `reliable-delivery-v1`. Missing, duplicate,
+or unknown capabilities fail the handshake; there is no silent downgrade.
 
 The signature covers exactly 178 canonical bytes; no CBOR encoding, field lengths, or
 optional fields participate in this transcript:
 
 | Offset | Size | Encoding    | Value                                     |
 | ------ | ---- | ----------- | ----------------------------------------- |
-| 0      | 38   | ASCII bytes | `network.self.md/identity-handshake/v2\0` |
-| 38     | 4    | uint32 BE   | `protocolVersion` (= 2)                   |
+| 0      | 38   | ASCII bytes | `network.self.md/identity-handshake/v3\0` |
+| 38     | 4    | uint32 BE   | `protocolVersion` (= 3)                   |
 | 42     | 32   | raw bytes   | sender's `noisePublicKey`                 |
 | 74     | 32   | raw bytes   | sender's `xPublicKey`                     |
 | 106    | 8    | uint64 BE   | `timestamp` in Unix milliseconds          |
 | 114    | 64   | raw bytes   | connection's Noise `handshakeHash`        |
 
-1. Require protocol version 2 and exact key/signature/transcript field lengths
+1. Require protocol version 3 and exact key/signature/transcript field lengths
 2. Verify `noisePublicKey` matches `socket.remotePublicKey`
 3. Verify `timestamp` is within ±300,000 ms of local time
 4. Verify the Ed25519 signature over the full transcript, including `socket.handshakeHash`
@@ -347,6 +348,12 @@ rootKey = hkdf(sha256, sharedSecret, "networkselfmd-dm-v1", "", 32)
 
 The peer with the lexicographically smaller Ed25519 public key initiates the first DH ratchet step.
 
+## Reliable delivery
+
+`ReliableDelivery` (0x0c) wraps an authenticated DirectMessage or GroupMessage with id, senderFingerprint, recipientFingerprint, contentHash, createdAt, expiresAt, timestamp and an Ed25519 signature. `DeliveryReceipt` (0x0d) carries id, senderFingerprint, recipientFingerprint, timestamp and a signature. Signatures use the `networkselfmd-reliable-delivery-v1` domain; the delivery signature also binds the inner authenticated message and its signature.
+
+A receipt follows durable recipient storage and deduplication. Retries reuse the outbound message ID; duplicate reception does not add another application message. Group dispatch rechecks membership against the current epoch. The local queue is bounded to 1,000 active per-recipient records and 64 MiB, with seven-day expiry and at most 1,000 connected attempts. Receipt confirms storage, not reading. All peers must support handshake version 3; there is no downgrade to unacknowledged delivery.
+
 ## TTYA Protocol
 
 TTYA uses length-prefixed JSON frames on its dedicated Hyperswarm connection.
@@ -444,7 +451,9 @@ Sent from Agent Node to TTYA Server.
 
 ### Periodic Rotation
 
-Every 100 messages or 24 hours (whichever comes first), a sender generates a new `chainKey_0` and distributes it to all group members.
+After 100 actual encryptions in the persisted generation or when its generation reaches 24 hours, a sender generates a new `chainKey_0` and distributes it to group members.
+
+Rotation age is persisted per sender-key generation. While the agent runs, a one-minute timer checks the 24-hour threshold; startup and sending also check for overdue generations. An offline agent rotates when restarted. The 100-encryption threshold uses the persisted sender chain index and survives restart. Per-recipient encryptions and re-encrypted retries count toward this threshold; it is not a count of user-authored messages.
 
 ### Post-Removal Rotation
 

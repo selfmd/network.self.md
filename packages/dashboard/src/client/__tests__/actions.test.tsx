@@ -98,7 +98,7 @@ function mockApi(post: () => Promise<unknown>) {
 
 describe('public state joining', () => {
   it('shows a server rejection beside the state and permits retry', async () => {
-    window.location.hash = '#/discover';
+    window.location.hash = '#/operator/discover';
     const post = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: { message: 'mutations require a localhost origin' } }) });
     mockApi(post);
     render(<App />);
@@ -114,7 +114,7 @@ describe('public state joining', () => {
   });
 
   it('prevents overlapping joins and navigates using the returned state ID', async () => {
-    window.location.hash = '#/discover';
+    window.location.hash = '#/operator/discover';
     let resolve!: (value: unknown) => void;
     const pending = new Promise((done) => { resolve = done; });
     const post = vi.fn(() => pending);
@@ -131,5 +131,15 @@ describe('public state joining', () => {
     await screen.findByRole('heading', { name: 'builders' });
     expect(fetchMock).toHaveBeenCalledWith('/api/discovery/states/010203/join', expect.objectContaining({ method: 'POST' }));
     expect(screen.getByRole('status').textContent).toBe('joined state: builders');
+  });
+});
+
+describe('operator telemetry', () => {
+  it.each([null, undefined])('does not imply full synchronization when telemetry is %s', async (syncPct) => {
+    window.location.hash = '#/operator';
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => url === '/api/status' ? { syncPct, capabilities: { discovery: true } } : [] })));
+    render(<App />);
+    await screen.findByText('measurement unavailable');
+    expect(screen.queryByText('100%')).toBeNull();
   });
 });

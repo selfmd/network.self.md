@@ -121,3 +121,4 @@ export {
   MAX_EPOCH_BYTES,
   MAX_GROUP_MEMBERS,
 } from './group-state.js';
+export * from './reliable-delivery.js';

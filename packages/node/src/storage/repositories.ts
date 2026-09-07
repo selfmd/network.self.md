@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { DoubleRatchetState, SignedGroupEpoch } from '@networkselfmd/core';
+import type { DirectRatchetSession } from '../network/direct-ratchet.js';
 import {
   serializeEpoch,
   deserializeEpoch,
@@ -32,6 +33,7 @@ export interface StoredGroup {
   joined_at: number | null;
   is_public: number;
   self_md: string | null;
+  metadata_version: number;
   creator_public_key: Buffer | null;
   genesis_hash: Buffer | null;
 }
@@ -61,6 +63,7 @@ export interface StoredSenderKey {
   distribution_sequence: number;
   epoch_version: number;
   epoch_hash: Buffer | null;
+  generation_created_at: number;
 }
 
 export interface StoredKeyData {
@@ -84,6 +87,12 @@ export interface MessageQueryOptions {
 
 export class IdentityRepository {
   constructor(private db: Database.Database) {}
+
+  updateDisplayName(displayName: string): void {
+    const result = this.db.prepare('UPDATE identity SET display_name = ? WHERE id = 1')
+      .run(displayName);
+    if (result.changes !== 1) throw new Error('Identity is not initialized');
+  }
 
   createPlaintext(
     edPrivateKey: Uint8Array,
@@ -402,6 +411,12 @@ export class GroupRepository {
   }
 
   join(groupId: Uint8Array, name: string, role: string = 'member', creatorPublicKey?: Uint8Array, genesisHash?: Uint8Array): void {
+    const retained = this.findRetainedAuthority(groupId);
+    if (retained && (!creatorPublicKey || !genesisHash ||
+      !retained.creator_public_key.equals(Buffer.from(creatorPublicKey)) ||
+      !retained.genesis_hash.equals(Buffer.from(genesisHash)))) {
+      throw new Error('Group authority mismatch');
+    }
     if ((creatorPublicKey === undefined) !== (genesisHash === undefined)) {
       throw new Error(
         'Group authority must include both creator key and genesis hash',
@@ -437,6 +452,13 @@ export class GroupRepository {
   }
 
   leave(groupId: Uint8Array): void {
+    // Retain the authenticated public anchor, never membership or sender keys.
+    // A later reinvitation can then catch up through epochs missed offline.
+    this.db.prepare(`INSERT OR IGNORE INTO retained_group_authorities
+      (group_id, creator_public_key, genesis_hash)
+      SELECT group_id, creator_public_key, genesis_hash FROM groups
+      WHERE group_id = ? AND creator_public_key IS NOT NULL AND genesis_hash IS NOT NULL`)
+      .run(Buffer.from(groupId));
     this.db
       .prepare('DELETE FROM groups WHERE group_id = ?')
       .run(Buffer.from(groupId));
@@ -452,6 +474,11 @@ export class GroupRepository {
     return this.db
       .prepare('SELECT * FROM groups WHERE group_id = ?')
       .get(Buffer.from(groupId)) as StoredGroup | undefined;
+  }
+
+  findRetainedAuthority(groupId: Uint8Array): { creator_public_key: Buffer; genesis_hash: Buffer } | undefined {
+    return this.db.prepare('SELECT creator_public_key, genesis_hash FROM retained_group_authorities WHERE group_id = ?')
+      .get(Buffer.from(groupId)) as { creator_public_key: Buffer; genesis_hash: Buffer } | undefined;
   }
 
   pinAuthority(groupId: Uint8Array, creatorPublicKey: Uint8Array, genesisHash: Uint8Array): void {
@@ -512,9 +539,26 @@ export class GroupRepository {
     }
     this.db
       .prepare(
-        'UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md) WHERE group_id = ?',
+        'UPDATE groups SET is_public = ?, self_md = COALESCE(?, self_md), metadata_version = metadata_version + 1 WHERE group_id = ?',
       )
       .run(isPublic ? 1 : 0, selfMd ?? null, Buffer.from(groupId));
+  }
+
+  updateManifest(groupId: Uint8Array, selfMd: string): void {
+    const group = this.find(groupId);
+    if (!group || group.role !== 'admin') throw new Error('Only admin can update group manifest');
+    this.db.prepare('UPDATE groups SET self_md = ?, metadata_version = metadata_version + 1 WHERE group_id = ?')
+      .run(selfMd, Buffer.from(groupId));
+  }
+
+  applyMetadata(groupId: Uint8Array, selfMd: string, isPublic: boolean, version: number): boolean {
+    return this.db.prepare('UPDATE groups SET self_md = ?, is_public = ?, metadata_version = ? WHERE group_id = ? AND metadata_version < ?')
+      .run(selfMd, isPublic ? 1 : 0, version, Buffer.from(groupId), version).changes === 1;
+  }
+
+  seedPublicMetadata(groupId: Uint8Array, selfMd: string): void {
+    this.db.prepare('UPDATE groups SET self_md = ?, is_public = 1 WHERE group_id = ? AND metadata_version = 0')
+      .run(selfMd, Buffer.from(groupId));
   }
 
   listPublic(): StoredGroup[] {
@@ -723,8 +767,8 @@ export class SenderKeyRepository {
     epochHash: Uint8Array = new Uint8Array(32),
   ): void {
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index, generation_id, distribution_sequence, epoch_version, epoch_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO sender_keys (group_id, public_key, chain_key, chain_index, generation_id, distribution_sequence, epoch_version, epoch_hash, generation_created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     // Preserve only the monotonic counter when secret key material is deleted.
     // A later rejoin or key reset must not roll back the receiver's replay floor.
@@ -734,7 +778,10 @@ export class SenderKeyRepository {
         ON CONFLICT(group_id, public_key) DO UPDATE SET
           distribution_sequence = MAX(distribution_sequence, excluded.distribution_sequence)`)
         .run(Buffer.from(groupId), Buffer.from(publicKey), distributionSequence);
-      stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex, Buffer.from(generationId), this.getDistributionSequence(groupId, publicKey), epochVersion, Buffer.from(epochHash));
+      const previous = this.load(groupId, publicKey);
+      const createdAt = previous?.generation_id?.equals(Buffer.from(generationId))
+        ? previous.generation_created_at : Date.now();
+      stmt.run(Buffer.from(groupId), Buffer.from(publicKey), Buffer.from(chainKey), chainIndex, Buffer.from(generationId), this.getDistributionSequence(groupId, publicKey), epochVersion, Buffer.from(epochHash), createdAt);
     })();
   }
 
@@ -821,6 +868,14 @@ export class GroupInviteRepository {
 
   findIncoming(groupId: Uint8Array): StoredGroupInvite | undefined {
     return this.db.prepare("SELECT * FROM group_invites WHERE group_id = ? AND direction = 'incoming' AND created_at >= ? ORDER BY created_at DESC LIMIT 1").get(Buffer.from(groupId), Date.now() - 24 * 60 * 60 * 1000) as StoredGroupInvite | undefined;
+  }
+
+  listIncoming(inviteePublicKey: Uint8Array): StoredGroupInvite[] {
+    return this.db.prepare(`SELECT * FROM group_invites
+      WHERE direction = 'incoming' AND invitee_public_key = ? AND created_at >= ?
+        AND invite_id NOT LIKE 'public:%'
+      ORDER BY created_at DESC, invite_id DESC LIMIT 256`)
+      .all(Buffer.from(inviteePublicKey), Date.now() - 24 * 60 * 60 * 1000) as StoredGroupInvite[];
   }
 
   findById(inviteId: string): StoredGroupInvite | undefined {
@@ -946,6 +1001,37 @@ export class RatchetStateRepository {
       .get(peerFingerprint) as { state_json: string } | undefined;
     if (!row) return null;
     return deserializeRatchetState(row.state_json);
+  }
+
+  saveSession(peerFingerprint: string, session: DirectRatchetSession): void {
+    // Keep the original flat state readable; legacy rows without the optional
+    // receiver remain established and are never granted bootstrap eligibility.
+    const json = JSON.stringify({
+      ...JSON.parse(serializeRatchetState(session.active)),
+      bootstrapPending: session.bootstrapPending,
+      initialReceiver: session.initialReceiver ? {
+        state: session.initialReceiver.state ? serializeRatchetState(session.initialReceiver.state) : undefined,
+        expiresAt: session.initialReceiver.expiresAt,
+      } : undefined,
+    });
+    this.db.prepare(
+      'INSERT OR REPLACE INTO dm_ratchet_states (peer_fingerprint, state_json, updated_at) VALUES (?, ?, ?)',
+    ).run(peerFingerprint, json, Date.now());
+  }
+
+  loadSession(peerFingerprint: string): DirectRatchetSession | null {
+    const row = this.db.prepare('SELECT state_json FROM dm_ratchet_states WHERE peer_fingerprint = ?')
+      .get(peerFingerprint) as { state_json: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.state_json);
+    return {
+      active: deserializeRatchetState(row.state_json),
+      bootstrapPending: parsed.bootstrapPending === true ? true : undefined,
+      initialReceiver: parsed.initialReceiver ? {
+        state: parsed.initialReceiver.state ? deserializeRatchetState(parsed.initialReceiver.state) : undefined,
+        expiresAt: parsed.initialReceiver.expiresAt,
+      } : undefined,
+    };
   }
 
   delete(peerFingerprint: string): void {

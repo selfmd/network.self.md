@@ -1,3 +1,4 @@
+import { buildPublicObservation, validatePublicPublicationConfig, type PublicPublicationConfig } from './publicNetwork.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
@@ -6,7 +7,11 @@ import rateLimit from '@fastify/rate-limit';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Agent } from '@networkselfmd/node';
 import type { ApiStatus, ApiPeer, ApiState, ApiStateDetail, ApiDiscoveredState, ApiJoinResponse, ApiIdentity } from './types.js';
-import type { DashboardBasicAuth } from './config.js';
+import { validateOperatorOrigin, type DashboardBasicAuth } from './config.js';
+
+declare module 'fastify' {
+  interface FastifyContextConfig { publicSiteAsset?: boolean; }
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('hex');
@@ -35,17 +40,17 @@ function originHeader(request: FastifyRequest): string | undefined {
 
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
-async function requireLocalMutationOrigin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+async function requireMutationOrigin(request: FastifyRequest, reply: FastifyReply, operatorOrigin?: string): Promise<void> {
   const origin = originHeader(request);
   if (origin) {
-    if (!isAllowedLocalOrigin(origin)) {
-      await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost origin' } });
+    if (!isAllowedLocalOrigin(origin) && origin !== operatorOrigin) {
+      await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost or configured operator origin' } });
     }
     return;
   }
   // No Origin header (non-browser client) — verify the request comes from localhost
   if (!request.ip || !LOCALHOST_IPS.has(request.ip)) {
-    await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost origin' } });
+    await reply.status(403).send({ error: { code: 'forbidden-origin', message: 'mutations require a localhost or configured operator origin' } });
   }
 }
 
@@ -56,6 +61,9 @@ function isHexId(id: string): boolean {
 export interface DashboardAgent {
   agent: Agent;
   auth?: DashboardBasicAuth;
+  publication?: PublicPublicationConfig;
+  operatorOrigin?: string;
+  publicSite?: boolean;
 }
 
 function credentialDigest(value: string): Buffer {
@@ -73,13 +81,24 @@ function basicCredentials(header: string | undefined): string {
   }
 }
 
-export async function buildApp({ agent, auth }: DashboardAgent) {
+export async function buildApp({ agent, auth, publication, operatorOrigin, publicSite = false }: DashboardAgent) {
+  if (operatorOrigin !== undefined) {
+    operatorOrigin = validateOperatorOrigin(operatorOrigin);
+    if (!auth) throw new Error('An operator origin requires dashboard authentication');
+  }
+  if (publicSite && (!auth || publication === undefined)) {
+    throw new Error('Public site requires dashboard authentication and explicit publication configuration');
+  }
+  const approvedPublication = validatePublicPublicationConfig(publication);
   const app = Fastify();
 
   if (auth) {
     const expected = credentialDigest(`${auth.username}:${auth.password}`);
     app.addHook('onRequest', async (request, reply) => {
-      if (request.url.split('?', 1)[0] === '/healthz') return;
+      const route = request.routeOptions.url;
+      if (route === '/healthz') return;
+      if (publicSite && (request.method === 'GET' || request.method === 'HEAD') &&
+          (route === '/api/public/network' || request.routeOptions.config.publicSiteAsset === true)) return;
       const actual = credentialDigest(
         basicCredentials(request.headers.authorization),
       );
@@ -94,11 +113,21 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
 
   await app.register(cors, {
     origin: (origin, callback) => {
-      callback(null, isAllowedLocalOrigin(origin));
+      callback(null, isAllowedLocalOrigin(origin) || (operatorOrigin !== undefined && origin === operatorOrigin));
     },
   });
 
-  await app.register(helmet);
+  await app.register(helmet, { global: false });
+  app.addHook('onRequest', async (request, reply) => {
+    // Safari/WebKit upgrades even loopback asset URLs when this CSP directive
+    // is present. The local dashboard serves HTTP and has no TLS listener.
+    const localHttp = request.protocol === 'http' &&
+      ['localhost', '127.0.0.1', '::1', '[::1]'].includes(request.hostname);
+    await reply.helmet(localHttp ? {
+      contentSecurityPolicy: { directives: { 'upgrade-insecure-requests': null } },
+      strictTransportSecurity: false,
+    } : {});
+  });
   await app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
 
   const startedAt = Date.now();
@@ -143,6 +172,12 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
     return [...byId.values()];
   }
 
+  app.get('/api/public/network', async (_request, reply) => {
+    const observedAt = new Date().toISOString();
+    reply.header('Cache-Control', 'no-store');
+    return buildPublicObservation({ states: getMergedStates(), peers: agent.listPeers(), observedAt }, approvedPublication);
+  });
+
   app.get('/api/status', async (): Promise<ApiStatus> => {
     const peers = agent.listPeers();
     const states = getMergedStates();
@@ -155,9 +190,9 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
       stateCount: states.length,
       uptime: Date.now() - startedAt,
       online: agent.isRunning,
-      syncPct: 100,
-      latencyMsP50: 0,
-      latencyMsP95: 0,
+      syncPct: null,
+      latencyMsP50: null,
+      latencyMsP95: null,
       capabilities: {
         wireTrace: false,
         keyRotation: false,
@@ -191,7 +226,7 @@ export async function buildApp({ agent, auth }: DashboardAgent) {
     return getDiscoveredStates();
   });
 
-  app.post<{ Params: { id: string } }>('/api/discovery/states/:id/join', { preHandler: requireLocalMutationOrigin }, async (request, reply): Promise<ApiJoinResponse> => {
+  app.post<{ Params: { id: string } }>('/api/discovery/states/:id/join', { preHandler: (request, reply) => requireMutationOrigin(request, reply, operatorOrigin) }, async (request, reply): Promise<ApiJoinResponse> => {
     const { id } = request.params;
     if (!isHexId(id)) {
       reply.status(400);

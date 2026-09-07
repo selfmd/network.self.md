@@ -23,309 +23,108 @@ export function getChatHTML(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TTYA — ${titleFingerprint}</title>
 <style${nonces ? ` nonce="${escapeHTML(nonces.style)}"` : ''}>
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600&display=swap');
-
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
 :root {
-  --bg: #0b0d10;
-  --panel: rgba(15, 15, 18, 0.86);
-  --line: rgba(255, 255, 255, 0.075);
-  --line-strong: rgba(255, 255, 255, 0.14);
-  --text: rgba(248, 252, 255, 0.92);
-  --muted: rgba(214, 226, 232, 0.58);
-  --faint: rgba(214, 226, 232, 0.34);
-  --green: #41e98d;
-  --purple: #b4a0ff;
-  --cyan: #00bcd4;
-  --warn: #febc2e;
-  --danger: #ff5f57;
-  --r-lg: 14px;
-  --r-md: 10px;
-  --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  --paper: #f8f6f0;
+  --ink: #0c0d0e;
+  --pink: #ff1484;
+  --warm: #ebe7dd;
+  --line: #c8c5bd;
+  --muted: #66655f;
+  --body: Arial, Helvetica, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
-
-html, body {
-  height: 100%;
-  background:
-    radial-gradient(circle at 12% 8%, rgba(65, 233, 141, 0.12), transparent 26rem),
-    radial-gradient(circle at 86% 18%, rgba(180, 160, 255, 0.13), transparent 24rem),
-    radial-gradient(circle at 72% 86%, rgba(0, 188, 212, 0.10), transparent 28rem),
-    var(--bg);
-  color: var(--text);
-  font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-}
-
-#app {
-  max-width: 720px;
-  margin: 0 auto;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  padding: 18px 18px 12px;
-  gap: 14px;
-}
-
-/* Header */
-#header {
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, var(--panel), rgba(10, 11, 14, 0.92));
-  border-radius: var(--r-lg);
-  padding: 14px 16px;
-  box-shadow: var(--shadow);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-  position: relative;
-  overflow: hidden;
-}
-
-#header::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(255,255,255,.03), transparent 44%);
-}
-
-.brand { display: inline-flex; align-items: center; gap: 7px; text-decoration: none; letter-spacing: -0.04em; color: var(--text); }
-.brand-mark { color: var(--green); border: 1px solid rgba(65,233,141,.35); padding: 2px 6px; border-radius: 999px; font-size: 12px; }
-.brand b { font-weight: 600; }
-.brand .ext { color: var(--muted); }
-
-.header-sep { width: 1px; height: 20px; background: var(--line-strong); }
-
-.agent-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
-.agent-fp { color: var(--green); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-#status-pill {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--muted);
-  flex-shrink: 0;
-}
-
-#status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-  flex-shrink: 0;
-}
-
-#status-dot.connecting { background: var(--warn); }
-#status-dot.pending { background: var(--warn); animation: pulse 2s ease-in-out infinite; }
-#status-dot.approved { background: var(--green); box-shadow: 0 0 12px rgba(65,233,141,.4); }
-#status-dot.rejected { background: var(--danger); }
-#status-dot.disconnected { background: var(--faint); }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-/* Chat area */
-#chat-card {
-  flex: 1;
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, var(--panel), rgba(10, 11, 14, 0.92));
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  position: relative;
-  min-height: 0;
-}
-
-#chat-card::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(255,255,255,.03), transparent 44%);
-}
-
-#messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  scroll-behavior: smooth;
-  position: relative;
-  z-index: 1;
-}
-
-#messages::-webkit-scrollbar { width: 4px; }
-#messages::-webkit-scrollbar-track { background: transparent; }
-#messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 2px; }
-
-.msg {
-  max-width: 80%;
-  padding: 10px 14px;
-  border-radius: var(--r-md);
-  word-wrap: break-word;
-  white-space: pre-wrap;
-  font-size: 13px;
-  line-height: 1.5;
-  animation: fadeIn 0.2s ease-out;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.msg.visitor {
-  align-self: flex-end;
-  background: rgba(65, 233, 141, 0.12);
-  border: 1px solid rgba(65, 233, 141, 0.2);
-  color: var(--text);
-}
-
-.msg.agent {
-  align-self: flex-start;
-  background: rgba(180, 160, 255, 0.1);
-  border: 1px solid rgba(180, 160, 255, 0.18);
-  color: var(--text);
-}
-
-.msg.system {
-  align-self: center;
-  background: transparent;
-  border: none;
-  color: var(--faint);
-  font-size: 11px;
-  padding: 4px 0;
-}
-
-#empty-state {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--faint);
-  font-size: 12px;
-  text-align: center;
-  padding: 40px;
-  line-height: 1.7;
-}
-
-/* Input area */
-#input-area {
-  padding: 12px 16px;
-  border-top: 1px solid var(--line);
-  flex-shrink: 0;
-  position: relative;
-  z-index: 1;
-}
-
-#input-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-end;
-}
-
-#msg-input {
-  flex: 1;
-  padding: 10px 14px;
-  background: rgba(255,255,255,.035);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.45;
-  resize: none;
-  outline: none;
-  max-height: 120px;
-  transition: border-color 0.15s;
-}
-
-#msg-input:focus { border-color: rgba(65, 233, 141, 0.35); }
-#msg-input::placeholder { color: var(--faint); }
-
-#send-btn {
-  padding: 9px 16px;
-  border-radius: 999px;
-  border: 1px solid rgba(65, 233, 141, 0.45);
-  background: var(--green);
-  color: var(--bg);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  flex-shrink: 0;
-  transition: transform 0.16s ease, filter 0.16s ease, opacity 0.16s ease;
-}
-
-#send-btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); }
-#send-btn:disabled { opacity: 0.3; cursor: default; }
-
-/* Footer */
-#footer {
-  text-align: center;
-  font-size: 10px;
-  color: var(--faint);
-  flex-shrink: 0;
-}
-
-#footer a { color: var(--muted); text-decoration: none; }
-#footer a:hover { color: var(--green); }
-
+html, body { min-height: 100%; background: var(--paper); color: var(--ink); font: 14px/1.6 var(--body); -webkit-font-smoothing: antialiased; }
+::selection { background: var(--pink); color: var(--ink); }
+a { color: inherit; text-underline-offset: 4px; }
+button, textarea { font: inherit; border-radius: 2px; }
+a:focus-visible, button:focus-visible, textarea:focus-visible { outline: 3px solid var(--pink); outline-offset: 4px; }
+#app { width: 100%; max-width: 1080px; margin: 0 auto; height: 100dvh; min-height: 480px; display: flex; flex-direction: column; padding: 28px 36px max(20px, env(safe-area-inset-bottom)); gap: 22px; }
+#header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; flex-shrink: 0; padding: 0 0 22px; border-bottom: 1px solid var(--ink); }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; white-space: nowrap; }
+.brand-mark { padding: 2px 6px; background: var(--ink); color: var(--pink); box-shadow: 2px 2px 0 var(--pink); font: 700 13px/1.7 var(--mono); }
+.brand b { font: 900 25px/1.1 var(--body); }
+.brand .ext { color: var(--pink); }
+.header-sep { width: 1px; height: 25px; background: var(--line); }
+.agent-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 70px; }
+.agent-fp { color: var(--muted); font: 11px/1.6 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status-pill { display: flex; align-items: center; gap: 8px; border: 1px solid var(--ink); padding: 7px 10px; font: 10px/1.5 var(--mono); max-width: 100%; }
+#status-dot { width: 7px; height: 7px; background: var(--muted); flex-shrink: 0; }
+#status-dot.connecting, #status-dot.pending { background: var(--pink); }
+#status-dot.approved { background: var(--ink); }
+#status-dot.rejected { background: var(--pink); }
+#status-dot.disconnected { background: var(--muted); }
+#chat-card { flex: 1; display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--ink); background: var(--paper); box-shadow: 4px 4px 0 var(--ink); overflow: hidden; }
+#chat-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 15px; flex-wrap: wrap; padding: 20px 24px; background: var(--ink); color: var(--paper); }
+#chat-heading h1 { font: 800 clamp(25px, 4vw, 38px)/1.15 var(--body); text-wrap: balance; }
+#chat-heading p { color: var(--paper); font: 10px/1.6 var(--mono); }
+#messages { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px; display: flex; flex-direction: column; gap: 14px; scrollbar-color: var(--line) var(--paper); }
+.msg { max-width: 82%; padding: 12px 16px; border: 1px solid var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; font: 14px/1.6 var(--body); }
+.msg.visitor { align-self: flex-end; background: var(--warm); box-shadow: 3px 3px 0 var(--pink); }
+.msg.agent { align-self: flex-start; background: var(--ink); color: var(--paper); }
+.msg.system { align-self: stretch; max-width: 100%; background: transparent; border: 0; border-left: 2px solid var(--pink); color: var(--muted); font: 11px/1.7 var(--mono); padding: 4px 12px; }
+#empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); padding: 36px; text-align: center; font: 12px/1.9 var(--mono); text-wrap: pretty; }
+#input-area { padding: 18px 24px; border-top: 1px solid var(--ink); background: var(--warm); flex-shrink: 0; }
+#input-row { display: flex; gap: 12px; align-items: flex-end; }
+#msg-input { flex: 1; min-width: 0; padding: 12px; background: var(--paper); border: 1px solid var(--ink); color: var(--ink); font: 13px/1.5 var(--mono); resize: none; max-height: 120px; }
+#msg-input::placeholder { color: var(--muted); }
+#send-btn { min-height: 45px; padding: 12px 20px; border: 1px solid var(--ink); background: var(--pink); color: var(--ink); box-shadow: 2px 2px 0 var(--ink); cursor: pointer; font: 11px/1.6 var(--mono); flex-shrink: 0; }
+#send-btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+#send-btn:disabled { background: var(--paper); color: var(--muted); border-color: var(--line); box-shadow: none; cursor: default; }
+#footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font: 10px/1.7 var(--mono); flex-shrink: 0; }
+#footer a:hover { color: var(--ink); text-decoration-color: var(--pink); }
 @media (max-width: 600px) {
-  #app { padding: 10px 10px 8px; gap: 10px; }
-  #header { flex-wrap: wrap; padding: 10px 12px; }
-  .agent-fp { font-size: 11px; }
+  #app { padding: max(18px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); gap: 16px; }
+  #header { gap: 12px; padding-bottom: 16px; }
+  .agent-info { flex-basis: calc(100% - 200px); }
+  .brand b { font-size: 23px; }
+  #status-pill { margin-left: auto; }
+  #chat-heading { padding: 18px; }
+  #chat-heading p { font-size: 9px; }
+  #messages { padding: 18px; gap: 12px; }
+  .msg { max-width: 92%; padding: 10px 12px; font-size: 13px; }
+  #empty-state { padding: 20px 0; font-size: 11px; }
+  #input-area { padding: 14px; }
+  #input-row { gap: 8px; }
+  #send-btn { padding-inline: 14px; }
+  #msg-input { font-size: 16px; }
+  #footer { font-size: 9px; }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
-}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
 <body>
 <div id="app">
   <div id="header">
     <span class="brand">
-      <span class="brand-mark">self</span><b>network</b><span class="ext">.md</span>
+      <span class="brand-mark">[!]</span><b>self<span class="ext">.md</span></b>
     </span>
     <span class="header-sep"></span>
     <span class="agent-info">
       <span class="agent-fp" title="${htmlFingerprint}">${htmlFingerprint}</span>
     </span>
-    <span id="status-pill">
+    <span id="status-pill" role="status" aria-live="polite">
       <span id="status-dot" class="connecting"></span>
       <span id="status-text">connecting</span>
     </span>
   </div>
 
   <div id="chat-card">
-    <div id="messages">
+    <div id="chat-heading"><h1>talk to an agent.</h1><p>Network / TTYA visitor chat</p></div>
+    <div id="messages" role="log" aria-label="conversation" aria-live="polite">
       <div id="empty-state">send a message to start the conversation.<br>the agent will be notified.</div>
     </div>
 
     <div id="input-area">
       <div id="input-row">
-        <textarea id="msg-input" rows="1" placeholder="type a message..." autocomplete="off"></textarea>
+        <textarea aria-label="message to the agent" id="msg-input" rows="1" placeholder="type a message..." autocomplete="off"></textarea>
         <button id="send-btn" disabled>send</button>
       </div>
     </div>
   </div>
 
   <div id="footer">
-    <a href="https://github.com/selfmd/network.self.md" target="_blank" rel="noopener">ttya</a> — encrypted p2p, relay stores nothing
+    <a href="https://github.com/shmlkv/network.self.md" target="_blank" rel="noopener">Network by self.md ↗</a><span>TTYA / a direct conversation</span>
   </div>
 </div>
 

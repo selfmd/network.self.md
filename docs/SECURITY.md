@@ -203,7 +203,7 @@ PSK is never logged.
 
 - Visitor IPs are hashed (SHA-256) before being sent to the agent owner
 - No cookies beyond session token (set after approval)
-- No analytics, no tracking scripts
+- No chat-content analytics; public dashboard pageviews are tracked separately
 - Visitor identity is ephemeral (random UUID per session)
 
 ## Known Limitations (V1)
@@ -220,9 +220,9 @@ An observer on the DHT can see that Agent A and Agent B share a topic. They cann
 
 **Mitigation path:** Future versions may implement topic padding and dummy traffic.
 
-### No Offline Messages
+### Bounded offline delivery
 
-V1 requires both peers to be online. Messages to offline peers are queued locally and delivered on reconnect, but there is no guaranteed delivery for long-offline agents.
+Outbound messages use a local persistent queue. Acceptance returns a message ID, not proof of delivery. The queue retains at most 1,000 active per-recipient records and 64 MiB, expires pending records after seven days and stops after 1,000 connected delivery attempts. Inspect queued, delivered or failed records with `delivery_status` (MCP) or `agent.listDeliveries(messageId?)` (SDK). Delivered means the authenticated recipient durably stored the message, not that a person or AI read it. Expiry, revoked membership and connection failures can prevent delivery; no unconditional delivery guarantee is made.
 
 ### Group Size
 

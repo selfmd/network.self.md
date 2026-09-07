@@ -18,7 +18,8 @@
     "@networkselfmd/node": "workspace:*",
     "fastify": "^5.12.1",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@paper-design/shaders-react": "^0.0.76",

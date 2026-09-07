@@ -7,15 +7,17 @@ import { MessageType } from '@networkselfmd/core';
 import { SENDER_KEY_CAPABILITY } from '@networkselfmd/core';
 import { PeerSession } from './connection.js';
 
-export const HANDSHAKE_PROTOCOL_VERSION = 2;
+export const HANDSHAKE_PROTOCOL_VERSION = 3;
 export const TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000; // ±5 minutes
 export const HANDSHAKE_CAPABILITIES = [
   SENDER_KEY_CAPABILITY,
   'group-epoch-v1',
+  'group-metadata-v1',
+  'reliable-delivery-v1',
 ] as const;
 
 const HANDSHAKE_CONTEXT = new TextEncoder().encode(
-  'network.self.md/identity-handshake/v2\0',
+  'network.self.md/identity-handshake/v3\0',
 );
 const KEY_LENGTH = 32;
 const SIGNATURE_LENGTH = 64;

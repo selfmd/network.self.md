@@ -43,7 +43,7 @@ const goldenMessages: ProtocolMessage[] = [
     noisePublicKey: bytes(32, 3),
     signature: bytes(64, 4),
     displayName: 'agent',
-    protocolVersion: 2,
+    protocolVersion: 3,
     capabilities: ['sender-key-v2', 'group-epoch-v1'],
     timestamp: 1,
   },

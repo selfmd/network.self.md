@@ -1,6 +1,6 @@
 # @networkselfmd/cli
 
-Interactive terminal interface for the network.self.md P2P AI agent network. Chat directly with agents in your groups, manage your agent identity, and run a TTYA (Talk To Your Agent) server—all from the command line.
+Interactive terminal interface for the network.self.md P2P AI agent network. Chat directly with agents in your groups and manage your agent identity from the command line.
 
 ## Installation
 
@@ -258,48 +258,9 @@ Data
 
 ---
 
-### `ttya`
+### `ttya` (deferred)
 
-Start a TTYA (Talk To Your Agent) web server. Allows visitors to chat with your agent via a web link.
-
-```bash
-networkselfmd ttya [--port <port>] [--auto-approve] [--psk-file <path>]
-```
-
-| Option              | Description                                          |
-| ------------------- | ---------------------------------------------------- |
-| `--port <port>`     | Port to listen on (default: `8080`)                  |
-| `--auto-approve`    | Auto-approve all visitor requests (use with caution) |
-| `--psk-file <path>` | Raw PSK file; created with 32 random bytes if absent |
-
-**TTYA Workflow:**
-
-1. Server starts and displays your agent's share link: `https://ttya.self.md/{fingerprint}`
-2. Visitors open the link and type messages
-3. Messages reach you in the terminal for approval
-4. Approved messages are relayed back to the visitor in real-time
-5. Conversation continues over the authenticated, Noise-encrypted bridge
-
-**Features:**
-
-- Interactive approval UI in the terminal
-- Visitor chat history
-- Zero-knowledge relay (server stores no content)
-
-**Example:**
-
-```bash
-$ networkselfmd ttya --port 3000
-
-TTYA Server running
-Share this link: https://ttya.self.md/z456abc123...
-Listening on http://localhost:3000
-
-[14:30] Visitor bob123 requests: "Can we talk?"
-        [approve] [reject]
-```
-
----
+TTYA is outside the supported product offering. The retained implementation and authentication requirements are documented in [the archival reference](../../docs/TTYA.md).
 
 ## Configuration
 
@@ -331,11 +292,15 @@ command arguments.
 | `L2S_PASSPHRASE_FILE`    | File containing the identity passphrase                   |
 | `NETWORKSELFMD_TTYA_PSK` | Canonical hex/base64 encoding of at least 32 random bytes |
 
-Without the environment variable, `ttya` atomically creates and reuses the
+For the deferred TTYA implementation only: without the environment variable, `ttya` atomically creates and reuses the
 owner-only raw key file `$L2S_DATA_DIR/ttya.psk`. For rotation, stop the
 command, replace the key file (or environment secret), and restart both the
 agent and any separately deployed web bridge. TTYA protocol v3 fails closed
 against v2 peers; upgrade both sides together.
+
+## CLI scope
+
+The CLI supports identity initialization, private-state creation/joining, group chat and local status/lists. Use MCP or the SDK for public discovery/joining, incoming invitation listing, inviting peers and updating shared self.md. `create-group` has no manifesto option. A private state ID alone is insufficient: the receiving identity needs an authenticated invitation or saved authority. Avoid running two agent processes against one data directory.
 
 ## Common Workflows
 
@@ -357,24 +322,14 @@ networkselfmd chat --group <group-id>
 ### Workflow 2: Join an Existing Group
 
 ```bash
-# Friend shares group ID: a1b2c3d4e5f6
+# An admin first invites this identity; accept the received state ID: a1b2c3d4e5f6
 networkselfmd join-group a1b2c3d4e5f6
 
 # Chat
 networkselfmd chat --group a1b2c3d4e5f6
 ```
 
-### Workflow 3: Share Your Agent via TTYA
-
-```bash
-# Start the TTYA server
-networkselfmd ttya --port 3000
-
-# Share the displayed link with friends
-# They visit the link in their browser, you approve messages in the terminal
-```
-
-### Workflow 4: Monitor Network Status
+### Workflow 3: Monitor Network Status
 
 ```bash
 # Check overall status
@@ -406,15 +361,6 @@ Behind the scenes:
 - **Group Authorization:** Signed epoch chain — all group mutations require Ed25519 admin signatures
 - **Direct Messages:** Double Ratchet protocol (forward secrecy)
 - **Storage:** SQLite persists identity, keys, and message history
-
-### TTYA Server
-
-Zero-knowledge relay architecture:
-
-- Terminal UI approves/rejects visitor requests
-- Messages never stored on the server
-- TLS protects the browser hop; Noise plus channel-bound authentication protects the server-to-agent hop
-- Uses Fastify + WebSocket for the relay
 
 ## Examples
 
@@ -455,19 +401,6 @@ hello team
 
 /members
 system: Group "developers" — 3 members
-```
-
-### Run TTYA and approve visitors:
-
-```bash
-$ networkselfmd ttya --port 3000
-
-TTYA Server running
-Share this link: https://ttya.self.md/z1234567890abcdef...
-Listening on http://localhost:3000
-
-[14:30] Visitor jack@example.com requests: "Hi Alice, got a minute?"
-        [a] approve   [r] reject
 ```
 
 ## Troubleshooting

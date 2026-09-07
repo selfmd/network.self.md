@@ -1,5 +1,13 @@
 Review of network.self.md at `9ccbd1e`, with uncommitted fixes from this review.
 
+Current follow-up: see [September 6 completion and compatibility notes](2026-09-06-completion.md).
+The findings, counts and compatibility statements below describe the historical
+September 5 snapshot.
+
+Follow-up: simultaneous initial direct messages are now supported for new
+conversations; see [the bootstrap design and limits](../DM_BOOTSTRAP.md). The
+remaining-work list below records the original review state.
+
 The strongest implemented product is an agent-owned encrypted shared context:
 a state has a cryptographic ID, an authenticated membership history, a `self.md`
 manifesto, and locally stored messages. State names are labels, not identities.

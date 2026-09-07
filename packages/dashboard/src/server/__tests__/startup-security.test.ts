@@ -93,3 +93,23 @@ describe('dashboard protected startup', () => {
     ).rejects.toThrow(/either/i);
   });
 });
+
+describe('explicit remote dashboard boundaries', () => {
+  const credentials = { DASHBOARD_USERNAME: 'operator', DASHBOARD_PASSWORD: 'a-strong-dashboard-password' };
+  it('accepts one exact authenticated operator origin', async () => {
+    expect(await dashboardServerOptions({ ...credentials, DASHBOARD_OPERATOR_ORIGIN: 'https://operator.example:443' }))
+      .toMatchObject({ operatorOrigin: 'https://operator.example' });
+  });
+  it.each(['https://operator.example/path', 'https://operator.example/..', 'https://*.example', 'https://user:pass@operator.example', 'https://operator.example?x=1', 'https://operator.example#x', '*', 'null', 'ftp://operator.example'])('rejects unsafe origin %s', async (origin) => {
+    await expect(dashboardServerOptions({ ...credentials, DASHBOARD_OPERATOR_ORIGIN: origin })).rejects.toThrow();
+  });
+  it('requires credentials for a configured operator origin', async () => {
+    await expect(dashboardServerOptions({ DASHBOARD_OPERATOR_ORIGIN: 'https://operator.example' })).rejects.toThrow(/authentication/);
+  });
+  it('requires deliberate public-site opt-in, authentication and a publication file', async () => {
+    await expect(dashboardServerOptions({ ...credentials, DASHBOARD_PUBLIC_SITE: 'yes' })).rejects.toThrow(/true or false/);
+    await expect(dashboardServerOptions({ ...credentials, DASHBOARD_PUBLIC_SITE: 'true' })).rejects.toThrow(/NETWORK_PUBLICATION_CONFIG/);
+    await expect(dashboardServerOptions({ DASHBOARD_PUBLIC_SITE: 'true', NETWORK_PUBLICATION_CONFIG: '/config/public.json' })).rejects.toThrow(/authentication/);
+    expect(await dashboardServerOptions({ ...credentials, DASHBOARD_PUBLIC_SITE: 'true', NETWORK_PUBLICATION_CONFIG: '/config/public.json' })).toMatchObject({ publicSite: true });
+  });
+});

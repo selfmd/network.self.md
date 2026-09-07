@@ -1,9 +1,11 @@
+import { readFile } from 'node:fs/promises';
+import { validatePublicPublicationConfig } from './publicNetwork.js';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Agent } from '@networkselfmd/node';
 import { attachAgentLogging } from './agentEvents.js';
 import { buildApp } from './routes.js';
+import { registerClientAssets } from './static.js';
 import { dashboardAgentOptions, dashboardServerOptions } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -11,6 +13,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 async function main() {
   const agentOptions = dashboardAgentOptions();
   const serverOptions = await dashboardServerOptions();
+
+  const publication = process.env.NETWORK_PUBLICATION_CONFIG
+    ? validatePublicPublicationConfig(JSON.parse(await readFile(process.env.NETWORK_PUBLICATION_CONFIG, 'utf8')))
+    : undefined;
 
   // Dashboard IS an agent — it joins the P2P network, discovers peers and states
   const agent = new Agent(agentOptions);
@@ -22,24 +28,9 @@ async function main() {
   console.log(`Display name: ${agent.identity.displayName ?? '(none)'}`);
   console.log(`Data dir: ${agentOptions.dataDir}`);
 
-  const app = await buildApp({ agent, auth: serverOptions.auth });
+  const app = await buildApp({ agent, auth: serverOptions.auth, publication, operatorOrigin: serverOptions.operatorOrigin, publicSite: serverOptions.publicSite });
 
-  // Serve static client build if it exists
-  const clientDist = path.resolve(__dirname, '../../dist/client');
-  if (existsSync(clientDist)) {
-    const fastifyStatic = await import('@fastify/static');
-    await app.register(fastifyStatic.default, {
-      root: clientDist,
-      wildcard: false,
-    });
-
-    app.setNotFoundHandler(async (request, reply) => {
-      if (request.url.startsWith('/api')) {
-        return reply.status(404).send({ error: 'Not found' });
-      }
-      return reply.sendFile('index.html');
-    });
-  }
+  await registerClientAssets(app, path.resolve(__dirname, '../../dist/client'));
 
   await app.listen({ port: serverOptions.port, host: serverOptions.host });
   console.log(

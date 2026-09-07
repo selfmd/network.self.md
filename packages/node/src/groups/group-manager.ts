@@ -51,6 +51,7 @@ import {
 } from '../network/protocol-security.js';
 
 const KEY_ROTATION_INTERVAL = 100;
+export const GROUP_KEY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface GroupManagerOptions {
   identity: AgentIdentity;
@@ -63,6 +64,7 @@ export interface GroupManagerOptions {
   invites: GroupInviteRepository;
   replay: ProtocolReplayRepository;
   bootstraps: GroupBootstrapRepository;
+  enqueueDelivery?: (groupId: Uint8Array, content: string) => Promise<string>;
 }
 
 export class GroupManager extends EventEmitter {
@@ -77,6 +79,8 @@ export class GroupManager extends EventEmitter {
   private replayRepo: ProtocolReplayRepository;
   private bootstrapRepo: GroupBootstrapRepository;
   private messageCounters = new Map<string, number>();
+  private rotationTimer?: ReturnType<typeof setInterval>;
+  private enqueueDelivery?: GroupManagerOptions['enqueueDelivery'];
 
   constructor(options: GroupManagerOptions) {
     super();
@@ -90,6 +94,64 @@ export class GroupManager extends EventEmitter {
     this.inviteRepo = options.invites;
     this.replayRepo = options.replay;
     this.bootstrapRepo = options.bootstraps;
+    this.enqueueDelivery = options.enqueueDelivery;
+  }
+
+  startKeyRotation(): void {
+    if (this.rotationTimer) return;
+    this.rotationTimer = setInterval(() => {
+      this.rotateExpiredKeys().catch((error) => this.emit('error', error));
+    }, 60_000);
+    this.rotationTimer.unref();
+  }
+
+  stopKeyRotation(): void {
+    if (this.rotationTimer) clearInterval(this.rotationTimer);
+    this.rotationTimer = undefined;
+  }
+
+  async rotateExpiredKeys(): Promise<void> {
+    for (const group of this.groupRepo.list()) {
+      await this.rotateExpiredKey(new Uint8Array(group.group_id));
+    }
+  }
+
+  async rotateExpiredKey(groupId: Uint8Array): Promise<void> {
+    const key = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
+    // Count actual encryptions, including per-recipient reliable attempts;
+    // both the count and generation age survive a process restart.
+    if (key && (key.chain_index >= KEY_ROTATION_INTERVAL ||
+      Date.now() - key.generation_created_at >= GROUP_KEY_MAX_AGE_MS)) {
+      await this.rotateKeys(groupId);
+    }
+  }
+
+  broadcastMetadata(groupId: Uint8Array): void {
+    const latest = this.epochRepo.getLatestEpoch(Buffer.from(groupId).toString('hex'));
+    if (!latest) return;
+    for (const member of latest.epoch.members) {
+      if (buffersEqual(member.publicKey, this.identity.edPublicKey)) continue;
+      const session = this.swarm.getSession(fingerprintFromPublicKey(member.publicKey));
+      if (session) this.sendMetadata(groupId, session);
+    }
+  }
+
+  private sendMetadata(groupId: Uint8Array, session: PeerSession): void {
+    if (!session.peerCapabilities.has('group-metadata-v1') || !session.peerPublicKey) return;
+    const group = this.groupRepo.find(groupId);
+    const latest = this.epochRepo.getLatestEpoch(Buffer.from(groupId).toString('hex'));
+    if (!group?.creator_public_key || !latest ||
+      !buffersEqual(new Uint8Array(group.creator_public_key), this.identity.edPublicKey) ||
+      !this.isAdminInEpoch(latest, this.identity.edPublicKey) ||
+      !this.isMemberInEpoch(latest, session.peerPublicKey)) return;
+    session.send(signAuthenticatedMessage<GroupManagementMessage>({
+      type: MessageType.GroupManagement, action: 'metadata', groupId,
+      selfMd: group.self_md ?? '', isPublic: group.is_public === 1,
+      metadataVersion: group.metadata_version,
+      epochVersion: latest.epoch.version, epochHash: latest.hash,
+      senderFingerprint: this.identity.fingerprint,
+      recipientFingerprint: validateReadySession(session), timestamp: Date.now(),
+    }, this.identity.edPrivateKey));
   }
 
   async createGroup(name: string): Promise<{
@@ -188,6 +250,13 @@ export class GroupManager extends EventEmitter {
       this.syncMembershipToEpoch(groupId, latest);
       const localKey = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
       if (!localKey?.generation_id) await this.rotateKeys(groupId);
+      // Existing connections do not trigger key exchange again after leaving.
+      // Recover every member's erased receiving key through authenticated sync.
+      for (const member of latest.epoch.members) {
+        if (buffersEqual(member.publicKey, this.identity.edPublicKey)) continue;
+        const peer = this.swarm.getSession(fingerprintFromPublicKey(member.publicKey));
+        if (peer) this.requestEpochSync(groupId, peer, latest);
+      }
     }
 
     const acceptInviteId = anchor.inviteId ?? `public:${this.identity.fingerprint}`;
@@ -306,6 +375,11 @@ export class GroupManager extends EventEmitter {
       direction: 'outgoing',
       created_at: Date.now(),
     });
+    // A former member may have missed its removal and subsequent epochs while
+    // offline. Authenticate that history before it validates this invitation.
+    if (this.epochRepo.getEpochChain(groupIdHex).some((signed) => this.isMemberInEpoch(signed, peerPublicKey))) {
+      this.sendEpochChain(groupId, session, 0);
+    }
     session.send(message);
 
     this.emit('group:inviteSent', { groupId, peerPublicKey, inviteId });
@@ -602,7 +676,8 @@ export class GroupManager extends EventEmitter {
   async handleGroupMessage(
     session: PeerSession,
     message: GroupEncryptedMessage,
-  ): Promise<void> {
+    delivery?: import('../network/delivery-manager.js').DeliveryContext,
+  ): Promise<boolean> {
     try {
       const reservation = validateAuthenticatedMessage(
         session,
@@ -680,12 +755,13 @@ export class GroupManager extends EventEmitter {
         );
 
         const decoded = new TextDecoder().decode(plaintext);
+        delivery?.accept(decoded);
         this.messageRepo.insert({
-          id: createId(),
+          id: delivery?.messageId ?? createId(),
           groupId: message.groupId,
           senderPublicKey,
           content: decoded,
-          timestamp: message.timestamp,
+          timestamp: delivery?.timestamp ?? message.timestamp,
           type: 'group',
         });
         return decoded;
@@ -696,17 +772,21 @@ export class GroupManager extends EventEmitter {
         senderPublicKey,
         senderFingerprint: session.peerFingerprint,
         content,
-        timestamp: message.timestamp,
+        timestamp: delivery?.timestamp ?? message.timestamp,
       });
+      return true;
     } catch (error) {
       this.emit('error', error);
+      return false;
     }
   }
 
   async sendGroupMessage(
     groupId: Uint8Array,
     content: string,
-  ): Promise<void> {
+  ): Promise<string> {
+    await this.rotateExpiredKey(groupId);
+    if (this.enqueueDelivery) return this.enqueueDelivery(groupId, content);
     const latest = this.epochRepo.getLatestEpoch(
       Buffer.from(groupId).toString('hex'),
     );
@@ -796,6 +876,27 @@ export class GroupManager extends EventEmitter {
       await this.rotateKeys(groupId);
       this.messageCounters.set(groupHex, 0);
     }
+    return messageId;
+  }
+
+  /** Called after fresh key distribution, inside the outbox transaction. */
+  encryptDelivery(groupId: Uint8Array, content: string): GroupEncryptedMessage {
+    const latest = this.epochRepo.getLatestEpoch(Buffer.from(groupId).toString('hex'));
+    if (!latest || !this.isMemberInEpoch(latest, this.identity.edPublicKey)) throw new Error('Sender is revoked');
+    const key = this.senderKeyRepo.load(groupId, this.identity.edPublicKey);
+    if (!key?.generation_id || !key.epoch_hash || key.epoch_version !== latest.epoch.version || !buffersEqual(key.epoch_hash, latest.hash)) throw new Error('No current sender key');
+    const plaintext = new TextEncoder().encode(content);
+    if (!plaintext.length || plaintext.length > 65536) throw new Error('Group message must be 1..65536 bytes');
+    const aad = groupMessageAad(groupId, this.identity.edPublicKey, key.generation_id, key.epoch_version, key.epoch_hash, key.chain_index);
+    const encrypted = SenderKeys.encrypt({ chainKey: new Uint8Array(key.chain_key), chainIndex: key.chain_index }, plaintext, aad);
+    this.senderKeyRepo.store(groupId, this.identity.edPublicKey, encrypted.nextState.chainKey, encrypted.nextState.chainIndex,
+      key.generation_id, key.distribution_sequence, key.epoch_version, key.epoch_hash);
+    return signAuthenticatedMessage<GroupEncryptedMessage>({
+      type: MessageType.GroupMessage, groupId, senderFingerprint: this.identity.fingerprint,
+      chainIndex: encrypted.chainIndex, generationId: new Uint8Array(key.generation_id),
+      epochVersion: key.epoch_version, epochHash: new Uint8Array(key.epoch_hash),
+      ciphertext: encrypted.ciphertext, nonce: encrypted.nonce, timestamp: Date.now(),
+    }, this.identity.edPrivateKey);
   }
 
   async rotateKeys(groupId: Uint8Array, invalidateRemote = false): Promise<void> {
@@ -827,6 +928,7 @@ export class GroupManager extends EventEmitter {
       | { kind: 'invited' }
       | { kind: 'accept'; epoch?: SignedGroupEpoch }
       | { kind: 'sync'; fromVersion: number }
+      | { kind: 'metadata' }
       | { kind: 'leave' }
       | { kind: 'kicked' };
 
@@ -904,6 +1006,22 @@ export class GroupManager extends EventEmitter {
               receivedAt: message.timestamp,
             });
             return { kind: 'invited' };
+          }
+
+          case 'metadata': {
+            if (!group?.creator_public_key || !latestEpoch ||
+              !buffersEqual(new Uint8Array(group.creator_public_key), senderPublicKey) ||
+              !this.isAdminInEpoch(latestEpoch, senderPublicKey) ||
+              !this.isMemberInEpoch(latestEpoch, this.identity.edPublicKey) ||
+              message.epochVersion !== latestEpoch.epoch.version ||
+              !message.epochHash || !buffersEqual(message.epochHash, latestEpoch.hash) ||
+              typeof message.selfMd !== 'string' || Buffer.byteLength(message.selfMd, 'utf8') > 16 * 1024 ||
+              typeof message.isPublic !== 'boolean' ||
+              !Number.isSafeInteger(message.metadataVersion) || message.metadataVersion! < 0) {
+              throw new Error('Rejected group metadata: unauthorized or invalid context');
+            }
+            this.groupRepo.applyMetadata(message.groupId, message.selfMd, message.isPublic, message.metadataVersion!);
+            return { kind: 'metadata' };
           }
 
           case 'accept': {
@@ -1048,8 +1166,13 @@ export class GroupManager extends EventEmitter {
         if (outcome.epoch) this.broadcastEpoch(message.groupId, outcome.epoch);
         this.sendEpochChain(message.groupId, session, 0);
         await this.distributeSenderKeyToPeer(message.groupId, session);
+        this.sendMetadata(message.groupId, session);
       } else if (outcome.kind === 'sync') {
         this.sendEpochChain(message.groupId, session, outcome.fromVersion);
+        await this.distributeSenderKeyToPeer(message.groupId, session);
+        this.sendMetadata(message.groupId, session);
+      } else if (outcome.kind === 'metadata') {
+        this.emit('group:metadataUpdated', { groupId: message.groupId });
       } else if (outcome.kind === 'leave') {
         const topic = deriveKey(message.groupId, 'networkselfmd-topic-v1', '', 32);
         await this.swarm.leave(Buffer.from(topic));
@@ -1113,11 +1236,13 @@ export class GroupManager extends EventEmitter {
 
       const outcome = this.replayRepo.accept<EpochOutcome>(reservation, () => {
         const group = this.groupRepo.find(message.groupId);
-        if (!group?.creator_public_key || !group.genesis_hash) {
+        const authority = group?.creator_public_key && group.genesis_hash
+          ? group : this.groupRepo.findRetainedAuthority(message.groupId);
+        if (!authority?.creator_public_key || !authority.genesis_hash) {
           throw new Error('Rejected epoch: group has no pinned provenance');
         }
-        const creator = new Uint8Array(group.creator_public_key);
-        const pinnedGenesisHash = new Uint8Array(group.genesis_hash);
+        const creator = new Uint8Array(authority.creator_public_key);
+        const pinnedGenesisHash = new Uint8Array(authority.genesis_hash);
         const latest = this.epochRepo.getLatestEpoch(groupIdHex);
 
         if (!latest) {
@@ -1180,6 +1305,9 @@ export class GroupManager extends EventEmitter {
           ) ?? false;
 
         this.epochRepo.saveEpoch(signed);
+        // Advance authenticated history for an inactive group only. Explicit
+        // join is still required to restore membership and generate secrets.
+        if (!group) return { kind: 'historical' };
         this.syncMembershipToEpoch(message.groupId, signed);
 
         if (localWasMember && !localIsMember) {

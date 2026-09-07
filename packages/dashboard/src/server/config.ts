@@ -31,6 +31,18 @@ export interface DashboardServerOptions {
   host: string;
   port: number;
   auth?: DashboardBasicAuth;
+  operatorOrigin?: string;
+  publicSite?: boolean;
+}
+
+export function validateOperatorOrigin(value: string): string {
+  const url = new URL(value);
+  if (!/^https?:\/\/[^/?#]+\/?$/i.test(value) || url.hostname.includes('*') ||
+      !['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+      url.pathname !== '/' || url.search || url.hash || value !== value.trim()) {
+    throw new Error('DASHBOARD_OPERATOR_ORIGIN must be an exact HTTP(S) origin without credentials, path, query or fragment');
+  }
+  return url.origin;
 }
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
@@ -75,5 +87,18 @@ export async function dashboardServerOptions(
       'Dashboard authentication is required when HOST is not loopback',
     );
   }
-  return { host, port, auth };
+  const operatorOrigin = env.DASHBOARD_OPERATOR_ORIGIN === undefined
+    ? undefined
+    : validateOperatorOrigin(env.DASHBOARD_OPERATOR_ORIGIN);
+  if (operatorOrigin && !auth) {
+    throw new Error('DASHBOARD_OPERATOR_ORIGIN requires dashboard authentication');
+  }
+  if (env.DASHBOARD_PUBLIC_SITE !== undefined && !['true', 'false'].includes(env.DASHBOARD_PUBLIC_SITE)) {
+    throw new Error('DASHBOARD_PUBLIC_SITE must be true or false');
+  }
+  const publicSite = env.DASHBOARD_PUBLIC_SITE === 'true';
+  if (publicSite && (!auth || !env.NETWORK_PUBLICATION_CONFIG)) {
+    throw new Error('DASHBOARD_PUBLIC_SITE requires dashboard authentication and NETWORK_PUBLICATION_CONFIG');
+  }
+  return { host, port, auth, ...(operatorOrigin ? { operatorOrigin } : {}), ...(publicSite ? { publicSite } : {}) };
 }

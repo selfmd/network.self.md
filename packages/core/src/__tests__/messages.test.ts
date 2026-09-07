@@ -22,7 +22,7 @@ describe('messages (CBOR encoding)', () => {
     noisePublicKey: new Uint8Array(32).fill(2),
     signature: new Uint8Array(64).fill(3),
     displayName: 'agent-1',
-    protocolVersion: 2,
+    protocolVersion: 3,
     timestamp: 1700000000000,
   };
 
@@ -41,7 +41,7 @@ describe('messages (CBOR encoding)', () => {
     const msg = decoded as typeof sampleHandshake;
     expect(msg.edPublicKey).toEqual(new Uint8Array(32).fill(1));
     expect(msg.displayName).toBe('agent-1');
-    expect(msg.protocolVersion).toBe(2);
+    expect(msg.protocolVersion).toBe(3);
   });
 
   it('decodeMessage throws on invalid type', () => {

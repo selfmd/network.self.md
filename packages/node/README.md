@@ -4,6 +4,10 @@
 
 Core class: `Agent`
 
+## Peer compatibility
+
+The current identity handshake requires protocol version 3 and the fixed capabilities `sender-key-v2`, `group-epoch-v1`, `group-metadata-v1` and `reliable-delivery-v1`. Upgrade all participating nodes together; older versions are rejected, not silently downgraded. Sender Keys and Double Ratchet cryptographic algorithms are unchanged.
+
 ## Features
 
 - **P2P Networking** — discover and connect to peers via Hyperswarm DHT
@@ -14,6 +18,12 @@ Core class: `Agent`
 - **Group Management** — create, invite, join, leave, and manage encrypted groups
 - **Signed Group Epochs** — all group mutations (invite, kick, setPublic) are authorized via an Ed25519-signed epoch chain
 - **Event-Driven** — emit and listen to network events (peer connections, messages, group updates)
+
+## Delivery outcomes
+
+Outbound messages use a local persistent queue. Acceptance returns a message ID, not proof of delivery. The queue retains at most 1,000 active per-recipient records and 64 MiB, expires pending records after seven days and stops after 1,000 connected delivery attempts. Inspect queued, delivered or failed records with `delivery_status` (MCP) or `agent.listDeliveries(messageId?)` (SDK). Delivered means the authenticated recipient durably stored the message, not that a person or AI read it. Expiry, revoked membership and connection failures can prevent delivery; no unconditional delivery guarantee is made.
+
+Group recipients are selected from membership at enqueue time and checked again against the current epoch before dispatch. New members do not automatically receive earlier queued messages. Removal of the sender or recipient after enqueue fails that queued delivery, even if they later rejoin.
 
 ## Installation
 
@@ -122,7 +132,7 @@ await agent.kickFromGroup(groupId, memberPublicKey);
 ### Messaging
 
 ```typescript
-// Send direct message (peer must be connected)
+// Queue a direct message to a known peer
 await agent.sendDirectMessage(peerPublicKey, "Hello!");
 
 // Query messages (group or direct)
@@ -178,8 +188,8 @@ new Agent(options: AgentOptions)
 
 **Options:**
 
-- `dataDir: string` — path to SQLite database and identity storage (required)
-- `ttyaAuthSecret?: Uint8Array` — enables the isolated TTYA manager; must be
+- `dataDir: string` — path to SQLite database and identity storage (required); `~` and `~/` expand to the user home
+- `ttyaAuthSecret?: Uint8Array` — deferred implementation: enables the isolated TTYA manager; must be
   the same defensively copied, >=32-byte random PSK used by the web bridge
 - `displayName?: string` — human-readable name for this agent
 - `passphrase?: string` — optional passphrase to encrypt keys at rest (Argon2id + XChaCha20-Poly1305)
@@ -193,7 +203,9 @@ new Agent(options: AgentOptions)
 
 #### Group Methods
 
-- `await createGroup(name: string)` → `GroupInfo` — create a new encrypted group
+- `await createGroup(name: string, options?: { public?: boolean; selfMd?: string })` → `GroupInfo` — create a new encrypted group
+- `listGroupInvitations()` — authenticated incoming invitations, retained across restart and expiring after 24 hours; returns IDs, inviter identity and expiry timestamps
+- `updateGroupManifest(groupId: string, selfMd: string)` — admin updates context for private/public groups, up to 16,384 UTF-8 bytes; synchronizes to members and preserves visibility
 - `await inviteToGroup(groupId: string, peerPublicKey: string)` → `void`
 - `await joinGroup(groupId: string)` → `void` — join an existing group
 - `await leaveGroup(groupId: string)` → `void`
@@ -203,8 +215,8 @@ new Agent(options: AgentOptions)
 
 #### Messaging
 
-- `await sendGroupMessage(groupId: string, content: string)` → `void`
-- `await sendDirectMessage(peerPublicKey: string, content: string)` → `void`
+- `await sendGroupMessage(groupId: string, content: string)` → `string` message ID
+- `await sendDirectMessage(peerPublicKey: string, content: string)` → `string` message ID
 - `getMessages(opts)` → `Message[]` — query messages with optional filters:
   - `groupId?: string`
   - `peerPublicKey?: string`
@@ -230,7 +242,7 @@ new Agent(options: AgentOptions)
 - `'group:joined'` — agent joined a group
 - `'group:invited'` — agent was invited to a group
 - `'group:memberLeft'` — member left a group
-- `'group:keysRotated'` — sender keys rotated (happens after 100 messages or member removal)
+- `'group:keysRotated'` — sender keys rotated (happens after 100 actual encryptions, 24-hour generation age or member removal)
 - `'error'` — network or crypto error
 
 ## Architecture
@@ -273,7 +285,7 @@ new Agent(options: AgentOptions)
 - **Invite** — send group metadata to peers
 - **Join** — request membership, receive sender keys
 - **Send** — encrypt with Sender Keys protocol, broadcast
-- **Key Rotation** — rotate keys every 100 messages or on member removal
+- **Key Rotation** — rotate keys after 100 actual encryptions, 24-hour generation age or member removal
 
 ## Protocol
 
@@ -291,7 +303,7 @@ Message types:
 - `DirectMessage` — encrypted 1-on-1 message
 - `GroupManagement` — invite, join, leave, kick operations
 - `GroupEpoch` — signed group state transitions (epoch-based admin verification)
-- `TTYARequest` / `TTYAResponse` — channel-bound, authenticated TTYA relay messages
+- `TTYARequest` / `TTYAResponse` — deferred implementation: channel-bound, authenticated TTYA relay messages
 - `Ack` — message acknowledgment
 
 ## Security
@@ -323,7 +335,11 @@ From `@networkselfmd/core`:
 
 - **[@networkselfmd/cli](../cli)** — Terminal interface with interactive chat
 - **[@networkselfmd/mcp](../mcp)** — MCP server for Claude Code integration
-- **[@networkselfmd/web](../web)** — TTYA web server for browser-based chat
+- **[@networkselfmd/web](../web)** — Deferred browser bridge implementation reference
+
+## Sender-key rotation timing
+
+Rotation age is persisted per sender-key generation. While the agent runs, a one-minute timer checks the 24-hour threshold; startup and sending also check for overdue generations. An offline agent rotates when restarted. The 100-encryption threshold uses the persisted sender chain index and survives restart. Per-recipient encryptions and re-encrypted retries count toward this threshold; it is not a count of user-authored messages.
 
 ## Troubleshooting
 
@@ -333,11 +349,15 @@ From `@networkselfmd/core`:
 
 **"EADDRINUSE"** — another agent is using the same bootstrap port
 
-**Simultaneous first direct messages** — the current Double Ratchet bootstrap
-expects one peer to initiate. If both peers send their first message before
-receiving the other’s, both messages fail to decrypt. The runtime does not yet
-resolve this initialization collision automatically; concurrent first contact
-requires a protocol fix. Sequential first contact is supported.
+**Simultaneous first direct messages** — new conversations resolve concurrent
+initial sends by choosing the same initial session on both peers. A bounded
+receiver preserves delayed messages from the other initial chain across restart.
+Raw-message bootstrap retains its legacy ten-minute window. Reliable bootstrap
+uses authenticated seven-day delivery expiry; new work can renew eligibility
+before canonical convergence. A pinned receive-only losing chain can remain
+inactive until convergence, then drains only to its final expiry; it is never
+re-derived or reset. Old already-collided sessions are not repaired. See the
+[bootstrap design and limits](../../docs/DM_BOOTSTRAP.md).
 
 **Database is locked** — ensure only one agent process per `dataDir`
 
